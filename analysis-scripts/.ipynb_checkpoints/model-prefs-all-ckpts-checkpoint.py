@@ -139,29 +139,29 @@ MODEL_CONFIGS = {
     # BabyLM models - 100M dataset
     "znhoughton/opt-babylm-125m-seed42": {
         "tokens_per_step": 655360,  # 1024 × 320 × 1 × 2
-        "tokenizer": "models/opt-babylm-100m-bpe"
+        "tokenizer": "znhoughton/opt-babylm-125m-seed42"  # Use HuggingFace repo ID
     },
     "znhoughton/opt-babylm-350m-seed42": {
         "tokens_per_step": 327680,  # 1024 × 80 × 2 × 2
-        "tokenizer": "models/opt-babylm-100m-bpe"
+        "tokenizer": "znhoughton/opt-babylm-350m-seed42"  
     },
     "znhoughton/opt-babylm-1.3b-seed42": {
         "tokens_per_step": 327680,  # 1024 × 40 × 4 × 2
-        "tokenizer": "models/opt-babylm-100m-bpe"
+        "tokenizer": "znhoughton/opt-babylm-1.3b-seed42"  
     },
     
     # Pile models - 10B dataset
     "znhoughton/opt-pile-125m-seed42": {
         "tokens_per_step": 655360,  # 1024 × 320 × 1 × 2
-        "tokenizer": "models/opt-pile-bpe"
+        "tokenizer": "znhoughton/opt-pile-125m-seed42"  
     },
     "znhoughton/opt-pile-350m-seed42": {
         "tokens_per_step": 327680,  # 1024 × 80 × 2 × 2
-        "tokenizer": "models/opt-pile-bpe"
+        "tokenizer": "znhoughton/opt-pile-350m-seed42"  
     },
     "znhoughton/opt-pile-1.3b-seed42": {
         "tokens_per_step": 327680,  # 1024 × 40 × 4 × 2
-        "tokenizer": "models/opt-pile-bpe"
+        "tokenizer": "znhoughton/opt-pile-1.3b-seed42"  
     },
 }
 
@@ -171,7 +171,45 @@ MODEL_CONFIGS = {
 # ==========================================================
 list_of_prompts = [
     " "
-    # Add more prompts as needed
+    "Especially the ",
+    "For instance ",
+    "In some cases ",
+    "Every now and then ",
+    "Occasionally you’ll find ",
+    "There can be examples like ",
+    "You might notice things like ",
+    "People sometimes mention ",
+    "Sometimes just ",
+    "Nothing specific comes to mind except the ",
+    "It reminded me loosely of the ",
+    "There was a vague reference to the ",
+    "Unexpectedly the ",
+    "It’s easy to overlook the ",
+    "There used to be talk of ",
+    "Out in the distance was the ",
+    "What puzzled everyone was the ",
+    "At some point I overheard ",
+    "Without warning came ",
+    "A friend once described the ",
+    "The scene shifted toward ",
+    "Nobody expected to hear about ",
+    "Things eventually turned toward ",
+    "The conversation eventually returned to ",
+    "I only remember a hint of the ",
+    "I couldn’t quite place the ",
+    "It somehow led back to the ",
+    "What stood out most was the ",
+    "The oddest part involved the ",
+    "Later on, people were discussing ",
+    "There was this fleeting idea about ",
+    "I once heard someone bring up the ",
+    "There was a moment involving the ",
+    "It all started when we noticed the ",
+    "Another example floated around concerning the ",
+    "I came across something about the ",
+    "A situation arose involving the ",
+    "The conversation drifted toward the ",
+    "At one point we ended up discussing the "
 ]
 
 def main():

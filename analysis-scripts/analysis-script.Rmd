@@ -1,0 +1,192 @@
+---
+title: "analysis-script"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Model analyses
+
+### load human data
+
+```{r}
+
+library(tidyverse)
+
+babylm_trigrams =
+  read_csv("../Data/babylm_eng_trigrams.csv") %>%
+  mutate(trigram = tolower(trigram))
+
+all_human_data = read_csv('../Data/all_human_data.csv') %>%
+  mutate(Attested = ifelse(
+    OverallFreq == 0, 0, 1
+  )) %>%
+  select(participant, resp, Word1, Word2, Alpha, Nonalpha, OverallFreq, Word1_freq, Word2_freq, Form, Percept, Culture, Power, Intense, Icon, Freq, Len, Lapse, "*BStress", RelFreq, GenPref, Attested) %>%
+  mutate(y_vals = 0.02191943 + 0.23925834*Form +  0.24889543*Percept +  0.41836997*Culture +   0.25967334*Power +  0.01867604*Intense +  1.30365980*Icon +   0.08553552*Freq +  0.15241566*Len - 0.19381657*Lapse +  0.36019221*`*BStress`) %>%
+  mutate(GenPref = 1/(1+exp(-1*y_vals))) %>%
+  mutate(GenPref = GenPref - 0.5)
+
+all_human_data = all_human_data %>%
+  mutate(resp_binary = case_when(
+    resp == 'alpha' ~ 1,
+    resp == 'nonalpha' ~ 0
+  ))
+
+all_human_data_novel    <- all_human_data %>% filter(Attested == 0)
+all_human_data_attested <- all_human_data %>% filter(Attested == 1)
+
+
+
+clean_word = function(x) {
+  x %>%
+    tolower() %>%
+    stringr::str_remove_all("^[[:punct:]]+|[[:punct:]]+$")
+}
+
+all_human_data =
+  all_human_data %>%
+  mutate(
+    Word1_clean = clean_word(Word1),
+    Word2_clean = clean_word(Word2)
+  )
+
+all_human_data =
+  all_human_data %>%
+  mutate(
+    babyLM_alpha_trigram    = paste(Word1_clean, "and", Word2_clean),
+    babyLM_nonalpha_trigram = paste(Word2_clean, "and", Word1_clean)
+  )
+
+all_human_data =
+  all_human_data %>%
+  left_join(
+    babylm_trigrams,
+    by = c("babyLM_alpha_trigram" = "trigram")
+  ) %>%
+  rename(babyLMalphacount = count)
+
+all_human_data =
+  all_human_data %>%
+  left_join(
+    babylm_trigrams,
+    by = c("babyLM_nonalpha_trigram" = "trigram")
+  ) %>%
+  rename(babyLMnonalphacount = count)
+
+
+all_human_data =
+  all_human_data %>%
+  mutate(
+    babyLMalphacount    = coalesce(babyLMalphacount, 0L),
+    babyLMnonalphacount = coalesce(babyLMnonalphacount, 0L)
+  )
+
+
+babylm_unigrams =
+  read_csv("../Data/babylm_eng_unigrams.csv") %>%
+  mutate(word = tolower(word))
+
+all_human_data = all_human_data %>%
+  left_join(
+    babylm_unigrams,
+    by = c("Word1_clean" = "word")
+  ) %>%
+  rename(Word1BabyLMCount = count) %>%
+  left_join(
+    babylm_unigrams,
+    by = c("Word2_clean" = "word")
+  ) %>%
+  rename(Word2BabyLMCount = count) %>%
+  mutate(
+    Word1BabyLMCount = coalesce(Word1BabyLMCount, 0L),
+    Word2BabyLMCount = coalesce(Word2BabyLMCount, 0L)
+  )
+
+all_human_data = all_human_data %>%
+  filter(Word1BabyLMCount > 0 & Word2BabyLMCount > 0)
+```
+
+
+### load llm data
+
+```{r}
+
+library(brms)
+out_dir = "../Data/checkpoint_results"
+
+llm_data = list.files(out_dir, pattern = "\\.csv$", full.names = TRUE) %>%
+  map_dfr(read_csv, show_col_types = FALSE)
+
+colnames(llm_data)
+colnames(all_human_data)
+
+all_human_data = all_human_data %>%
+  mutate(binom = Alpha)
+
+avg_human_pref = all_human_data %>%
+  group_by(binom, Word1, Word2, Alpha, Nonalpha, OverallFreq, Word1_freq, Word2_freq, Form, Percept, Culture, Power, Intense, Icon, Freq, Len, Lapse, `*BStress`, RelFreq, GenPref, Attested, y_vals, Word1_clean, Word2_clean, babyLM_alpha_trigram, babyLM_nonalpha_trigram, babyLMalphacount, babyLMnonalphacount, Word1BabyLMCount, Word2BabyLMCount) %>%
+  summarize(
+    hum_pref = mean(resp_binary),
+    .groups = "drop"
+  )
+
+llm_and_human_data = llm_data %>%
+  left_join(avg_human_pref)
+
+llm_and_human_data_nonce = llm_and_human_data %>%
+  filter(Attested == 0) 
+
+llm_and_human_data_nonce = llm_and_human_data %>%
+  filter(Attested == 1)
+```
+
+
+### Plot 
+
+```{r}
+llm_and_human_data_nonce_plot = llm_and_human_data_nonce %>%
+  group_by(model, checkpoint, tokens) %>%
+  summarize(hum_model_cor = cor(preference, hum_pref))
+
+llm_and_human_data_attested_plot = llm_and_human_data_nonce %>%
+  group_by(model, checkpoint, tokens) %>%
+  summarize(hum_model_cor = cor(preference, hum_pref))
+
+ggplot(llm_and_human_data_nonce_plot %>% arrange(tokens),
+       aes(x = tokens, y = hum_model_cor)) +
+  geom_point(size = 2) +
+  geom_smooth(se = FALSE) +
+  facet_wrap(~ model, scales = "free_x") +
+  labs(
+    x = "Training tokens",
+    y = "Correlation (human vs model)",
+    title = "Emergence of Human-like Preferences During Training"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+
+ggplot(llm_and_human_data_attested_plot %>% arrange(tokens),
+       aes(x = tokens, y = hum_model_cor)) +
+  geom_point(size = 2) +
+  geom_smooth(se = FALSE) +
+  facet_wrap(~ model, scales = "free_x") +
+  labs(
+    x = "Training tokens",
+    y = "Correlation (human vs model)",
+    title = "Emergence of Human-like Preferences During Training"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
