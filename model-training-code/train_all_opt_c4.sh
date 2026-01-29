@@ -5,10 +5,10 @@ set -euo pipefail
 # USER SETTINGS
 ############################################
 
-DATASET_NAME="EleutherAI/pile"
-DATASET_CONFIG="pile_cc"
+DATASET_NAME="allenai/c4"
+DATASET_CONFIG="en"
 
-TOKENIZER_NAME="opt-pile-bpe"
+TOKENIZER_NAME="opt-babylm-100m-bpe"  # Your existing tokenizer
 BLOCK_SIZE=1024
 VOCAB_SIZE=8192
 
@@ -18,34 +18,20 @@ TOKENS_PER_CHECKPOINT=10000000
 # Total training budget: 10B tokens
 TOTAL_TOKENS=10000000000
 
-SAVE_TOTAL_LIMIT=1       # only keep latest locally
+SAVE_TOTAL_LIMIT=1
 WARMUP_STEPS=2000
 SEED=42
 
-############################################
-# STEP 0: Train tokenizer ONCE
-############################################
-
 TOKENIZER_PATH="models/${TOKENIZER_NAME}"
 
-if [ -d "${TOKENIZER_PATH}" ]; then
-  echo "=== Tokenizer already exists at ${TOKENIZER_PATH}, skipping ==="
-else
-  echo "=== Training tokenizer ==="
-  python tokenizer_and_config.py \
-    --base_model facebook/opt-125m \
-    --model_name ${TOKENIZER_NAME} \
-    --train_file ${DATASET_NAME} \
-    --dataset_config ${DATASET_CONFIG} \
-    --from_iterator \
-    --bpe \
-    --vocab ${VOCAB_SIZE} \
-    --hidden_size 768 \
-    --attention_heads 12 \
-    --layers 12 \
-    --intermediate_size 3072 \
-    --max_len ${BLOCK_SIZE}
+# Verify tokenizer exists
+if [ ! -d "${TOKENIZER_PATH}" ]; then
+  echo "ERROR: Tokenizer not found at ${TOKENIZER_PATH}"
+  echo "Please train the tokenizer first or check the path."
+  exit 1
 fi
+
+echo "=== Using existing tokenizer at ${TOKENIZER_PATH} ==="
 
 ############################################
 # FUNCTION: train one OPT model
@@ -61,47 +47,43 @@ train_opt () {
     BATCH=$7
     GRAD_ACCUM=$8
     LR=$9
-
+    
     # Calculate tokens per step, max steps, and save frequency
     TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * 2))
     MAX_STEPS=$((TOTAL_TOKENS / TOKENS_PER_STEP))
     SAVE_STEPS=$((TOKENS_PER_CHECKPOINT / TOKENS_PER_STEP))
-
-    MODEL_NAME="opt-pile-${MODEL_SIZE}"
+    
+    MODEL_NAME="opt-c4-${MODEL_SIZE}"
     MODEL_PATH="models/${MODEL_NAME}"
     RUN_DIR="runs/${MODEL_NAME}"
-
+    
     echo "============================================================"
-    echo "=== Training ${MODEL_NAME} on The Pile ==="
+    echo "=== Training ${MODEL_NAME} on C4 with STREAMING ==="
     echo "=== Tokens/step: ${TOKENS_PER_STEP} ==="
     echo "=== Max steps: ${MAX_STEPS} (${TOTAL_TOKENS} tokens) ==="
     echo "=== Save every ${SAVE_STEPS} steps (${TOKENS_PER_CHECKPOINT} tokens) ==="
     echo "============================================================"
-
-    # Build config (cheap + deterministic)
-    python tokenizer_and_config.py \
+    
+    # Create config only (no tokenizer training)
+    python create_config_only.py \
         --base_model ${BASE_MODEL} \
         --model_name ${MODEL_NAME} \
-        --train_file ${DATASET_NAME} \
-        --dataset_config ${DATASET_CONFIG} \
-        --from_iterator \
-        --bpe \
-        --vocab ${VOCAB_SIZE} \
+        --source_tokenizer ${TOKENIZER_PATH} \
         --hidden_size ${HIDDEN} \
         --attention_heads ${HEADS} \
         --layers ${LAYERS} \
         --intermediate_size ${FFN} \
         --max_len ${BLOCK_SIZE}
-
-    # Train
+    
+    # Train with STREAMING enabled
     CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_autoreg.py \
         --model_type opt \
         --config_name ${MODEL_PATH} \
         --tokenizer_name ${TOKENIZER_PATH} \
         --dataset_name ${DATASET_NAME} \
         --dataset_config_name ${DATASET_CONFIG} \
+        --streaming \
         --do_train \
-        --do_eval \
         --bf16 \
         --gradient_checkpointing \
         --block_size ${BLOCK_SIZE} \
@@ -120,9 +102,9 @@ train_opt () {
         --hub_model_id znhoughton/${MODEL_NAME}-seed${SEED} \
         --hub_strategy checkpoint \
         --ddp_find_unused_parameters False
-
+    
     echo "=== Finished training ${MODEL_NAME} ==="
-
+    
     # Free disk before next model
     echo "=== Deleting local run directory ${RUN_DIR} ==="
     rm -rf "${RUN_DIR}"
@@ -130,8 +112,7 @@ train_opt () {
 
 ############################################
 # OPT-125M
-# OLD: tokens/step = 1024 × 128 × 1 × 2 = 262,144
-# NEW: tokens/step = 1024 × 320 × 1 × 2 = 655,360 (+150% throughput)
+# tokens/step = 1024 × 320 × 1 × 2 = 655,360
 # max_steps = 10B / 655,360 ≈ 15,259 steps
 # save_steps = 10M / 655,360 ≈ 15 steps
 ############################################
@@ -149,8 +130,7 @@ train_opt \
 
 ############################################
 # OPT-350M
-# OLD: tokens/step = 1024 × 32 × 4 × 2 = 262,144
-# NEW: tokens/step = 1024 × 80 × 2 × 2 = 327,680 (+25% throughput)
+# tokens/step = 1024 × 80 × 2 × 2 = 327,680
 # max_steps = 10B / 327,680 ≈ 30,518 steps
 # save_steps = 10M / 327,680 ≈ 30 steps
 ############################################
@@ -168,8 +148,7 @@ train_opt \
 
 ############################################
 # OPT-1.3B
-# OLD: tokens/step = 1024 × 16 × 8 × 2 = 262,144
-# NEW: tokens/step = 1024 × 40 × 4 × 2 = 327,680 (+25% throughput)
+# tokens/step = 1024 × 40 × 4 × 2 = 327,680
 # max_steps = 10B / 327,680 ≈ 30,518 steps
 # save_steps = 10M / 327,680 ≈ 30 steps
 ############################################
