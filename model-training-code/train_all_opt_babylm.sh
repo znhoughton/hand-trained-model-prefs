@@ -61,19 +61,41 @@ train_opt () {
     echo "=== Save every ${SAVE_STEPS} steps (${TOKENS_PER_CHECKPOINT} tokens) ==="
     echo "============================================================"
     
-    # Build config (cheap, safe to re-run)
-    python tokenizer_and_config.py \
-        --base_model ${BASE_MODEL} \
-        --model_name ${MODEL_NAME} \
-        --train_file ${DATASET} \
-        --from_iterator \
-        --bpe \
-        --vocab ${VOCAB_SIZE} \
-        --hidden_size ${HIDDEN} \
-        --attention_heads ${HEADS} \
-        --layers ${LAYERS} \
-        --intermediate_size ${FFN} \
-        --max_len ${BLOCK_SIZE}
+    # Check if checkpoint exists
+    RESUME_ARG=""
+    if [ -d "${RUN_DIR}" ]; then
+        LATEST_CHECKPOINT=$(ls -d ${RUN_DIR}/checkpoint-* 2>/dev/null | sort -V | tail -n 1 || echo "")
+        if [ -n "${LATEST_CHECKPOINT}" ]; then
+            CHECKPOINT_NUM=$(basename ${LATEST_CHECKPOINT} | sed 's/checkpoint-//')
+            echo "=== FOUND CHECKPOINT: ${LATEST_CHECKPOINT} ==="
+            echo "=== Checkpoint step: ${CHECKPOINT_NUM} ==="
+            echo "=== RESUMING FROM CHECKPOINT ==="
+            RESUME_ARG="--resume_from_checkpoint ${LATEST_CHECKPOINT}"
+        else
+            echo "=== No checkpoint found, starting from scratch ==="
+        fi
+    else
+        echo "=== No run directory found, starting from scratch ==="
+    fi
+    
+    # Build config only if not resuming (avoid overwriting)
+    if [ -z "${RESUME_ARG}" ]; then
+        echo "=== Creating model config ==="
+        python tokenizer_and_config.py \
+            --base_model ${BASE_MODEL} \
+            --model_name ${MODEL_NAME} \
+            --train_file ${DATASET} \
+            --from_iterator \
+            --bpe \
+            --vocab ${VOCAB_SIZE} \
+            --hidden_size ${HIDDEN} \
+            --attention_heads ${HEADS} \
+            --layers ${LAYERS} \
+            --intermediate_size ${FFN} \
+            --max_len ${BLOCK_SIZE}
+    else
+        echo "=== Skipping config creation (resuming from checkpoint) ==="
+    fi
     
     # Train
     CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_autoreg.py \
@@ -97,10 +119,11 @@ train_opt () {
         --num_train_epochs 20 \
         --seed ${SEED} \
         --output_dir ${RUN_DIR} \
-        --push_to_hub \
-        --hub_model_id znhoughton/${MODEL_NAME}-seed${SEED} \
-        --hub_strategy checkpoint \
-        --ddp_find_unused_parameters False
+        ${RESUME_ARG}
+        #--push_to_hub \
+        #--hub_model_id znhoughton/${MODEL_NAME}-seed${SEED} \
+        #--hub_strategy checkpoint \
+        #--ddp_find_unused_parameters False
     
     echo "=== Finished training ${MODEL_NAME} ==="
     # IMPORTANT: free disk before next model
