@@ -180,7 +180,7 @@ ggplot(llm_and_human_data_attested_plot %>% arrange(tokens),
        aes(x = tokens, y = hum_model_cor)) +
   geom_point(size = 2) +
   geom_smooth(se = FALSE) +
-  facet_wrap(~ model, scales = "free_x") +
+  facet_wrap(~ model) +
   labs(
     x = "Training tokens",
     y = "Correlation (human vs model)",
