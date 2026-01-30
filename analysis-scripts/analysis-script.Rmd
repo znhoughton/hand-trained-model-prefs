@@ -118,10 +118,14 @@ library(brms)
 out_dir = "../Data/checkpoint_results"
 
 llm_data = list.files(out_dir, pattern = "\\.csv$", full.names = TRUE) %>%
-  map_dfr(read_csv, show_col_types = FALSE)
+  map_dfr(read_csv, na = character(), trim_ws = FALSE, show_col_types = FALSE)
 
 colnames(llm_data)
 colnames(all_human_data)
+
+llm_data = llm_data %>%
+  group_by(model, binom, checkpoint, step, tokens) %>%
+  summarize(preference = mean(preference))
 
 all_human_data = all_human_data %>%
   mutate(binom = Alpha)
@@ -139,7 +143,7 @@ llm_and_human_data = llm_data %>%
 llm_and_human_data_nonce = llm_and_human_data %>%
   filter(Attested == 0) 
 
-llm_and_human_data_nonce = llm_and_human_data %>%
+llm_and_human_data_attested = llm_and_human_data %>%
   filter(Attested == 1)
 ```
 
@@ -151,7 +155,7 @@ llm_and_human_data_nonce_plot = llm_and_human_data_nonce %>%
   group_by(model, checkpoint, tokens) %>%
   summarize(hum_model_cor = cor(preference, hum_pref))
 
-llm_and_human_data_attested_plot = llm_and_human_data_nonce %>%
+llm_and_human_data_attested_plot = llm_and_human_data_attested %>%
   group_by(model, checkpoint, tokens) %>%
   summarize(hum_model_cor = cor(preference, hum_pref))
 
@@ -159,11 +163,11 @@ ggplot(llm_and_human_data_nonce_plot %>% arrange(tokens),
        aes(x = tokens, y = hum_model_cor)) +
   geom_point(size = 2) +
   geom_smooth(se = FALSE) +
-  facet_wrap(~ model, scales = "free_x") +
+  facet_wrap(~ model) +
   labs(
     x = "Training tokens",
     y = "Correlation (human vs model)",
-    title = "Emergence of Human-like Preferences During Training"
+    title = "Nonce Binoms"
   ) +
   theme_minimal(base_size = 13) +
   theme(
@@ -180,7 +184,7 @@ ggplot(llm_and_human_data_attested_plot %>% arrange(tokens),
   labs(
     x = "Training tokens",
     y = "Correlation (human vs model)",
-    title = "Emergence of Human-like Preferences During Training"
+    title = "Attested Binoms"
   ) +
   theme_minimal(base_size = 13) +
   theme(
