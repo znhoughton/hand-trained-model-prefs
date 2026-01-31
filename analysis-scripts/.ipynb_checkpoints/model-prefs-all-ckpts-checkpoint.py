@@ -17,6 +17,8 @@ import traceback
 import multiprocessing as mp
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
+import tempfile
+import shutil
 
 import torch
 import pandas as pd
@@ -44,16 +46,56 @@ USE_TORCH_COMPILE = ENABLE_COMPILE and (os.name != "nt")
 
 # Prompts
 LIST_OF_PROMPTS = [
-    " ",
+    "Well, ",
+    "So, ",
+    "Then ",
+    "Possibly ",
+    "Or even ",
+    "Maybe a ",
+    "Perhaps a ",
+    "At times ",
+    "Suddenly, the ",
+    "Honestly just ",
     "Especially the ",
     "For instance ",
     "In some cases ",
     "Every now and then ",
-    "Occasionally you'll find ",
+    "Occasionally you’ll find ",
     "There can be examples like ",
     "You might notice things like ",
     "People sometimes mention ",
     "Sometimes just ",
+    "Nothing specific comes to mind except the ",
+    "It reminded me loosely of the ",
+    "There was a vague reference to the ",
+    "Unexpectedly the ",
+    "It’s easy to overlook the ",
+    "There used to be talk of ",
+    "Out in the distance was the ",
+    "What puzzled everyone was the ",
+    "At some point I overheard ",
+    "Without warning came ",
+    "A friend once described the ",
+    "The scene shifted toward ",
+    "Nobody expected to hear about ",
+    "Things eventually turned toward ",
+    "The conversation eventually returned to ",
+    "I only remember a hint of the ",
+    "I couldn’t quite place the ",
+    "It somehow led back to the ",
+    "What stood out most was the ",
+    "The oddest part involved the ",
+    "Later on, people were discussing ",
+    "There was this fleeting idea about ",
+    "I once heard someone bring up the ",
+    "There was a moment involving the ",
+    "It all started when we noticed the ",
+    "Another example floated around concerning the ",
+    "I came across something about the ",
+    "A situation arose involving the ",
+    "The conversation drifted toward the ",
+    "At one point we ended up discussing ",
+    "Out of nowhere came a mention of the ",
 ]
 
 MODEL_CONFIGS = {
@@ -73,15 +115,15 @@ MODEL_CONFIGS = {
     # C4
     "znhoughton/opt-c4-125m-seed42": {
         "tokens_per_step": 655_360,
-        "tokenizer": "znhoughton/opt-pile-125m-seed42",
+        "tokenizer": "znhoughton/opt-c4-125m-seed42",
     },
     # "znhoughton/opt-c4-350m-seed42": {
-    #     "tokens_per_step": 327_680,
-    #     "tokenizer": "znhoughton/opt-pile-350m-seed42",
+    #     "tokens_per_step": 655_360,
+    #     "tokenizer": "znhoughton/opt-c4-350m-seed42",
     # },
     # "znhoughton/opt-c4-1.3b-seed42": {
-    #     "tokens_per_step": 327_680,
-    #     "tokenizer": "znhoughton/opt-pile-1.3b-seed42",
+    #     "tokens_per_step": 655_360,
+    #     "tokenizer": "znhoughton/opt-c4-1.3b-seed42",
     # },
 }
 
@@ -170,52 +212,40 @@ def get_model_checkpoints(repo_id: str, tokens_per_step: int) -> List[Dict[str, 
 
     return checkpoints
 
-
-def check_prompts_in_file(filepath: str, expected_prompts: List[str]) -> Dict[str, List[str]]:
+def check_prompts_in_file(filepath: str, expected_prompts: List[str]) -> Dict[str, Any]:
     """
-    Check which prompts are present/missing in an existing CSV file,
-    and for each present prompt, verify it has complete binomial coverage.
+    Determine which (prompt, binom) pairs are missing.
+    Never deletes existing data.
     """
     binoms_df = pd.read_csv(BINOMS_CSV)
     expected_binoms = set(f"{r.Word1} and {r.Word2}" for r in binoms_df.itertuples())
-    expected_binom_count = len(expected_binoms)
 
     try:
         df = pd.read_csv(filepath)
-        existing_prompts = set(df["prompt"].unique())
-        expected_set = set(expected_prompts)
-
-        missing_prompts = sorted(expected_set - existing_prompts)
-
-        incomplete_prompts = []
-        for prompt in existing_prompts & expected_set:
-            prompt_df = df[df["prompt"] == prompt]
-            prompt_binoms = set(prompt_df["binom"].unique())
-            if len(prompt_binoms) != expected_binom_count:
-                incomplete_prompts.append(prompt)
-                print(f"    ⚠️ Prompt '{prompt[:30]}...' has {len(prompt_binoms)}/{expected_binom_count} binomials")
-
-        prompts_to_run = sorted(set(missing_prompts + incomplete_prompts))
-
-        if missing_prompts:
-            print(f"    📝 {len(missing_prompts)} prompts missing entirely")
-        if incomplete_prompts:
-            print(f"    ⚠️ {len(incomplete_prompts)} prompts have incomplete binomial coverage")
-
-        return {
-            "missing_prompts": missing_prompts,
-            "incomplete_prompts": incomplete_prompts,
-            "prompts_to_run": prompts_to_run,
-        }
-
     except Exception as e:
         print(f"    ⚠️ Error reading {filepath}: {e}")
-        print(f"    Will re-run all prompts for this checkpoint")
         return {
-            "missing_prompts": expected_prompts,
-            "incomplete_prompts": [],
-            "prompts_to_run": expected_prompts,
+            "missing_pairs": None,  # signal: rerun everything
         }
+
+    missing_pairs = []
+
+    for prompt in expected_prompts:
+        prompt_df = df[df["prompt"] == prompt]
+        seen_binoms = set(prompt_df["binom"].unique())
+        missing = expected_binoms - seen_binoms
+
+        for binom in missing:
+            missing_pairs.append((prompt, binom))
+
+    if missing_pairs:
+        print(f"    ⚠️ Missing {len(missing_pairs)} (prompt, binom) pairs")
+    else:
+        print("    ✅ All prompts complete")
+
+    return {
+        "missing_pairs": missing_pairs,
+    }
 
 
 @torch.inference_mode()
@@ -357,14 +387,12 @@ class WorkItem:
     tokens_per_step: int
     checkpoint: Dict[str, Any]
 
-
 def run_work_item(item: WorkItem, device: str, out_dir: str) -> None:
     model_name = item.model_name
     ckpt = item.checkpoint
     eval_id = f"{model_name.split('/')[-1]}_{ckpt['checkpoint']}"
     out_path = os.path.join(out_dir, f"{eval_id}.csv")
 
-    # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(item.tokenizer_id)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -374,15 +402,17 @@ def run_work_item(item: WorkItem, device: str, out_dir: str) -> None:
     if os.path.exists(out_path):
         print(f"\n📄 Found existing file: {eval_id}")
         check_result = check_prompts_in_file(out_path, LIST_OF_PROMPTS)
-        prompts_to_run = check_result["prompts_to_run"]
 
-        if not prompts_to_run:
-            print("  ✅ All prompts complete, skipping")
-            return
-
-        print(f"  🔄 Need to evaluate {len(prompts_to_run)} prompts")
-        existing_df = pd.read_csv(out_path)
-        existing_df = existing_df[~existing_df["prompt"].isin(check_result["incomplete_prompts"])]
+        if check_result["missing_pairs"] is None:
+            prompts_to_run = LIST_OF_PROMPTS
+            existing_df = None
+        else:
+            missing_pairs = check_result["missing_pairs"]
+            if not missing_pairs:
+                print("  ✅ All prompts complete, skipping")
+                return
+            prompts_to_run = sorted(set(p for p, _ in missing_pairs))
+            existing_df = pd.read_csv(out_path)
     else:
         prompts_to_run = LIST_OF_PROMPTS
         existing_df = None
@@ -390,38 +420,61 @@ def run_work_item(item: WorkItem, device: str, out_dir: str) -> None:
     print(f"\n🚀 Evaluating {ckpt['checkpoint']} ({ckpt['tokens']:,} tokens) - {len(prompts_to_run)} prompts")
     print("  📥 Loading model...")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        revision=ckpt["tag"],
-        torch_dtype=torch.float16 if device != "cpu" else torch.float32,
-        low_cpu_mem_usage=True,
-    ).to(device).eval()
+    tmp_cache = tempfile.mkdtemp(prefix="hf_ckpt_")
 
-    # Optional compile once per worker process (compile is per-model object)
-    if USE_TORCH_COMPILE:
-        try:
-            model = torch.compile(model, mode=COMPILE_MODE)
-            print("  ⚡ Model compiled with torch.compile")
-        except Exception as e:
-            print(f"  ⚠️ torch.compile failed (continuing uncompiled): {e}")
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            revision=ckpt["tag"],
+            torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+            low_cpu_mem_usage=True,
+            cache_dir=tmp_cache,
+        ).to(device).eval()
 
-    dfs = []
-    print("  🔄 Processing prompts...")
-    for prompt_idx, prompt in enumerate(tqdm(prompts_to_run, desc="  prompts", leave=False), 1):
-        df_result = get_model_prefs(prompt, model_name, ckpt, tokenizer, model, device)
-        dfs.append(df_result)
-        print(f"    ✅ Completed prompt {prompt_idx}/{len(prompts_to_run)}")
+        if USE_TORCH_COMPILE:
+            try:
+                model = torch.compile(model, mode=COMPILE_MODE)
+                print("  ⚡ Model compiled with torch.compile")
+            except Exception as e:
+                print(f"  ⚠️ torch.compile failed (continuing uncompiled): {e}")
 
-    new_df = pd.concat(dfs, ignore_index=True)
-    final_df = pd.concat([existing_df, new_df], ignore_index=True) if existing_df is not None else new_df
+        dfs = []
+        print("  🔄 Processing prompts...")
+        for prompt_idx, prompt in enumerate(
+            tqdm(prompts_to_run, desc="  prompts", leave=False), 1
+        ):
+            df_result = get_model_prefs(
+                prompt, model_name, ckpt, tokenizer, model, device
+            )
+            dfs.append(df_result)
+            print(f"    ✅ Completed prompt {prompt_idx}/{len(prompts_to_run)}")
 
-    print("  💾 Saving results...")
-    atomic_write_csv(final_df, out_path)
-    print(f"  ✅ Saved {len(final_df)} total rows ({len(new_df)} new) to {out_path}")
+        new_df = pd.concat(dfs, ignore_index=True)
 
-    # Cleanup
-    del model
-    torch.cuda.empty_cache()
+        if existing_df is not None:
+            existing_keys = set(zip(existing_df["prompt"], existing_df["binom"]))
+            new_df = new_df[
+                ~new_df.apply(
+                    lambda r: (r["prompt"], r["binom"]) in existing_keys, axis=1
+                )
+            ]
+
+        final_df = (
+            pd.concat([existing_df, new_df], ignore_index=True)
+            if existing_df is not None
+            else new_df
+        )
+
+        print("  💾 Saving results...")
+        atomic_write_csv(final_df, out_path)
+        print(f"  ✅ Saved {len(final_df)} total rows ({len(new_df)} new) to {out_path}")
+
+    finally:
+        # 🔥 HARD CLEANUP (this is what fixes your disk issue)
+        del model
+        torch.cuda.empty_cache()
+        shutil.rmtree(tmp_cache, ignore_errors=True)
+
 
 
 def worker_main(rank: int, items: List[WorkItem]) -> None:
