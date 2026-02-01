@@ -117,13 +117,25 @@ MODEL_CONFIGS = {
         "tokens_per_step": 655_360,
         "tokenizer": "znhoughton/opt-c4-125m-seed42",
     },
-    # "znhoughton/opt-c4-350m-seed42": {
-    #     "tokens_per_step": 655_360,
-    #     "tokenizer": "znhoughton/opt-c4-350m-seed42",
-    # },
+    "znhoughton/opt-c4-350m-seed42": {
+        "tokens_per_step": 655_360,
+        "tokenizer": "znhoughton/opt-c4-350m-seed42",
+    },
     # "znhoughton/opt-c4-1.3b-seed42": {
     #     "tokens_per_step": 655_360,
     #     "tokenizer": "znhoughton/opt-c4-1.3b-seed42",
+    # },
+    # "znhoughton/opt-babylm-125m-seed77": {
+    #     "tokens_per_step": 655_360,  # 1024 × 320 × 1 × 2
+    #     "tokenizer": "znhoughton/opt-babylm-125m-seed77",
+    # },
+    # "znhoughton/opt-babylm-350m-seed77": {
+    #     "tokens_per_step": 327_680,  # 1024 × 80 × 2 × 2
+    #     "tokenizer": "znhoughton/opt-babylm-350m-seed77",
+    # },
+    # "znhoughton/opt-babylm-1.3b-seed77": {
+    #     "tokens_per_step": 327_680,  # 1024 × 40 × 4 × 2
+    #     "tokenizer": "znhoughton/opt-babylm-1.3b-seed77",
     # },
 }
 
