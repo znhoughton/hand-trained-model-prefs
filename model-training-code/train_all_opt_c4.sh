@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+source /opt/modeling/zhoughton/envs/opt-model-training/bin/activate
 ############################################
 # USER SETTINGS
 ############################################
 
-DATASET_NAME="allenai/c4"
-DATASET_CONFIG="en"
-
+DATASET_NAME="znhoughton/c4-subset-10B-tokens"
 TOKENIZER_NAME="opt-babylm-100m-bpe"  # Your existing tokenizer
 BLOCK_SIZE=1024
 VOCAB_SIZE=8192
@@ -15,13 +13,10 @@ VOCAB_SIZE=8192
 # TARGET: 10M tokens per checkpoint
 TOKENS_PER_CHECKPOINT=10000000
 
-# Total training budget: 10B tokens
-TOTAL_TOKENS=10000000000
 
 SAVE_TOTAL_LIMIT=1
-WARMUP_STEPS=2000
-SEED=42
-
+WARMUP_STEPS=4000
+SEED=964
 TOKENIZER_PATH="models/${TOKENIZER_NAME}"
 
 # Verify tokenizer exists
@@ -50,17 +45,16 @@ train_opt () {
     
     # Calculate tokens per step, max steps, and save frequency
     TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * 2))
-    MAX_STEPS=$((TOTAL_TOKENS / TOKENS_PER_STEP))
     SAVE_STEPS=$((TOKENS_PER_CHECKPOINT / TOKENS_PER_STEP))
-    
+    TOTAL_TOKENS=10000000000
+    MAX_STEPS=$((TOTAL_TOKENS / TOKENS_PER_STEP))
     MODEL_NAME="opt-c4-${MODEL_SIZE}"
     MODEL_PATH="models/${MODEL_NAME}"
-    RUN_DIR="runs/${MODEL_NAME}"
+    RUN_DIR="runs/${MODEL_NAME}_${SEED}"
     
     echo "============================================================"
-    echo "=== Training ${MODEL_NAME} on C4 with STREAMING ==="
+    echo "=== Training ${MODEL_NAME} on C4 subset (10B tokens)"
     echo "=== Tokens/step: ${TOKENS_PER_STEP} ==="
-    echo "=== Max steps: ${MAX_STEPS} (${TOTAL_TOKENS} tokens) ==="
     echo "=== Save every ${SAVE_STEPS} steps (${TOKENS_PER_CHECKPOINT} tokens) ==="
     echo "============================================================"
     
@@ -71,8 +65,6 @@ train_opt () {
         if [ -n "${LATEST_CHECKPOINT}" ]; then
             CHECKPOINT_NUM=$(basename ${LATEST_CHECKPOINT} | sed 's/checkpoint-//')
             echo "=== FOUND CHECKPOINT: ${LATEST_CHECKPOINT} ==="
-            echo "=== Checkpoint step: ${CHECKPOINT_NUM} / ${MAX_STEPS} ==="
-            echo "=== Steps remaining: $((MAX_STEPS - CHECKPOINT_NUM)) ==="
             echo "=== RESUMING FROM CHECKPOINT ==="
             RESUME_ARG="--resume_from_checkpoint ${LATEST_CHECKPOINT}"
         else
@@ -98,15 +90,16 @@ train_opt () {
         echo "=== Skipping config creation (resuming from checkpoint) ==="
     fi
     
-    # Train with STREAMING enabled
+    # Train 
     CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_autoreg.py \
         --model_type opt \
         --config_name ${MODEL_PATH} \
         --tokenizer_name ${TOKENIZER_PATH} \
         --dataset_name ${DATASET_NAME} \
-        --dataset_config_name ${DATASET_CONFIG} \
-        --streaming \
+        --max_steps ${MAX_STEPS} \
         --do_train \
+        --streaming \
+        --preprocessing_num_workers 8 \
         --bf16 \
         --gradient_checkpointing \
         --block_size ${BLOCK_SIZE} \
@@ -114,11 +107,11 @@ train_opt () {
         --gradient_accumulation_steps ${GRAD_ACCUM} \
         --learning_rate ${LR} \
         --warmup_steps ${WARMUP_STEPS} \
-        --max_steps ${MAX_STEPS} \
         --save_steps ${SAVE_STEPS} \
         --save_total_limit ${SAVE_TOTAL_LIMIT} \
         --save_only_model \
         --logging_steps 10 \
+        --report_to tensorboard \
         --seed ${SEED} \
         --output_dir ${RUN_DIR} \
         ${RESUME_ARG} \
@@ -135,12 +128,11 @@ train_opt () {
 }
 
 ############################################
-# OPT-125M
-# tokens/step = 1024 × 320 × 1 × 2 = 655,360
-# max_steps = 10B / 655,360 ≈ 15,259 steps
-# save_steps = 10M / 655,360 ≈ 15 steps
+# OPT-125M - OPTIMIZED FOR 2x H100
+# Target: Max batch size while maintaining speed
+# tokens/step = 1024 × 512 × 1 × 2 = 1,048,576
+# save_steps = 10M / 1,048,576 ≈ 10 steps
 ############################################
-
 train_opt \
   125m \
   facebook/opt-125m \
@@ -148,17 +140,15 @@ train_opt \
   12 \
   12 \
   3072 \
-  320 \
+  400 \
   1 \
   3e-4
 
 ############################################
-# OPT-350M
-# tokens/step = 1024 × 80 × 2 × 2 = 327,680
-# max_steps = 10B / 327,680 ≈ 30,518 steps
-# save_steps = 10M / 327,680 ≈ 30 steps
+# OPT-350M - OPTIMIZED FOR 2x H100
+# tokens/step = 1024 × 384 × 2 × 2 = 1,572,864
+# save_steps = 10M / 1,572,864 ≈ 6 steps
 ############################################
-
 train_opt \
   350m \
   facebook/opt-350m \
@@ -166,17 +156,15 @@ train_opt \
   16 \
   24 \
   4096 \
-  80 \
+  300 \
   2 \
-  2e-4
+  1e-4
 
 ############################################
-# OPT-1.3B
-# tokens/step = 1024 × 40 × 4 × 2 = 327,680
-# max_steps = 10B / 327,680 ≈ 30,518 steps
-# save_steps = 10M / 327,680 ≈ 30 steps
+# OPT-1.3B - OPTIMIZED FOR 2x H100
+# tokens/step = 1024 × 256 × 4 × 2 = 2,097,152
+# save_steps = 10M / 2,097,152 ≈ 5 steps
 ############################################
-
 train_opt \
   1.3b \
   facebook/opt-1.3b \
@@ -184,6 +172,6 @@ train_opt \
   32 \
   24 \
   8192 \
-  40 \
+  100 \
   4 \
   1e-4

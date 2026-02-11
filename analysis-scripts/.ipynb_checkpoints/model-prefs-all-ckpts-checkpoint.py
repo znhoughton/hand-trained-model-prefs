@@ -26,6 +26,9 @@ from tqdm import tqdm
 from huggingface_hub import HfApi
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+def tokens_per_step(block_size: int, batch: int, grad_accum: int, num_gpus: int) -> int:
+    return block_size * batch * grad_accum * num_gpus
+
 
 # =========================
 # CONFIG
@@ -46,6 +49,7 @@ USE_TORCH_COMPILE = ENABLE_COMPILE and (os.name != "nt")
 
 # Prompts
 LIST_OF_PROMPTS = [
+    " ",
     "Well, ",
     "So, ",
     "Then ",
@@ -99,44 +103,32 @@ LIST_OF_PROMPTS = [
 ]
 
 MODEL_CONFIGS = {
-    # BabyLM
-    "znhoughton/opt-babylm-125m-seed42": {
-        "tokens_per_step": 655_360,  # 1024 × 320 × 1 × 2
-        "tokenizer": "znhoughton/opt-babylm-125m-seed42",
+    # BabyLM (unchanged)
+    "znhoughton/opt-babylm-125m-seed964": {
+        "tokens_per_step": 819_200,  # 1024 × 320 × 1 × 2
+        "tokenizer": "znhoughton/opt-babylm-125m-seed964",
     },
-    "znhoughton/opt-babylm-350m-seed42": {
-        "tokens_per_step": 327_680,  # 1024 × 80 × 2 × 2
-        "tokenizer": "znhoughton/opt-babylm-350m-seed42",
+    "znhoughton/opt-babylm-350m-seed964": {
+        "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
+        "tokenizer": "znhoughton/opt-babylm-350m-seed964",
     },
-    "znhoughton/opt-babylm-1.3b-seed42": {
-        "tokens_per_step": 327_680,  # 1024 × 40 × 4 × 2
-        "tokenizer": "znhoughton/opt-babylm-1.3b-seed42",
+    "znhoughton/opt-babylm-1.3b-seed964": {
+        "tokens_per_step": 819_200,  # 1024 × 200 × 4 × 2
+        "tokenizer": "znhoughton/opt-babylm-1.3b-seed964",
     },
-    # C4
-    "znhoughton/opt-c4-125m-seed42": {
-        "tokens_per_step": 655_360,
-        "tokenizer": "znhoughton/opt-c4-125m-seed42",
+    # C4 (UPDATED)
+    "znhoughton/opt-c4-125m-seed964": {
+        "tokens_per_step": 819_200,  # 1024 × 400 × 1 × 2
+        "tokenizer": "znhoughton/opt-c4-125m-seed964",
     },
-    "znhoughton/opt-c4-350m-seed42": {
-        "tokens_per_step": 655_360,
-        "tokenizer": "znhoughton/opt-c4-350m-seed42",
+    "znhoughton/opt-c4-350m-seed964": {
+        "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
+        "tokenizer": "znhoughton/opt-c4-350m-seed964",
     },
-    # "znhoughton/opt-c4-1.3b-seed42": {
-    #     "tokens_per_step": 655_360,
-    #     "tokenizer": "znhoughton/opt-c4-1.3b-seed42",
-    # },
-    # "znhoughton/opt-babylm-125m-seed77": {
-    #     "tokens_per_step": 655_360,  # 1024 × 320 × 1 × 2
-    #     "tokenizer": "znhoughton/opt-babylm-125m-seed77",
-    # },
-    # "znhoughton/opt-babylm-350m-seed77": {
-    #     "tokens_per_step": 327_680,  # 1024 × 80 × 2 × 2
-    #     "tokenizer": "znhoughton/opt-babylm-350m-seed77",
-    # },
-    # "znhoughton/opt-babylm-1.3b-seed77": {
-    #     "tokens_per_step": 327_680,  # 1024 × 40 × 4 × 2
-    #     "tokenizer": "znhoughton/opt-babylm-1.3b-seed77",
-    # },
+    "znhoughton/opt-c4-1.3b-seed964": {
+        "tokens_per_step": 819_200,  # 1024 × 100 × 4 × 2
+        "tokenizer": "znhoughton/opt-c4-1.3b-seed964",
+    },
 }
 
 

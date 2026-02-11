@@ -10,8 +10,8 @@ VOCAB_SIZE=8192
 # TARGET: 10M tokens per checkpoint
 TOKENS_PER_CHECKPOINT=10000000
 SAVE_TOTAL_LIMIT=1
-WARMUP_STEPS=2000
-SEED=42
+WARMUP_STEPS=4000
+SEED=964
 ############################################
 # STEP 0: Train tokenizer ONCE
 ############################################
@@ -51,9 +51,9 @@ train_opt () {
     TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * 2))
     SAVE_STEPS=$((TOKENS_PER_CHECKPOINT / TOKENS_PER_STEP))
     
-    MODEL_NAME="opt-babylm-${MODEL_SIZE}"
+    MODEL_NAME="opt-babylm-${MODEL_SIZE}-100eps"
     MODEL_PATH="models/${MODEL_NAME}"
-    RUN_DIR="runs/${MODEL_NAME}"
+    RUN_DIR="runs/${MODEL_NAME}_${SEED}-100eps"
     
     echo "============================================================"
     echo "=== Training ${MODEL_NAME} ==="
@@ -82,7 +82,6 @@ train_opt () {
         --tokenizer_name ${TOKENIZER_PATH} \
         --dataset_name ${DATASET} \
         --do_train \
-        --do_eval \
         --bf16 \
         --gradient_checkpointing \
         --block_size ${BLOCK_SIZE} \
@@ -94,7 +93,8 @@ train_opt () {
         --save_total_limit ${SAVE_TOTAL_LIMIT} \
         --save_only_model \
         --logging_steps 10 \
-        --num_train_epochs 20 \
+        --report_to tensorboard \
+        --num_train_epochs 100 \
         --seed ${SEED} \
         --output_dir ${RUN_DIR} \
         --push_to_hub \
@@ -107,11 +107,13 @@ train_opt () {
     echo "=== Deleting local run directory ${RUN_DIR} ==="
     rm -rf "${RUN_DIR}"
 }
+
+
 ############################################
-# OPT-125M
-# OLD: tokens/step = 1024 × 256 × 1 × 2 = 524,288
-# NEW: tokens/step = 1024 × 320 × 1 × 2 = 655,360 (+25% throughput)
-# save_steps = 10M / 655,360 ≈ 15 steps
+# OPT-125M - OPTIMIZED FOR 2x H100
+# Target: Max batch size while maintaining speed
+# tokens/step = 1024 × 512 × 1 × 2 = 1,048,576
+# save_steps = 10M / 1,048,576 ≈ 10 steps
 ############################################
 train_opt \
   125m \
@@ -120,14 +122,14 @@ train_opt \
   12 \
   12 \
   3072 \
-  320 \
+  400 \
   1 \
   3e-4
+
 ############################################
-# OPT-350M
-# OLD: tokens/step = 1024 × 64 × 2 × 2 = 262,144
-# NEW: tokens/step = 1024 × 80 × 2 × 2 = 327,680 (+25% throughput)
-# save_steps = 10M / 327,680 ≈ 30 steps
+# OPT-350M - OPTIMIZED FOR 2x H100
+# tokens/step = 1024 × 384 × 2 × 2 = 1,572,864
+# save_steps = 10M / 1,572,864 ≈ 6 steps
 ############################################
 train_opt \
   350m \
@@ -136,14 +138,14 @@ train_opt \
   16 \
   24 \
   4096 \
-  80 \
+  300 \
   2 \
-  2e-4
+  1e-4
+
 ############################################
-# OPT-1.3B
-# OLD: tokens/step = 1024 × 32 × 4 × 2 = 262,144
-# NEW: tokens/step = 1024 × 40 × 4 × 2 = 327,680 (+25% throughput)
-# save_steps = 10M / 327,680 ≈ 30 steps
+# OPT-1.3B - OPTIMIZED FOR 2x H100
+# tokens/step = 1024 × 256 × 4 × 2 = 2,097,152
+# save_steps = 10M / 2,097,152 ≈ 5 steps
 ############################################
 train_opt \
   1.3b \
@@ -152,6 +154,6 @@ train_opt \
   32 \
   24 \
   8192 \
-  40 \
+  100 \
   4 \
   1e-4
