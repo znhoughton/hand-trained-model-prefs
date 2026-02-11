@@ -8,12 +8,12 @@ import stat
 #  MODEL CONFIGS (keys only are used here)
 # ==========================================================
 MODEL_CONFIGS = {
-    "znhoughton/opt-babylm-125m-seed42": {},
-    "znhoughton/opt-babylm-350m-seed42": {},
-    "znhoughton/opt-babylm-1.3b-seed42": {},
-    "znhoughton/opt-c4-125m-seed42": {},
-    "znhoughton/opt-c4-350m-seed42": {},
-    "znhoughton/opt-c4-1.3b-seed42": {},
+    "znhoughton/opt-babylm-125m-100eps-seed964": {},
+    "znhoughton/opt-babylm-350m-100eps-seed964": {},
+    #"znhoughton/opt-babylm-1.3b-100eps-seed964": {},
+    #"znhoughton/opt-c4-125m-seed964": {},
+    #"znhoughton/opt-c4-350m-seed964": {},
+    #"znhoughton/opt-c4-1.3b-seed964": {},
 }
 
 BASE_DIR = Path.cwd() / "tmp_repos"
