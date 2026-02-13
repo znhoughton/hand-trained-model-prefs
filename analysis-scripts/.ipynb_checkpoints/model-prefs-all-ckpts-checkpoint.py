@@ -104,18 +104,18 @@ LIST_OF_PROMPTS = [
 
 MODEL_CONFIGS = {
     # BabyLM (unchanged)
-    "znhoughton/opt-babylm-125m-seed964": {
+    "znhoughton/opt-babylm-125m-100eps-seed964": {
         "tokens_per_step": 819_200,  # 1024 × 320 × 1 × 2
-        "tokenizer": "znhoughton/opt-babylm-125m-seed964",
+        "tokenizer": "znhoughton/opt-babylm-125m-100eps-seed964",
     },
-    "znhoughton/opt-babylm-350m-seed964": {
-        "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
-        "tokenizer": "znhoughton/opt-babylm-350m-seed964",
-    },
-    "znhoughton/opt-babylm-1.3b-seed964": {
-        "tokens_per_step": 819_200,  # 1024 × 200 × 4 × 2
-        "tokenizer": "znhoughton/opt-babylm-1.3b-seed964",
-    },
+    # "znhoughton/opt-babylm-350m-100eps-seed964": {
+    #     "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
+    #     "tokenizer": "znhoughton/opt-babylm-350m-100eps-seed964",
+    # },
+    # "znhoughton/opt-babylm-1.3b-100eps-seed964": {
+    #     "tokens_per_step": 819_200,  # 1024 × 200 × 4 × 2
+    #     "tokenizer": "znhoughton/opt-babylm-1.3b-100eps-seed964",
+    # },
     # C4 (UPDATED)
     "znhoughton/opt-c4-125m-seed964": {
         "tokens_per_step": 819_200,  # 1024 × 400 × 1 × 2
