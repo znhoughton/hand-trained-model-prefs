@@ -105,7 +105,7 @@ LIST_OF_PROMPTS = [
 MODEL_CONFIGS = {
     # BabyLM (unchanged)
     "znhoughton/opt-babylm-125m-100eps-seed964": {
-        "tokens_per_step": 819_200,  # 1024 × 320 × 1 × 2
+        "tokens_per_step": 584_795,  # 10B total tokens ÷ 17,100 steps (100 epochs × 100M)
         "tokenizer": "znhoughton/opt-babylm-125m-100eps-seed964",
     },
     # "znhoughton/opt-babylm-350m-100eps-seed964": {

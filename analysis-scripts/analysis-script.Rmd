@@ -1,6 +1,8 @@
 ---
 title: "analysis-script"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 date: "2026-01-29"
 ---
 
@@ -148,7 +150,7 @@ llm_and_human_data_attested = llm_and_human_data %>%
 ```
 
 
-### Plot 
+### Plot
 
 ```{r}
 llm_and_human_data_nonce_plot = llm_and_human_data_nonce %>%
@@ -192,5 +194,72 @@ ggplot(llm_and_human_data_attested_plot %>% arrange(tokens),
     panel.grid.minor = element_blank()
   )
 
+```
+
+
+### Frequency Analysis for Attested Binomials
+
+```{r}
+# Add frequency tertiles for attested binomials
+llm_and_human_data_attested = llm_and_human_data_attested %>%
+  ungroup() %>%
+  mutate(freq_tertile = ntile(log(OverallFreq), 5)) %>%
+  mutate(freq_category = case_when(
+    freq_tertile == 1 ~ "Low Frequency",
+    freq_tertile == 2 ~ "Low-Mid Frequency",
+    freq_tertile == 3 ~ "Mid Frequency",
+    freq_tertile == 4 ~ "High-Mid Frequency",
+    freq_tertile == 5 ~ "High Frequency"
+  ))
+
+# Calculate correlations by frequency category
+freq_analysis = llm_and_human_data_attested %>%
+  group_by(model, checkpoint, tokens, freq_category) %>%
+  summarize(
+    hum_model_cor = cor(preference, hum_pref),
+    n_items = n(),
+    .groups = "drop"
+  )
+
+# Plot correlation by frequency category
+ggplot(freq_analysis %>% arrange(tokens),
+       aes(x = tokens, y = hum_model_cor, color = freq_category)) +
+  geom_point(size = 1.5, alpha = 0.6) +
+  geom_smooth(se = FALSE, linewidth = 1.2) +
+  facet_wrap(~ model) +
+  scale_color_manual(
+    values = c("Low Frequency" = "#D55E00",
+               "Mid Frequency" = "#009E73",
+               "High Frequency" = "#0072B2")
+  ) +
+  labs(
+    x = "Training tokens",
+    y = "Correlation (human vs model)",
+    title = "Attested Binomials: Correlation by Frequency",
+    color = "Binomial\nFrequency"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom"
+  )
+
+
+
+
+# Print summary statistics
+freq_summary = freq_analysis %>%
+  group_by(model, freq_category) %>%
+  summarize(
+    final_cor = last(hum_model_cor),
+    mean_cor = mean(hum_model_cor),
+    .groups = "drop"
+  )
+
+
+
+print("Final correlations by frequency category:")
+print(freq_summary)
 ```
 
