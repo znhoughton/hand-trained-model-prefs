@@ -148,28 +148,138 @@ llm_and_human_data_nonce = llm_and_human_data %>%
 llm_and_human_data_attested = llm_and_human_data %>%
   filter(Attested == 1)
 ```
+### Logistic Regression Analysis: Model Preferences Predicting Human Responses
 
+```{r eval = F}
+# Memory-efficient approach: Process one model at a time
+# Average model preferences across prompts first
+llm_avg = llm_data %>%
+  group_by(model, binom, checkpoint, step, tokens) %>%
+  summarize(preference = mean(preference), .groups = "drop")
 
-### Plot
+# Function to identify checkpoints to sample using logarithmic spacing
+# Dense sampling early in training, sparse sampling later
+get_sampled_checkpoints <- function(model_data, n_samples = 250) {
+  unique_checkpoints <- sort(unique(model_data$checkpoint))
+  n_checkpoints <- length(unique_checkpoints)
+  n_to_sample <- min(n_samples, n_checkpoints)
 
-```{r}
-llm_and_human_data_nonce_plot = llm_and_human_data_nonce %>%
-  group_by(model, checkpoint, tokens) %>%
-  summarize(hum_model_cor = cor(preference, hum_pref))
+  if (n_checkpoints <= n_to_sample) {
+    return(unique_checkpoints)
+  } else {
+    # Logarithmic spacing: dense early, sparse later
+    # exp(seq(log(1), log(n), length.out = k)) gives exponentially-spaced values
+    log_indices <- exp(seq(log(1), log(n_checkpoints), length.out = n_to_sample))
+    indices <- unique(round(log_indices))
 
-llm_and_human_data_attested_plot = llm_and_human_data_attested %>%
-  group_by(model, checkpoint, tokens) %>%
-  summarize(hum_model_cor = cor(preference, hum_pref))
+    # If rounding produced fewer unique indices, fill in gaps at the end
+    if (length(indices) < n_to_sample) {
+      # Add linearly-spaced indices from the last sampled to the end
+      remaining <- n_to_sample - length(indices)
+      last_idx <- max(indices)
+      additional_indices <- round(seq(last_idx + 1, n_checkpoints, length.out = remaining + 1))
+      indices <- sort(unique(c(indices, additional_indices)))
+    }
 
-ggplot(llm_and_human_data_nonce_plot %>% arrange(tokens),
-       aes(x = tokens, y = hum_model_cor)) +
+    return(unique_checkpoints[indices])
+  }
+}
+
+# Memory-efficient logistic regression function
+# Processes one model at a time to minimize memory usage
+fit_logistic_efficient <- function(llm_avg, human_data, attested_value, n_samples = 250) {
+  results <- data.frame()
+
+  # Filter human data once
+  human_subset <- human_data %>%
+    filter(Attested == attested_value) %>%
+    select(binom, participant, resp_binary)
+
+  for (model_name in unique(llm_avg$model)) {
+    cat(paste("\nProcessing model:", model_name, "\n"))
+
+    # Get model data
+    model_data <- llm_avg %>% filter(model == model_name)
+
+    # Sample checkpoints
+    sampled_ckpts <- get_sampled_checkpoints(model_data, n_samples)
+    cat(paste("  Sampled", length(sampled_ckpts), "of", n_distinct(model_data$checkpoint), "checkpoints\n"))
+
+    # Filter to sampled checkpoints
+    model_data_sampled <- model_data %>% filter(checkpoint %in% sampled_ckpts)
+
+    # Process each checkpoint
+    for (ckpt in sampled_ckpts) {
+      # Get checkpoint data
+      ckpt_model_data <- model_data_sampled %>% filter(checkpoint == ckpt)
+
+      # Join with human data for this checkpoint only
+      ckpt_data <- ckpt_model_data %>%
+        left_join(human_subset, by = "binom", relationship = "many-to-many") %>%
+        filter(!is.na(resp_binary))
+
+      tryCatch({
+        # Fit logistic regression
+        glm_model <- glm(resp_binary ~ preference,
+                         data = ckpt_data,
+                         family = binomial)
+
+        # Extract coefficients
+        coef_summary <- summary(glm_model)$coefficients
+        null_deviance <- glm_model$null.deviance
+        residual_deviance <- glm_model$deviance
+        pseudo_r2 <- 1 - (residual_deviance / null_deviance)
+
+        # Store only what we need
+        results <- rbind(results, data.frame(
+          model = model_name,
+          checkpoint = ckpt,
+          tokens = unique(ckpt_model_data$tokens),
+          pref_coef = coef_summary[2, 1],
+          pref_se = coef_summary[2, 2],
+          pref_z = coef_summary[2, 3],
+          pref_p = coef_summary[2, 4],
+          pseudo_r2 = pseudo_r2,
+          n_obs = nrow(ckpt_data),
+          stringsAsFactors = FALSE
+        ))
+
+        # Clear checkpoint data
+        rm(ckpt_data, glm_model, coef_summary)
+
+      }, error = function(e) {
+        cat(paste("    Error at checkpoint", ckpt, ":", e$message, "\n"))
+      })
+    }
+
+    # Clear model data and force garbage collection
+    rm(model_data, model_data_sampled)
+    gc()
+
+    cat(paste("  Completed:", model_name, "\n"))
+  }
+
+  return(results)
+}
+
+# Fit for nonce and attested
+print("Fitting logistic regressions for NONCE binomials...")
+nonce_logistic = fit_logistic_efficient(llm_avg, all_human_data, attested_value = 0, n_samples = 400)
+
+print("\nFitting logistic regressions for ATTESTED binomials...")
+attested_logistic = fit_logistic_efficient(llm_avg, all_human_data, attested_value = 1, n_samples = 400)
+
+# Plot using coefficient as measure of model-human alignment
+ggplot(nonce_logistic %>% arrange(tokens),
+       aes(x = tokens, y = pref_coef)) +
   geom_point(size = 2) +
   geom_smooth(se = FALSE) +
   facet_wrap(~ model) +
   labs(
     x = "Training tokens",
-    y = "Correlation (human vs model)",
-    title = "Nonce Binoms"
+    y = "Logistic regression coefficient",
+    title = "Nonce Binomials: Model Preference → Human Response",
+    subtitle = "Coefficient from glm(resp_binary ~ preference)"
   ) +
   theme_minimal(base_size = 13) +
   theme(
@@ -177,16 +287,16 @@ ggplot(llm_and_human_data_nonce_plot %>% arrange(tokens),
     panel.grid.minor = element_blank()
   )
 
-
-ggplot(llm_and_human_data_attested_plot %>% arrange(tokens),
-       aes(x = tokens, y = hum_model_cor)) +
+ggplot(attested_logistic %>% arrange(tokens),
+       aes(x = tokens, y = pref_coef)) +
   geom_point(size = 2) +
   geom_smooth(se = FALSE) +
   facet_wrap(~ model) +
   labs(
     x = "Training tokens",
-    y = "Correlation (human vs model)",
-    title = "Attested Binoms"
+    y = "Logistic regression coefficient",
+    title = "Attested Binomials: Model Preference → Human Response",
+    subtitle = "Coefficient from glm(resp_binary ~ preference)"
   ) +
   theme_minimal(base_size = 13) +
   theme(
@@ -195,6 +305,349 @@ ggplot(llm_and_human_data_attested_plot %>% arrange(tokens),
   )
 
 ```
+
+
+### Formal Training Dynamics Models: Single Comprehensive Analysis
+
+```{r training-dynamics, message=FALSE, warning=FALSE}
+# ============================================================
+# OVERVIEW
+# ============================================================
+# Prior analyses fit a separate model at each checkpoint and plot the
+# coefficients.  Here we instead treat training progress (log tokens)
+# as a *continuous* predictor in a single Bayesian mixed-effects model
+# (brms / Stan).
+# This allows formal inference on:
+#   (1) Does model sensitivity to GenPref / human preferences improve over
+#       training, and does the trajectory differ by model architecture?
+#   (2) Does GenPref independently predict model preferences once training
+#       progress is accounted for?
+#
+# Two complementary models are fit per binomial type:
+#   Model A: DV = model preference score
+#            IVs = GenPref × poly(log_tok_norm, 2) × model
+#            (+ RelFreq, OverallFreq for attested)
+#   Model B: DV = hum_pref (mean human preference per binomial)
+#            IVs = preference × poly(log_tok_norm, 2) × model
+#
+# Models are cached to disk (file = "model_cache/...") so subsequent
+# knits load from disk rather than re-sampling.
+
+library(brms)
+
+# ------------------------------------------------------------------
+# HELPER FUNCTIONS
+# ------------------------------------------------------------------
+
+# Normalise log(tokens) to [0, 1] within each model.
+# This keeps polynomial terms on a sensible scale and makes
+# trajectories comparable across models with different token counts.
+normalize_log_tokens <- function(df) {
+  df %>%
+    group_by(model) %>%
+    mutate(
+      log_tok      = log(tokens),
+      #log_tok_norm = (log_tok - min(log_tok)) / (max(log_tok) - min(log_tok))
+      log_tok_norm = log_tok
+    ) %>%
+    ungroup()
+}
+
+# Sample checkpoints using the logarithmic-spacing function already defined
+# above (get_sampled_checkpoints).  Wrapped here for use with group_modify.
+sample_checkpoints_df <- function(df, n_samples = 150) {
+  df %>%
+    group_by(model) %>%
+    group_modify(~ {
+      ckpts <- get_sampled_checkpoints(.x, n_samples = n_samples)
+      .x %>% filter(checkpoint %in% ckpts)
+    }) %>%
+    ungroup()
+}
+
+# Cache directory for fitted brms models
+dir.create("model_cache", showWarnings = FALSE)
+
+# Weakly informative priors:
+#   Fixed effects centred at 0 with SD = 0.5 (most effects expected small)
+#   Random-effect and residual SDs regularised away from 0
+bayes_priors <- c(
+  prior(normal(0, 0.5), class = b),
+  prior(exponential(1), class = sd),
+  prior(exponential(1), class = sigma)
+)
+
+# ------------------------------------------------------------------
+# NONCE BINOMIALS
+# ------------------------------------------------------------------
+cat("Preparing nonce data for Bayesian LME analysis...\n")
+
+nonce_lme_data <- llm_and_human_data_nonce %>%
+  sample_checkpoints_df(n_samples = 150) %>%
+  normalize_log_tokens()
+
+cat(paste0("  N rows: ", nrow(nonce_lme_data),
+           " (", n_distinct(nonce_lme_data$binom), " binomials × ",
+           n_distinct(nonce_lme_data$checkpoint), " checkpoints approx)\n"))
+
+# --- Model A (Nonce): preference ~ GenPref × training × model ---
+# Does sensitivity to linguistic universals (GenPref) develop over training?
+# GenPref:poly() interaction tests whether the slope on GenPref changes
+# as a function of training progress.
+cat("\nFitting nonce Model A: preference ~ GenPref × poly(log_tok_norm,2) × model\n")
+
+m_nonce_A <- brm(
+  preference ~ GenPref * poly(log_tok_norm, 2) * model + (1 | binom),
+  data    = nonce_lme_data,
+  family  = gaussian(),
+  prior   = bayes_priors,
+  chains  = 4, cores = 4, iter = 6000, warmup = 3000,
+  seed    = 964,
+  file    = "model_cache/m_nonce_A",
+  control = list(adapt_delta = 0.95)
+)
+
+cat("\n--- Nonce Model A summary ---\n")
+print(summary(m_nonce_A))
+
+# --- Model B (Nonce): hum_pref ~ preference × training × model ---
+# Does the model's ordering preference become a better predictor of
+# human preferences over training?
+# preference:poly() interaction tests whether model-human alignment improves.
+# (1|binom): random intercept for each binomial — accounts for the fact
+# that hum_pref is constant across checkpoints for the same item.
+cat("\nFitting nonce Model B: hum_pref ~ preference × poly(log_tok_norm,2) × model\n")
+
+m_nonce_B <- brm(
+  hum_pref ~ preference * poly(log_tok_norm, 2) * model + (1 | binom),
+  data    = nonce_lme_data,
+  family  = gaussian(),
+  prior   = bayes_priors,
+  chains  = 4, cores = 4, iter = 6000, warmup = 3000,
+  seed    = 964,
+  file    = "model_cache/m_nonce_B",
+  control = list(adapt_delta = 0.95)
+)
+
+cat("\n--- Nonce Model B summary ---\n")
+print(summary(m_nonce_B))
+
+# ------------------------------------------------------------------
+# ATTESTED BINOMIALS
+# ------------------------------------------------------------------
+cat("\nPreparing attested data for Bayesian LME analysis...\n")
+
+attested_lme_data <- llm_and_human_data_attested %>%
+  ungroup() %>%
+  mutate(
+    RelFreq            = RelFreq - 0.5,               # centre RelFreq
+    OverallFreq_scaled = scale(log(OverallFreq))[, 1] # standardise log-freq
+  ) %>%
+  sample_checkpoints_df(n_samples = 150) %>%
+  normalize_log_tokens()
+
+cat(paste0("  N rows: ", nrow(attested_lme_data),
+           " (", n_distinct(attested_lme_data$binom), " binomials × ",
+           n_distinct(attested_lme_data$checkpoint), " checkpoints approx)\n"))
+
+# --- Model A (Attested): preference ~ (GenPref + RelFreq + OverallFreq) × training × model ---
+# Does sensitivity to the full set of human-preference predictors develop,
+# or is the attested signal purely frequency-driven?
+# NOTE: This formula expands to ~50 fixed-effect parameters (3 predictors × 2 poly
+# terms × 3 model contrasts + all three-way interactions).  If sampling is slow
+# or Rhat > 1.01 for many parameters, use the fallback formula (commented below)
+# which drops the three-way interactions but retains per-predictor training
+# trajectories and per-model differences.
+cat("\nFitting attested Model A: preference ~ (GenPref + RelFreq + OverallFreq) × poly × model\n")
+
+m_attested_A <- brm(
+  preference ~ (GenPref + RelFreq + OverallFreq_scaled) * poly(log_tok_norm, 2) * model +
+    (1 | binom),
+  data    = attested_lme_data,
+  family  = gaussian(),
+  prior   = bayes_priors,
+  chains  = 4, cores = 4, iter = 6000, warmup = 3000,
+  seed    = 964,
+  file    = "model_cache/m_attested_A",
+  control = list(adapt_delta = 0.99, max_treedepth = 12)
+)
+
+# Fallback (two-way interactions only — uncomment if full model mixes poorly):
+# m_attested_A <- brm(
+#   preference ~ (GenPref + RelFreq + OverallFreq_scaled) * poly(log_tok_norm, 2) +
+#     (GenPref + RelFreq + OverallFreq_scaled) * model +
+#     poly(log_tok_norm, 2) * model +
+#     (1 | binom),
+#   data    = attested_lme_data,
+#   family  = gaussian(),
+#   prior   = bayes_priors,
+#   chains  = 4, cores = 4, iter = 6000, warmup = 3000,
+#   seed    = 42,
+#   file    = "model_cache/m_attested_A_reduced",
+#   control = list(adapt_delta = 0.95)
+# )
+
+cat("\n--- Attested Model A summary ---\n")
+print(summary(m_attested_A))
+
+# --- Model B (Attested): hum_pref ~ preference × training × model ---
+# Same structure as nonce Model B: does model-human alignment strengthen over
+# training, and does the trajectory differ by model architecture?
+cat("\nFitting attested Model B: hum_pref ~ preference × poly(log_tok_norm,2) × model\n")
+
+m_attested_B <- brm(
+  hum_pref ~ preference * poly(log_tok_norm, 2) * model + (1 | binom),
+  data    = attested_lme_data,
+  family  = gaussian(),
+  prior   = bayes_priors,
+  chains  = 4, cores = 4, iter = 6000, warmup = 3000,
+  seed    = 964,
+  file    = "model_cache/m_attested_B",
+  control = list(adapt_delta = 0.95)
+)
+
+cat("\n--- Attested Model B summary ---\n")
+print(summary(m_attested_B))
+
+# ------------------------------------------------------------------
+# CONVERGENCE CHECK
+# ------------------------------------------------------------------
+# Rhat should be ≤ 1.01 for all parameters; Bulk/Tail ESS should be > 400.
+# brms prints these in summary(); inspect more carefully with:
+#   plot(m_nonce_A)            # trace plots per parameter
+#   pp_check(m_nonce_A)        # posterior predictive check
+
+for (m_label in c("m_nonce_A", "m_nonce_B", "m_attested_A", "m_attested_B")) {
+  m_obj   <- get(m_label)
+  rhat_vals <- brms::rhat(m_obj)
+  n_bad     <- sum(rhat_vals > 1.01, na.rm = TRUE)
+  cat(paste0(m_label, ": max Rhat = ", round(max(rhat_vals, na.rm = TRUE), 4),
+             "  |  parameters with Rhat > 1.01: ", n_bad, "\n"))
+}
+
+# ------------------------------------------------------------------
+# HELPER: extract posterior mean + 95% CrI from fitted()
+# ------------------------------------------------------------------
+# brms::fitted() returns a matrix with columns [Estimate, Est.Error, Q2.5, Q97.5].
+# This wrapper attaches them as columns to a prediction grid data frame.
+add_fitted_cols <- function(model, newdata, ...) {
+  fit_mat <- fitted(model, newdata = newdata, re_formula = NA,
+                    allow_new_levels = TRUE, ...)
+  newdata$fitted <- fit_mat[, "Estimate"]
+  newdata$lower  <- fit_mat[, "Q2.5"]
+  newdata$upper  <- fit_mat[, "Q97.5"]
+  newdata
+}
+
+# ------------------------------------------------------------------
+# VISUALISATION: nonce models
+# ------------------------------------------------------------------
+
+# Nonce Model A: predicted preference for GenPref-congruent items over training
+pred_nonce_A <- expand.grid(
+  GenPref      = c(-0.3, 0, 0.3),
+  log_tok_norm = seq(0, 1, by = 0.05),
+  model        = unique(nonce_lme_data$model)
+) %>% add_fitted_cols(m_nonce_A, newdata = .)
+
+ggplot(pred_nonce_A %>% filter(GenPref == 0.3),
+       aes(x = log_tok_norm, y = fitted, color = model, fill = model)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray60") +
+  facet_wrap(~ model) +
+  labs(
+    x     = "Normalised log training tokens (0 = start, 1 = end)",
+    y     = "Predicted model preference\n(at GenPref = +0.3)",
+    title = "Nonce Model A: GenPref-congruent preference over training",
+    subtitle = "Posterior mean ± 95% CrI, marginalised over binomials"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "none")
+
+# Nonce Model B: hum_pref ~ preference slope at 5 training stages
+pred_nonce_B <- expand.grid(
+  preference   = seq(0, 1, by = 0.1),
+  log_tok_norm = c(0, 0.25, 0.5, 0.75, 1),
+  model        = unique(nonce_lme_data$model)
+) %>% add_fitted_cols(m_nonce_B, newdata = .)
+
+ggplot(pred_nonce_B,
+       aes(x = preference, y = fitted,
+           color = factor(log_tok_norm), group = log_tok_norm)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper,
+                  fill = factor(log_tok_norm)), alpha = 0.1, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ model) +
+  scale_color_viridis_d(name = "Training\nprogress",
+                        labels = c("0%","25%","50%","75%","100%")) +
+  scale_fill_viridis_d(guide = "none") +
+  labs(
+    x     = "Model ordering preference",
+    y     = "Predicted human preference (hum_pref)",
+    title = "Nonce Model B: Model–human alignment over training",
+    subtitle = "Posterior mean ± 95% CrI; each line = one training stage"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"))
+
+# ------------------------------------------------------------------
+# VISUALISATION: attested models
+# ------------------------------------------------------------------
+
+# Attested Model A: predicted preference for GenPref-congruent items over training
+pred_attested_A <- expand.grid(
+  GenPref            = c(-0.3, 0, 0.3),
+  RelFreq            = 0,   # hold at mean (centred at 0)
+  OverallFreq_scaled = 0,   # hold at mean (standardised)
+  log_tok_norm       = seq(0, 1, by = 0.05),
+  model              = unique(attested_lme_data$model)
+) %>% add_fitted_cols(m_attested_A, newdata = .)
+
+ggplot(pred_attested_A %>% filter(GenPref == 0.3),
+       aes(x = log_tok_norm, y = fitted, color = model, fill = model)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray60") +
+  facet_wrap(~ model) +
+  labs(
+    x     = "Normalised log training tokens (0 = start, 1 = end)",
+    y     = "Predicted model preference\n(at GenPref = +0.3)",
+    title = "Attested Model A: GenPref-congruent preference over training",
+    subtitle = "RelFreq and OverallFreq held at mean; posterior mean ± 95% CrI"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "none")
+
+# Attested Model B: hum_pref ~ preference slope at 5 training stages
+pred_attested_B <- expand.grid(
+  preference   = seq(0, 1, by = 0.1),
+  log_tok_norm = c(0, 0.25, 0.5, 0.75, 1),
+  model        = unique(attested_lme_data$model)
+) %>% add_fitted_cols(m_attested_B, newdata = .)
+
+ggplot(pred_attested_B,
+       aes(x = preference, y = fitted,
+           color = factor(log_tok_norm), group = log_tok_norm)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper,
+                  fill = factor(log_tok_norm)), alpha = 0.1, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ model) +
+  scale_color_viridis_d(name = "Training\nprogress",
+                        labels = c("0%","25%","50%","75%","100%")) +
+  scale_fill_viridis_d(guide = "none") +
+  labs(
+    x     = "Model ordering preference",
+    y     = "Predicted human preference (hum_pref)",
+    title = "Attested Model B: Model–human alignment over training",
+    subtitle = "Posterior mean ± 95% CrI; each line = one training stage"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"))
+
+```
+
+
 
 
 ### Frequency Analysis for Attested Binomials
@@ -261,5 +714,370 @@ freq_summary = freq_analysis %>%
 
 print("Final correlations by frequency category:")
 print(freq_summary)
+```
+
+
+### GenPref Effect Analysis: Linear Models Across All Checkpoints
+
+```{r}
+library(lme4)
+library(lmerTest)  # Extends lmer to include p-values in summary
+
+# Use ALL checkpoints (not sampled)
+# Split by attestation
+all_nonce <- llm_and_human_data %>% filter(Attested == 0)
+all_attested <- llm_and_human_data %>% filter(Attested == 1) %>%
+  mutate(RelFreq = RelFreq - 0.5)
+
+print("Total checkpoints per model:")
+print("NONCE:")
+print(all_nonce %>%
+  group_by(model) %>%
+  summarize(n_checkpoints = n_distinct(checkpoint), .groups = "drop"))
+
+print("ATTESTED:")
+print(all_attested %>%
+  group_by(model) %>%
+  summarize(n_checkpoints = n_distinct(checkpoint), .groups = "drop"))
+
+# Function to fit model at each checkpoint
+fit_checkpoint_models <- function(data, item_type) {
+  results <- data.frame()
+
+  for (model_name in unique(data$model)) {
+    model_data <- data %>% filter(model == model_name)
+
+    for (ckpt in unique(model_data$checkpoint)) {
+      ckpt_data <- model_data %>% filter(checkpoint == ckpt)
+
+      tryCatch({
+        # Fit simple linear model: preference ~ GenPref
+        # No random effects needed - each binom appears once per checkpoint
+        lm_model <- lm(preference ~ GenPref, data = ckpt_data)
+
+        # Extract coefficients
+        coef_summary <- summary(lm_model)$coefficients
+
+        # Calculate R²
+        r2 <- summary(lm_model)$r.squared
+
+        # Store results
+        results <- rbind(results, data.frame(
+          model = model_name,
+          checkpoint = ckpt,
+          tokens = unique(ckpt_data$tokens),
+          GenPref_coef = coef_summary[2, 1],
+          GenPref_se = coef_summary[2, 2],
+          GenPref_t = coef_summary[2, 3],
+          GenPref_p = coef_summary[2, 4],
+          r2 = r2,
+          n_items = nrow(ckpt_data),
+          stringsAsFactors = FALSE
+        ))
+      }, error = function(e) {
+        cat(paste("Error at checkpoint", ckpt, ":", e$message, "\n"))
+      })
+    }
+
+    cat(paste("Completed:", model_name, "-", item_type, "\n"))
+  }
+
+  return(results)
+}
+
+# Fit models for NONCE items (ALL checkpoints)
+print("\n========================================")
+print("Fitting models for NONCE BINOMIALS...")
+print("========================================\n")
+nonce_results <- fit_checkpoint_models(all_nonce, "nonce")
+
+# Fit models for ATTESTED items (ALL checkpoints)
+print("\n========================================")
+print("Fitting models for ATTESTED BINOMIALS...")
+print("========================================\n")
+attested_results <- fit_checkpoint_models(all_attested, "attested")
+
+# Print summary statistics
+print("\n========================================")
+print("NONCE BINOMIALS: GenPref Effect Summary")
+print("========================================\n")
+
+nonce_summary <- nonce_results %>%
+  group_by(model) %>%
+  summarize(
+    n_checkpoints = n(),
+    mean_coef = mean(GenPref_coef),
+    sd_coef = sd(GenPref_coef),
+    final_coef = last(GenPref_coef),
+    final_p = last(GenPref_p),
+    mean_r2 = mean(r2),
+    final_r2 = last(r2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(abs(final_coef)))
+
+print(nonce_summary)
+
+print("\n========================================")
+print("ATTESTED BINOMIALS: GenPref Effect Summary")
+print("========================================\n")
+
+attested_summary <- attested_results %>%
+  group_by(model) %>%
+  summarize(
+    n_checkpoints = n(),
+    mean_coef = mean(GenPref_coef),
+    sd_coef = sd(GenPref_coef),
+    final_coef = last(GenPref_coef),
+    final_p = last(GenPref_p),
+    mean_r2 = mean(r2),
+    final_r2 = last(r2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(abs(final_coef)))
+
+print(attested_summary)
+
+# Plot GenPref coefficient over training
+print("\nGenerating plots...")
+
+# Nonce plot
+ggplot(nonce_results, aes(x = tokens, y = GenPref_coef, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = GenPref_coef - 1.96*GenPref_se,
+                  ymax = GenPref_coef + 1.96*GenPref_se,
+                  fill = model), alpha = 0.2, color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  facet_wrap(~ model, scales = "free_y") +
+  labs(
+    x = "Training tokens",
+    y = "GenPref coefficient",
+    title = "GenPref Effect on Model Preferences: Nonce Binomials",
+    subtitle = "How sensitivity to human preference predictors evolves during training"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+# Attested plot
+ggplot(attested_results, aes(x = tokens, y = GenPref_coef, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = GenPref_coef - 1.96*GenPref_se,
+                  ymax = GenPref_coef + 1.96*GenPref_se,
+                  fill = model), alpha = 0.2, color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  facet_wrap(~ model, scales = "free_y") +
+  labs(
+    x = "Training tokens",
+    y = "GenPref coefficient",
+    title = "GenPref Effect on Model Preferences: Attested Binomials",
+    subtitle = "How sensitivity to human preference predictors evolves during training"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+# Save results for later analysis
+nonce_results$item_type <- "nonce"
+attested_results$item_type <- "attested"
+genpref_results <- rbind(nonce_results, attested_results)
+```
+
+
+
+
+
+### Extended Frequency Analysis for Attested Binomials
+
+```{r}
+# Extended linear model for ATTESTED items including frequency variables
+# Fit separate model at each checkpoint to track evolution of effects
+# Using logarithmically-sampled checkpoints for speed
+
+print("\n========================================")
+print("Fitting Extended Models for ATTESTED BINOMIALS...")
+print("========================================\n")
+
+# Fix: ungroup() before scale() so it computes globally (not per-row within groups)
+all_attested_freq <- all_attested %>%
+  ungroup() %>%
+  mutate(OverallFreq_scaled = scale(log(OverallFreq))[,1])
+
+# Function to fit extended model at each checkpoint
+# Uses logarithmic checkpoint sampling for speed
+fit_extended_models <- function(data, n_samples = 400) {
+  results <- data.frame()
+
+  for (model_name in unique(data$model)) {
+    model_data <- data %>% filter(model == model_name)
+
+    # Sample checkpoints using logarithmic spacing
+    sampled_ckpts <- get_sampled_checkpoints(model_data, n_samples)
+    cat(paste("\n", model_name, "- Sampled", length(sampled_ckpts), "of",
+              n_distinct(model_data$checkpoint), "checkpoints\n"))
+
+    model_data_sampled <- model_data %>% filter(checkpoint %in% sampled_ckpts)
+
+    for (ckpt in sampled_ckpts) {
+      ckpt_data <- model_data_sampled %>% filter(checkpoint == ckpt)
+
+      tryCatch({
+        # Extended linear model: preference ~ GenPref + RelFreq + OverallFreq_scaled +
+        #                        GenPref:OverallFreq_scaled + RelFreq:OverallFreq_scaled
+        extended_model <- lm(
+          preference ~ GenPref + RelFreq + OverallFreq_scaled +
+            GenPref:OverallFreq_scaled + RelFreq:OverallFreq_scaled,
+          data = ckpt_data
+        )
+
+        # GenPref-only model for comparison
+        genpref_model <- lm(preference ~ GenPref, data = ckpt_data)
+
+        # Extract coefficients
+        coef_summary <- summary(extended_model)$coefficients
+
+        # Calculate R² values
+        r2_extended <- summary(extended_model)$r.squared
+        r2_genpref <- summary(genpref_model)$r.squared
+
+        # Store results
+        results <- rbind(results, data.frame(
+          model = model_name,
+          checkpoint = ckpt,
+          tokens = unique(ckpt_data$tokens),
+          GenPref_coef = coef_summary["GenPref", 1],
+          GenPref_se = coef_summary["GenPref", 2],
+          GenPref_p = coef_summary["GenPref", 4],
+          RelFreq_coef = coef_summary["RelFreq", 1],
+          RelFreq_se = coef_summary["RelFreq", 2],
+          RelFreq_p = coef_summary["RelFreq", 4],
+          OverallFreq_coef = coef_summary["OverallFreq_scaled", 1],
+          OverallFreq_se = coef_summary["OverallFreq_scaled", 2],
+          OverallFreq_p = coef_summary["OverallFreq_scaled", 4],
+          GenPref_x_Freq_coef = coef_summary["GenPref:OverallFreq_scaled", 1],
+          GenPref_x_Freq_se = coef_summary["GenPref:OverallFreq_scaled", 2],
+          GenPref_x_Freq_p = coef_summary["GenPref:OverallFreq_scaled", 4],
+          RelFreq_x_Freq_coef = coef_summary["RelFreq:OverallFreq_scaled", 1],
+          RelFreq_x_Freq_se = coef_summary["RelFreq:OverallFreq_scaled", 2],
+          RelFreq_x_Freq_p = coef_summary["RelFreq:OverallFreq_scaled", 4],
+          r2_genpref_only = r2_genpref,
+          r2_extended = r2_extended,
+          r2_increase = r2_extended - r2_genpref,
+          n_items = nrow(ckpt_data),
+          stringsAsFactors = FALSE
+        ))
+      }, error = function(e) {
+        cat(paste("  Error at checkpoint", ckpt, ":", conditionMessage(e), "\n"))
+      })
+    }
+
+    cat(paste("  Completed:", model_name, "\n"))
+  }
+
+  return(results)
+}
+
+# Fit extended models
+extended_results <- fit_extended_models(all_attested_freq, n_samples = 400)
+
+# Print summary statistics
+print("\n========================================")
+print("ATTESTED BINOMIALS: Extended Frequency Effects Summary")
+print("========================================\n")
+
+extended_summary <- extended_results %>%
+  group_by(model) %>%
+  summarize(
+    n_checkpoints = n(),
+    # GenPref
+    mean_GenPref = mean(GenPref_coef),
+    final_GenPref = last(GenPref_coef),
+    # RelFreq
+    mean_RelFreq = mean(RelFreq_coef),
+    final_RelFreq = last(RelFreq_coef),
+    # OverallFreq
+    mean_OverallFreq = mean(OverallFreq_coef),
+    final_OverallFreq = last(OverallFreq_coef),
+    # Interactions
+    final_GenPref_x_Freq = last(GenPref_x_Freq_coef),
+    final_RelFreq_x_Freq = last(RelFreq_x_Freq_coef),
+    # R²
+    mean_r2_increase = mean(r2_increase),
+    final_r2_increase = last(r2_increase),
+    .groups = "drop"
+  )
+
+print("Mean and Final Coefficients:")
+print(extended_summary)
+
+# Plot evolution of key effects
+print("\nGenerating plots for extended model effects...")
+
+# Plot GenPref effect
+ggplot(extended_results, aes(x = tokens, y = GenPref_coef, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = GenPref_coef - 1.96*GenPref_se,
+                  ymax = GenPref_coef + 1.96*GenPref_se,
+                  fill = model), alpha = 0.2, color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  facet_wrap(~ model, scales = "free_y") +
+  labs(
+    x = "Training tokens",
+    y = "GenPref coefficient",
+    title = "GenPref Effect (Extended Model): Attested Binomials"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "none")
+
+# Plot RelFreq effect
+ggplot(extended_results, aes(x = tokens, y = RelFreq_coef, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = RelFreq_coef - 1.96*RelFreq_se,
+                  ymax = RelFreq_coef + 1.96*RelFreq_se,
+                  fill = model), alpha = 0.2, color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  facet_wrap(~ model, scales = "free_y") +
+  labs(
+    x = "Training tokens",
+    y = "RelFreq coefficient",
+    title = "Relative Frequency Effect: Attested Binomials"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "none")
+
+# Plot OverallFreq effect
+ggplot(extended_results, aes(x = tokens, y = OverallFreq_coef, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = OverallFreq_coef - 1.96*OverallFreq_se,
+                  ymax = OverallFreq_coef + 1.96*OverallFreq_se,
+                  fill = model), alpha = 0.2, color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  facet_wrap(~ model, scales = "free_y") +
+  labs(
+    x = "Training tokens",
+    y = "scale(log(OverallFreq)) coefficient",
+    title = "Overall Frequency Effect: Attested Binomials",
+    subtitle = "Frequency scaled to mean=0, sd=1"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "none")
+
+# Plot R² increase from frequency effects
+ggplot(extended_results, aes(x = tokens, y = r2_increase, color = model)) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  facet_wrap(~ model) +
+  labs(
+    x = "Training tokens",
+    y = "R² increase from frequency effects",
+    title = "Additional Variance Explained by Frequency Variables",
+    subtitle = "Beyond GenPref alone"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "none")
 ```
 
