@@ -102,31 +102,32 @@ LIST_OF_PROMPTS = [
     "Out of nowhere came a mention of the ",
 ]
 
+
 MODEL_CONFIGS = {
-    # BabyLM (unchanged)
+    # BabyLM
     "znhoughton/opt-babylm-125m-64eps-seed964": {
-        "tokens_per_step": 819_200,  #
+        "tokens_per_step": 819_200,   # 1024 × 400 × 1 × 2
         "tokenizer": "znhoughton/opt-babylm-125m-64eps-seed964",
     },
     "znhoughton/opt-babylm-350m-64eps-seed964": {
-        "tokens_per_step": 1_228_800,  
+        "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
         "tokenizer": "znhoughton/opt-babylm-350m-64eps-seed964",
     },
     "znhoughton/opt-babylm-1.3b-64eps-seed964": {
-        "tokens_per_step": 1_638_400,  
+        "tokens_per_step": 1_638_400,  # 1024 × 200 × 4 × 2
         "tokenizer": "znhoughton/opt-babylm-1.3b-64eps-seed964",
     },
-    # C4 (UPDATED)
+    # C4
     "znhoughton/opt-c4-125m-seed964": {
-        "tokens_per_step": 819_200,
+        "tokens_per_step": 819_200,    # 1024 × 400 × 1 × 2
         "tokenizer": "znhoughton/opt-c4-125m-seed964",
     },
     "znhoughton/opt-c4-350m-seed964": {
-        "tokens_per_step": 1_228_800, 
+        "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
         "tokenizer": "znhoughton/opt-c4-350m-seed964",
     },
     "znhoughton/opt-c4-1.3b-seed964": {
-        "tokens_per_step": 819_200, 
+        "tokens_per_step": 819_200,    # 1024 × 100 × 4 × 2
         "tokenizer": "znhoughton/opt-c4-1.3b-seed964",
     },
 }
