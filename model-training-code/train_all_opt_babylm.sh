@@ -3,7 +3,7 @@ set -euo pipefail
 ############################################
 # USER SETTINGS
 ############################################
-DATASET="znhoughton/babylm-100m-v3"
+DATASET="znhoughton/babylm-150m-v3"
 TOKENIZER_NAME="opt-babylm-100m-bpe"
 BLOCK_SIZE=1024
 VOCAB_SIZE=8192
@@ -51,9 +51,9 @@ train_opt () {
     TOKENS_PER_STEP=$((BLOCK_SIZE * BATCH * GRAD_ACCUM * 2))
     SAVE_STEPS=$((TOKENS_PER_CHECKPOINT / TOKENS_PER_STEP))
     
-    MODEL_NAME="opt-babylm-${MODEL_SIZE}-100eps"
+    MODEL_NAME="opt-babylm-${MODEL_SIZE}-64eps"
     MODEL_PATH="models/${MODEL_NAME}"
-    RUN_DIR="runs/${MODEL_NAME}_${SEED}-100eps"
+    RUN_DIR="runs/${MODEL_NAME}_${SEED}-64eps"
     
     echo "============================================================"
     echo "=== Training ${MODEL_NAME} ==="
@@ -94,7 +94,7 @@ train_opt () {
         --save_only_model \
         --logging_steps 10 \
         --report_to tensorboard \
-        --num_train_epochs 100 \
+        --num_train_epochs 64 \
         --seed ${SEED} \
         --output_dir ${RUN_DIR} \
         --push_to_hub \
