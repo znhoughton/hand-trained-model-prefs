@@ -8,9 +8,9 @@ import stat
 #  MODEL CONFIGS (keys only are used here)
 # ==========================================================
 MODEL_CONFIGS = {
-    "znhoughton/opt-babylm-125m-100eps-seed964": {},
-    "znhoughton/opt-babylm-350m-100eps-seed964": {},
-    "znhoughton/opt-babylm-1.3b-100eps-seed964": {},
+    "znhoughton/opt-babylm-125m-64eps-seed964": {},
+    "znhoughton/opt-babylm-350m-64eps-seed964": {},
+    "znhoughton/opt-babylm-1.3b-64eps-seed964": {},
     "znhoughton/opt-c4-125m-seed964": {},
     "znhoughton/opt-c4-350m-seed964": {},
     "znhoughton/opt-c4-1.3b-seed964": {},
@@ -82,7 +82,7 @@ def tag_checkpoints(repo_dir):
     print(f"   ✅ Created/updated {created} checkpoint step tags")
 
 
-def push_tags(repo_dir, batch_size=50):
+def push_tags(repo_dir, batch_size=40):
     print("🚀 Pushing missing tags only")
 
     local_tags = set(subprocess.check_output(
