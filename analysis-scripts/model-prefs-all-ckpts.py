@@ -114,7 +114,7 @@ MODEL_CONFIGS = {
         "tokenizer": "znhoughton/opt-babylm-350m-64eps-seed964",
     },
     "znhoughton/opt-babylm-1.3b-64eps-seed964": {
-        "tokens_per_step": 1_638_400,  # 1024 × 200 × 4 × 2
+        "tokens_per_step": 819_200,  # 1024 × 100 × 4 × 2
         "tokenizer": "znhoughton/opt-babylm-1.3b-64eps-seed964",
     },
     # C4
