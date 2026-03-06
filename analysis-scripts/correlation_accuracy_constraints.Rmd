@@ -68,7 +68,10 @@ cat(sprintf("Training attested:     %d rows (%d checkpoints)\n",
 CONSTRAINT_COLS <- c("Form", "Percept", "Culture", "Power", "Intense",
                      "Icon", "Freq", "Len", "Lapse", "BStress")
 
-fit_constraint_models_R <- function(data) {
+FREQ_COVARIATES <- c("OverallFreq_scaled", "RelFreq_centered")
+
+# Nonce: preference ~ constraints only (matches brms Model B for nonce)
+fit_constraint_models_nonce_R <- function(data) {
   data %>%
     group_by(model, checkpoint, step, tokens) %>%
     group_map(function(g, keys) {
@@ -87,6 +90,41 @@ fit_constraint_models_R <- function(data) {
         coefficient = cf[-1, "Estimate"],
         se          = cf[-1, "Std. Error"],
         p_value     = cf[-1, "Pr(>|t|)"]
+      )
+    }, .keep = TRUE) %>%
+    bind_rows()
+}
+
+# Attested: preference ~ constraints + OverallFreq + RelFreq + all constraint×OverallFreq
+# interactions (matches brms Model B for attested); extract only constraint main effects
+fit_constraint_models_attested_R <- function(data) {
+  rhs <- c(
+    CONSTRAINT_COLS,
+    FREQ_COVARIATES,
+    "RelFreq_centered:OverallFreq_scaled",
+    paste0(CONSTRAINT_COLS, ":OverallFreq_scaled")
+  )
+  f <- reformulate(rhs, "preference")
+
+  data %>%
+    group_by(model, checkpoint, step, tokens) %>%
+    group_map(function(g, keys) {
+      complete <- g %>%
+        select(preference, all_of(CONSTRAINT_COLS), all_of(FREQ_COVARIATES)) %>%
+        drop_na()
+      if (nrow(complete) < 15) return(NULL)
+      fit <- lm(f, data = complete)
+      cf  <- coef(summary(fit))
+      cf_constraints <- cf[rownames(cf) %in% CONSTRAINT_COLS, , drop = FALSE]
+      tibble(
+        model      = keys$model,
+        checkpoint = keys$checkpoint,
+        step       = keys$step,
+        tokens     = keys$tokens,
+        constraint  = rownames(cf_constraints),
+        coefficient = cf_constraints[, "Estimate"],
+        se          = cf_constraints[, "Std. Error"],
+        p_value     = cf_constraints[, "Pr(>|t|)"]
       )
     }, .keep = TRUE) %>%
     bind_rows()
@@ -114,9 +152,9 @@ fit_genpref_models_R <- function(data) {
 }
 
 cat("Fitting constraint models (nonce)...\n")
-nonce_constraints    <- fit_constraint_models_R(training_nonce)
-cat("Fitting constraint models (attested)...\n")
-attested_constraints <- fit_constraint_models_R(training_attested)
+nonce_constraints    <- fit_constraint_models_nonce_R(training_nonce)
+cat("Fitting constraint models (attested, controlling for frequency)...\n")
+attested_constraints <- fit_constraint_models_attested_R(training_attested)
 
 cat("Fitting GenPref models (nonce)...\n")
 nonce_genpref    <- fit_genpref_models_R(training_nonce)
@@ -792,7 +830,7 @@ bind_rows(nonce_constraint_final, attested_constraint_final) %>%
     x        = NULL,
     y        = "Coefficient (posterior mean ± 95% CrI)",
     title    = "Individual Constraint Effects at Final Checkpoint",
-    subtitle = "Bayesian: preference ~ all constraints + (1 | binom) | BabyLM (left) → C4 (right) within each panel",
+    subtitle = "Nonce: preference ~ constraints + (1|binom); Attested: preference ~ constraints × frequency + (1|binom) | BabyLM (left) → C4 (right) within each panel",
     shape    = "Binomial type"
   ) +
   theme_minimal(base_size = 11) +
@@ -1029,19 +1067,22 @@ attested_freq_traj %>%
 
 ```{r plot-constraint-trajectory-nonce, fig.width=16, fig.height=8}
 nonce_constraints %>%
-  mutate(model = fct_model(model)) %>%
-  ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
+  mutate(
+    model      = fct_model(model),
+    constraint = factor(constraint, levels = CONSTRAINT_COLS)
+  ) %>%
+  ggplot(aes(x = tokens, y = coefficient, color = model)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ model, scales = "free_x", ncol = 3) +
+  facet_wrap(~ constraint, scales = "free_y", ncol = 5) +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
-  scale_color_viridis_d() +
+  scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "OLS coefficient",
     title    = "Individual Constraint Effects Over Training — NONCE Binomials",
-    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (top row) → C4 (bottom row)",
-    color    = "Constraint"
+    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (green) → C4 (purple)",
+    color    = "Model"
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -1054,19 +1095,22 @@ nonce_constraints %>%
 
 ```{r plot-constraint-trajectory-attested, fig.width=16, fig.height=8}
 attested_constraints %>%
-  mutate(model = fct_model(model)) %>%
-  ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
+  mutate(
+    model      = fct_model(model),
+    constraint = factor(constraint, levels = CONSTRAINT_COLS)
+  ) %>%
+  ggplot(aes(x = tokens, y = coefficient, color = model)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ model, scales = "free_x", ncol = 3) +
+  facet_wrap(~ constraint, scales = "free_y", ncol = 5) +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
-  scale_color_viridis_d() +
+  scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "OLS coefficient",
     title    = "Individual Constraint Effects Over Training — ATTESTED Binomials",
-    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (top row) → C4 (bottom row)",
-    color    = "Constraint"
+    subtitle = "OLS controlling for OverallFreq & RelFreq at ~19 log-sampled checkpoints | BabyLM (green) → C4 (purple)",
+    color    = "Model"
   ) +
   theme_minimal(base_size = 12) +
   theme(
@@ -1077,32 +1121,35 @@ attested_constraints %>%
   guides(color = guide_legend(nrow = 2))
 ```
 
-```{r plot-constraint-trajectory-combined, fig.width=16, fig.height=12}
+```{r plot-constraint-trajectory-combined, fig.width=16, fig.height=10}
 bind_rows(
   nonce_constraints    %>% mutate(item_type = "Nonce"),
   attested_constraints %>% mutate(item_type = "Attested")
 ) %>%
   mutate(
-    model     = fct_model(model),
-    item_type = factor(item_type, levels = c("Nonce", "Attested"))
+    model      = fct_model(model),
+    item_type  = factor(item_type, levels = c("Nonce", "Attested")),
+    constraint = factor(constraint, levels = CONSTRAINT_COLS)
   ) %>%
-  ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
+  ggplot(aes(x = tokens, y = coefficient, color = model)) +
   geom_line(linewidth = 0.7) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_grid(item_type ~ model, scales = "free_x") +
+  facet_grid(item_type ~ constraint, scales = "free_y") +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
-  scale_color_viridis_d() +
+  scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "OLS coefficient",
     title    = "Constraint Effects Over Training: Nonce vs. Attested",
-    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (left) → C4 (right)",
-    color    = "Constraint"
+    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (green) → C4 (purple)",
+    color    = "Model"
   ) +
   theme_minimal(base_size = 11) +
   theme(
     strip.text       = element_text(face = "bold"),
     panel.grid.minor = element_blank(),
+    axis.text.x      = element_blank(),
+    axis.ticks.x     = element_blank(),
     legend.position  = "bottom"
   ) +
   guides(color = guide_legend(nrow = 2))

@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Optional
 import tempfile
 import shutil
 
+import numpy as np
 import torch
 import pandas as pd
 from tqdm import tqdm
@@ -104,31 +105,88 @@ LIST_OF_PROMPTS = [
 
 
 MODEL_CONFIGS = {
-    # BabyLM
+    # ── OPT / BabyLM ──────────────────────────────────────────────────────────
+    # checkpoint_source="step_tags"  →  HF tags named "step-{N}"
+    # log_sample=False               →  use every checkpoint (already sparse)
     "znhoughton/opt-babylm-125m-64eps-seed964": {
         "tokens_per_step": 819_200,   # 1024 × 400 × 1 × 2
         "tokenizer": "znhoughton/opt-babylm-125m-64eps-seed964",
+        "checkpoint_source": "step_tags",
+        "log_sample": False,
     },
     "znhoughton/opt-babylm-350m-64eps-seed964": {
         "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
         "tokenizer": "znhoughton/opt-babylm-350m-64eps-seed964",
+        "checkpoint_source": "step_tags",
+        "log_sample": False,
     },
     "znhoughton/opt-babylm-1.3b-64eps-seed964": {
         "tokens_per_step": 819_200,  # 1024 × 100 × 4 × 2
         "tokenizer": "znhoughton/opt-babylm-1.3b-64eps-seed964",
+        "checkpoint_source": "step_tags",
+        "log_sample": False,
     },
-    # C4
+    # ── OPT / C4 ──────────────────────────────────────────────────────────────
     "znhoughton/opt-c4-125m-seed964": {
         "tokens_per_step": 819_200,    # 1024 × 400 × 1 × 2
         "tokenizer": "znhoughton/opt-c4-125m-seed964",
+        "checkpoint_source": "step_tags",
+        "log_sample": False,
     },
     "znhoughton/opt-c4-350m-seed964": {
         "tokens_per_step": 1_228_800,  # 1024 × 300 × 2 × 2
         "tokenizer": "znhoughton/opt-c4-350m-seed964",
+        "checkpoint_source": "step_tags",
+        "log_sample": False,
     },
     "znhoughton/opt-c4-1.3b-seed964": {
         "tokens_per_step": 819_200,    # 1024 × 100 × 4 × 2
         "tokenizer": "znhoughton/opt-c4-1.3b-seed964",
+        "checkpoint_source": "step_tags",
+        "log_sample": False,
+    },
+    # ── Pythia (EleutherAI) ────────────────────────────────────────────────────
+    # checkpoint_source="step_branches"  →  HF git branches named "step{N}"
+    # tokens_per_step = 2048 seq_len × 1024 batch = 2,097,152 (all Pythia sizes)
+    # ~154 checkpoints total; log_sample=True selects 20
+    "EleutherAI/pythia-160m": {
+        "tokens_per_step": 2_097_152,
+        "tokenizer": "EleutherAI/pythia-160m",
+        "checkpoint_source": "step_branches",
+        "log_sample": True,
+    },
+    "EleutherAI/pythia-410m": {
+        "tokens_per_step": 2_097_152,
+        "tokenizer": "EleutherAI/pythia-410m",
+        "checkpoint_source": "step_branches",
+        "log_sample": True,
+    },
+    "EleutherAI/pythia-1.4b": {
+        "tokens_per_step": 2_097_152,
+        "tokenizer": "EleutherAI/pythia-1.4b",
+        "checkpoint_source": "step_branches",
+        "log_sample": True,
+    },
+    "EleutherAI/pythia-2.8b": {
+        "tokens_per_step": 2_097_152,
+        "tokenizer": "EleutherAI/pythia-2.8b",
+        "checkpoint_source": "step_branches",
+        "log_sample": True,
+    },
+    # ── OLMo 3 (Allen AI) ─────────────────────────────────────────────────────
+    # Checkpoints are git branches named "stage1-step{N}" (stage1 = pretraining).
+    # tokens_per_step = 8192 seq_len × 1024 global batch = 8,388,608
+    "allenai/Olmo-3-1025-7B": {
+        "tokens_per_step": 8_388_608,  # 8192 × 1024
+        "tokenizer": "allenai/Olmo-3-1025-7B",
+        "checkpoint_source": "stage1_branches",
+        "log_sample": True,
+    },
+    "allenai/Olmo-3-1125-32B": {
+        "tokens_per_step": 8_388_608,  # 8192 × 1024
+        "tokenizer": "allenai/Olmo-3-1125-32B",
+        "checkpoint_source": "stage1_branches",
+        "log_sample": True,
     },
 }
 
@@ -216,6 +274,98 @@ def get_model_checkpoints(repo_id: str, tokens_per_step: int) -> List[Dict[str, 
         print(f"⚠️ No checkpoints found for {repo_id}")
 
     return checkpoints
+
+def get_checkpoints_from_stage1_branches(repo_id: str, tokens_per_step: int) -> List[Dict[str, Any]]:
+    """
+    For OLMo3-style repos where stage-1 pretraining checkpoints are git branches
+    named "stage1-step{N}". Only stage1 branches are returned.
+    """
+    PREFIX = "stage1-step"
+    api = HfApi()
+    refs = api.list_repo_refs(repo_id)
+
+    checkpoints = []
+    for branch in refs.branches:
+        name = branch.name
+        if not name.startswith(PREFIX):
+            continue
+        try:
+            step = int(name[len(PREFIX):])
+        except ValueError:
+            continue
+        checkpoints.append({
+            "checkpoint": name,
+            "tag": name,
+            "step": step,
+            "tokens": step * tokens_per_step,
+        })
+
+    checkpoints.sort(key=lambda x: x["step"])
+
+    if checkpoints:
+        print(
+            f"📦 {repo_id}: found {len(checkpoints)} stage1 branch checkpoints "
+            f"(steps {checkpoints[0]['step']} → {checkpoints[-1]['step']})"
+        )
+    else:
+        print(f"⚠️ No stage1 branch checkpoints found for {repo_id}")
+
+    return checkpoints
+
+
+def get_checkpoints_from_step_branches(repo_id: str, tokens_per_step: int) -> List[Dict[str, Any]]:
+    """
+    For Pythia-style repos where checkpoints are git branches named stepN (no hyphen).
+    """
+    api = HfApi()
+    refs = api.list_repo_refs(repo_id)
+
+    checkpoints = []
+    for branch in refs.branches:
+        name = branch.name
+        if not name.startswith("step"):
+            continue
+        try:
+            step = int(name[4:])  # strip leading "step"
+        except ValueError:
+            continue
+        checkpoints.append({
+            "checkpoint": name,
+            "tag": name,
+            "step": step,
+            "tokens": step * tokens_per_step,
+        })
+
+    checkpoints.sort(key=lambda x: x["step"])
+
+    if checkpoints:
+        print(
+            f"📦 {repo_id}: found {len(checkpoints)} branch checkpoints "
+            f"(steps {checkpoints[0]['step']} → {checkpoints[-1]['step']})"
+        )
+    else:
+        print(f"⚠️ No branch checkpoints found for {repo_id}")
+
+    return checkpoints
+
+
+def log_sample_checkpoints(checkpoints: List[Dict[str, Any]], n: int = 20) -> List[Dict[str, Any]]:
+    """
+    Log-uniformly sample n checkpoints by index.
+    Matches the R formula: unique(round(exp(linspace(log(1), log(total), n)))) - 1
+    """
+    total = len(checkpoints)
+    if total <= n:
+        return checkpoints
+
+    indices = sorted(set(
+        min(int(round(np.exp(x))) - 1, total - 1)
+        for x in np.linspace(np.log(1), np.log(total), n)
+    ))
+    sampled = [checkpoints[i] for i in indices]
+    print(f"  📊 Log-sampled {len(sampled)}/{total} checkpoints")
+    return sampled
+
 
 def check_prompts_in_file(filepath: str, expected_prompts: List[str]) -> Dict[str, Any]:
     """
@@ -320,11 +470,17 @@ def to_tokens_and_logprobs(
 def pick_start_batch_size(model_name: str) -> int:
     # H100 has tons of memory; start aggressively (OOM backoff will handle edge cases).
     name = model_name.lower()
-    if "125m" in name:
-        return 4096
-    if "350m" in name:
+    if "32b" in name:
+        return 64
+    if "7b" in name or "6.9b" in name:
+        return 128
+    if "2.8b" in name:
+        return 256
+    if "1.3b" in name or "1.4b" in name or "1b" in name:
+        return 1024
+    if "350m" in name or "410m" in name:
         return 2048
-    return 1024  # 1.3B
+    return 4096  # 125m, 160m, 70m, etc.
 
 
 def get_model_prefs(prompt: str, model_name: str, checkpoint_info: Dict[str, Any], tokenizer, model, device: str) -> pd.DataFrame:
@@ -520,32 +676,51 @@ def worker_main(rank: int, items: List[WorkItem]) -> None:
 # =========================
 
 def build_work_items() -> List[WorkItem]:
-    verified_models = {}
+    items: List[WorkItem] = []
 
     for model_name, config in MODEL_CONFIGS.items():
         print("=" * 60)
-        print(f"🔍 Verifying model: {model_name}")
+        print(f"🔍 Model: {model_name}")
         print("=" * 60)
+
+        source = config.get("checkpoint_source", "step_tags")
+        tps    = config["tokens_per_step"]
+
+        if tps is None:
+            print(f"⚠️  tokens_per_step is None for {model_name} — fill in the training config before running.")
+            print("⛔ Skipping.\n")
+            continue
+
         try:
-            verify_repo_is_tagged(model_name, expected_step_multiple=15, min_checkpoints=10)
-            verified_models[model_name] = config
+            if source == "step_branches":
+                checkpoints = get_checkpoints_from_step_branches(model_name, tps)
+            elif source == "stage1_branches":
+                checkpoints = get_checkpoints_from_stage1_branches(model_name, tps)
+            else:
+                # step_tags: verify tag structure, then fetch
+                verify_repo_is_tagged(model_name, expected_step_multiple=15, min_checkpoints=10)
+                checkpoints = get_model_checkpoints(model_name, tps)
         except RuntimeError as e:
             print(str(e))
             print("⛔ Skipping this model.\n")
+            continue
 
-    items: List[WorkItem] = []
-    for model_name, config in verified_models.items():
-        checkpoints = get_model_checkpoints(model_name, config["tokens_per_step"])
+        if not checkpoints:
+            print(f"⚠️  No checkpoints found for {model_name}, skipping.\n")
+            continue
+
+        if config.get("log_sample", False):
+            checkpoints = log_sample_checkpoints(checkpoints, n=20)
+
         for ckpt in checkpoints:
             items.append(WorkItem(
                 model_name=model_name,
                 tokenizer_id=config["tokenizer"],
-                tokens_per_step=config["tokens_per_step"],
+                tokens_per_step=tps,
                 checkpoint=ckpt,
             ))
 
-    # Most useful ordering: oldest->newest so you see early outputs sooner
-    # (already sorted within each model; across models, keep as appended)
+    # Sorted within each model already; across models, keep as appended
     print(f"\n🧾 Total work items: {len(items)} checkpoints\n")
     return items
 
