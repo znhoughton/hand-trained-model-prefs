@@ -12,11 +12,13 @@ library(knitr)
 
 ## Overview
 
-This analysis examines three complementary perspectives on how language models develop binomial ordering preferences during training:
+This analysis examines three complementary perspectives on how language models develop
+binomial ordering preferences during training:
 
 1. **Correlation**: Pearson r between model preference and human preference at each checkpoint
 2. **Accuracy**: Proportion of binomials where model and human agree on ordering direction (binary match)
-3. **Constraint sensitivity**: How model preferences align with individual linguistic constraints (Form, Percept, Culture, etc.) and the composite GenPref measure
+3. **Constraint sensitivity**: How model preferences align with individual linguistic constraints
+   (Form, Percept, Culture, etc.) and the composite GenPref measure
 
 All analyses are conducted separately for **nonce** (novel) and **attested** (corpus-found) binomials.
 
@@ -25,65 +27,129 @@ All analyses are conducted separately for **nonce** (novel) and **attested** (co
 ## Load and Prepare Data
 
 ```{r load-data}
-# Load checkpoint results
-out_dir <- '../Data/checkpoint_results'
-csv_files <- list.files(out_dir, pattern = "\\.csv$", full.names = TRUE)
+# Load pre-processed data. Run prepare_data.py first if any file is missing.
+# Constraint and GenPref regressions are fit below in R (see Analysis 3 & 4).
+processed_path <- "../Data/processed"
 
-cat(sprintf("Loading %d checkpoint files...\n", length(csv_files)))
+csv_names <- c(
+  "nonce_correlations", "attested_correlations",
+  "nonce_accuracy",     "attested_accuracy",
+  "final_nonce",        "final_attested",
+  "training_nonce",     "training_attested"
+)
 
-llm_data <- map_dfr(csv_files, read_csv, show_col_types = FALSE)
+missing <- csv_names[!file.exists(file.path(processed_path, paste0(csv_names, ".csv")))]
+if (length(missing) > 0) {
+  stop(sprintf(
+    "Missing processed files: %s\nRun prepare_data.py first.",
+    paste(missing, collapse = ", ")
+  ))
+}
 
-cat(sprintf("Loaded %d rows of LLM data\n", nrow(llm_data)))
+for (nm in csv_names) {
+  assign(nm, read_csv(file.path(processed_path, paste0(nm, ".csv")),
+                      show_col_types = FALSE))
+}
 
-# Load human data
-human_data <- read_csv('../Data/all_human_data.csv', show_col_types = FALSE)
+cat(sprintf("Nonce correlations:    %d rows\n",  nrow(nonce_correlations)))
+cat(sprintf("Attested correlations: %d rows\n",  nrow(attested_correlations)))
+cat(sprintf("Final nonce data:      %d rows\n",  nrow(final_nonce)))
+cat(sprintf("Final attested data:   %d rows\n",  nrow(final_attested)))
+cat(sprintf("Training nonce:        %d rows (%d checkpoints)\n",
+            nrow(training_nonce),    n_distinct(training_nonce$checkpoint)))
+cat(sprintf("Training attested:     %d rows (%d checkpoints)\n",
+            nrow(training_attested), n_distinct(training_attested$checkpoint)))
+```
 
-# Create attested flag and response binary
-human_data <- human_data %>%
-  mutate(
-    Attested = (OverallFreq > 0),
-    resp_binary = if_else(resp == 'alpha', 1, 0),
-    binom = Alpha
-  )
+```{r compute-constraints-genpref}
+# Fit OLS constraint regressions and GenPref regressions in R at the
+# log-sampled checkpoints (stored in training_nonce / training_attested).
 
-# Average human preferences per binomial
-avg_human_pref <- human_data %>%
-  group_by(binom) %>%
-  summarize(
-    hum_pref = mean(resp_binary),
-    Attested = first(Attested),
-    Word1 = first(Word1),
-    Word2 = first(Word2),
-    OverallFreq = first(OverallFreq),
-    RelFreq = first(RelFreq),
-    # Individual constraints
-    Form = first(Form),
-    Percept = first(Percept),
-    Culture = first(Culture),
-    Power = first(Power),
-    Intense = first(Intense),
-    Icon = first(Icon),
-    Freq = first(Freq),
-    Len = first(Len),
-    Lapse = first(Lapse),
-    BStress = first(`*BStress`),  # Note: column name has asterisk
-    GenPref = first(GenPref),
-    .groups = 'drop'
-  )
+CONSTRAINT_COLS <- c("Form", "Percept", "Culture", "Power", "Intense",
+                     "Icon", "Freq", "Len", "Lapse", "BStress")
 
-# Join LLM data with human preferences
-llm_and_human_data <- llm_data %>%
-  left_join(avg_human_pref, by = 'binom')
+fit_constraint_models_R <- function(data) {
+  data %>%
+    group_by(model, checkpoint, step, tokens) %>%
+    group_map(function(g, keys) {
+      complete <- g %>%
+        select(preference, all_of(CONSTRAINT_COLS)) %>%
+        drop_na()
+      if (nrow(complete) < 15) return(NULL)
+      fit <- lm(reformulate(CONSTRAINT_COLS, "preference"), data = complete)
+      cf  <- coef(summary(fit))
+      tibble(
+        model      = keys$model,
+        checkpoint = keys$checkpoint,
+        step       = keys$step,
+        tokens     = keys$tokens,
+        constraint  = rownames(cf)[-1],
+        coefficient = cf[-1, "Estimate"],
+        se          = cf[-1, "Std. Error"],
+        p_value     = cf[-1, "Pr(>|t|)"]
+      )
+    }, .keep = TRUE) %>%
+    bind_rows()
+}
 
-# Split by item type
-llm_and_human_data_nonce <- llm_and_human_data %>%
-  filter(!Attested)
+fit_genpref_models_R <- function(data) {
+  data %>%
+    group_by(model, checkpoint, step, tokens) %>%
+    group_map(function(g, keys) {
+      complete <- g %>% select(preference, GenPref) %>% drop_na()
+      if (nrow(complete) < 5) return(NULL)
+      fit <- lm(preference ~ GenPref, data = complete)
+      cf  <- coef(summary(fit))
+      tibble(
+        model      = keys$model,
+        checkpoint = keys$checkpoint,
+        step       = keys$step,
+        tokens     = keys$tokens,
+        coefficient = cf["GenPref", "Estimate"],
+        se          = cf["GenPref", "Std. Error"],
+        p_value     = cf["GenPref", "Pr(>|t|)"]
+      )
+    }, .keep = TRUE) %>%
+    bind_rows()
+}
 
-llm_and_human_data_attested <- llm_and_human_data %>%
-  filter(Attested)
+cat("Fitting constraint models (nonce)...\n")
+nonce_constraints    <- fit_constraint_models_R(training_nonce)
+cat("Fitting constraint models (attested)...\n")
+attested_constraints <- fit_constraint_models_R(training_attested)
 
-cat(sprintf("Nonce items: %d binomials\n", n_distinct(llm_and_human_data_nonce$binom)))
-cat(sprintf("Attested items: %d binomials\n", n_distinct(llm_and_human_data_attested$binom)))
+cat("Fitting GenPref models (nonce)...\n")
+nonce_genpref    <- fit_genpref_models_R(training_nonce)
+cat("Fitting GenPref models (attested)...\n")
+attested_genpref <- fit_genpref_models_R(training_attested)
+
+cat(sprintf("Constraint results: nonce %d rows, attested %d rows\n",
+            nrow(nonce_constraints), nrow(attested_constraints)))
+cat(sprintf("GenPref results:    nonce %d rows, attested %d rows\n",
+            nrow(nonce_genpref),    nrow(attested_genpref)))
+```
+
+```{r model-setup}
+# Consistent model ordering for all plots:
+# BabyLM (125M → 350M → 1.3B) then C4 (125M → 350M → 1.3B)
+MODEL_LEVELS <- c(
+  "znhoughton/opt-babylm-125m-64eps-seed964",
+  "znhoughton/opt-babylm-350m-64eps-seed964",
+  "znhoughton/opt-babylm-1.3b-64eps-seed964",
+  "znhoughton/opt-c4-125m-seed964",
+  "znhoughton/opt-c4-350m-seed964",
+  "znhoughton/opt-c4-1.3b-seed964"
+)
+MODEL_LABELS <- c(
+  "BabyLM 125M", "BabyLM 350M", "BabyLM 1.3B",
+  "C4 125M",     "C4 350M",     "C4 1.3B"
+)
+fct_model <- function(x) factor(x, levels = MODEL_LEVELS, labels = MODEL_LABELS)
+
+CORPUS_COLORS <- c(
+  "BabyLM 125M" = "#1b7837", "BabyLM 350M" = "#5aae61", "BabyLM 1.3B" = "#a6dba0",
+  "C4 125M"     = "#762a83", "C4 350M"     = "#af8dc3", "C4 1.3B"     = "#e7d4e8"
+)
 ```
 
 ---
@@ -93,29 +159,6 @@ cat(sprintf("Attested items: %d binomials\n", n_distinct(llm_and_human_data_atte
 Compute Pearson r between model preference and human preference at each checkpoint.
 
 ```{r correlation-analysis}
-# Function to compute correlation at each checkpoint
-compute_correlations <- function(data) {
-  data %>%
-    group_by(model, checkpoint, step, tokens) %>%
-    summarize(
-      correlation = cor(preference, hum_pref, use = "complete.obs"),
-      n_items = n_distinct(binom),
-      .groups = 'drop'
-    )
-}
-
-# Compute for both item types
-nonce_correlations <- llm_and_human_data_nonce %>%
-  group_by(model, binom, checkpoint, step, tokens) %>%
-  summarize(preference = mean(preference), hum_pref = first(hum_pref), .groups = 'drop') %>%
-  compute_correlations()
-
-attested_correlations <- llm_and_human_data_attested %>%
-  group_by(model, binom, checkpoint, step, tokens) %>%
-  summarize(preference = mean(preference), hum_pref = first(hum_pref), .groups = 'drop') %>%
-  compute_correlations()
-
-# Print final correlations
 cat("\n=== FINAL CORRELATIONS ===\n\n")
 cat("NONCE BINOMIALS:\n")
 nonce_correlations %>%
@@ -134,27 +177,28 @@ attested_correlations %>%
 
 ### Plot: Correlation Over Training
 
-```{r plot-correlation, fig.width=12, fig.height=8}
-# Combine and plot
+```{r plot-correlation, fig.width=14, fig.height=8}
 bind_rows(
-  nonce_correlations %>% mutate(item_type = "Nonce"),
+  nonce_correlations    %>% mutate(item_type = "Nonce"),
   attested_correlations %>% mutate(item_type = "Attested")
 ) %>%
+  mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = correlation, color = model)) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
   facet_grid(item_type ~ model, scales = "free_x") +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  scale_color_manual(values = CORPUS_COLORS) +
   labs(
-    x = "Training tokens",
-    y = "Pearson r (model vs. human preference)",
-    title = "Model-Human Correlation Over Training",
-    subtitle = "Attested (top) vs. Nonce (bottom) binomials"
+    x        = "Training tokens",
+    y        = "Pearson r (model vs. human preference)",
+    title    = "Model-Human Correlation Over Training",
+    subtitle = "Attested (top) vs. Nonce (bottom) | BabyLM models (left) → C4 models (right)"
   ) +
   theme_minimal(base_size = 13) +
   theme(
-    strip.text = element_text(face = "bold"),
-    legend.position = "none",
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none",
     panel.grid.minor = element_blank()
   )
 ```
@@ -164,37 +208,12 @@ bind_rows(
 ## Analysis 2: Accuracy Over Training
 
 Accuracy = proportion of binomials where model and human agree on ordering direction.
-- Model direction: mean preference > 0.5 (prefers alphabetical) vs. ≤ 0.5 (prefers non-alphabetical)
+
+- Model direction: mean preference > 0.5 (prefers alphabetical) vs. ≤ 0.5
 - Human direction: hum_pref > 0.5 vs. ≤ 0.5
 - Correct if both agree on direction
 
 ```{r accuracy-analysis}
-# Function to compute accuracy at each checkpoint
-compute_accuracy <- function(data) {
-  data %>%
-    # Average preference across prompts
-    group_by(model, binom, checkpoint, step, tokens, hum_pref) %>%
-    summarize(preference = mean(preference), .groups = 'drop') %>%
-    # Determine direction for model and human
-    mutate(
-      model_direction = if_else(preference > 0.5, 1, 0),
-      human_direction = if_else(hum_pref > 0.5, 1, 0),
-      correct = (model_direction == human_direction)
-    ) %>%
-    # Compute accuracy per checkpoint
-    group_by(model, checkpoint, step, tokens) %>%
-    summarize(
-      accuracy = mean(correct),
-      n_items = n(),
-      .groups = 'drop'
-    )
-}
-
-# Compute for both item types
-nonce_accuracy <- compute_accuracy(llm_and_human_data_nonce)
-attested_accuracy <- compute_accuracy(llm_and_human_data_attested)
-
-# Print final accuracies
 cat("\n=== FINAL ACCURACIES ===\n\n")
 cat("NONCE BINOMIALS:\n")
 nonce_accuracy %>%
@@ -213,28 +232,29 @@ attested_accuracy %>%
 
 ### Plot: Accuracy Over Training
 
-```{r plot-accuracy, fig.width=12, fig.height=8}
-# Combine and plot
+```{r plot-accuracy, fig.width=14, fig.height=8}
 bind_rows(
-  nonce_accuracy %>% mutate(item_type = "Nonce"),
+  nonce_accuracy    %>% mutate(item_type = "Nonce"),
   attested_accuracy %>% mutate(item_type = "Attested")
 ) %>%
+  mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = accuracy, color = model)) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray60") +
   facet_grid(item_type ~ model, scales = "free_x") +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
   scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_color_manual(values = CORPUS_COLORS) +
   labs(
-    x = "Training tokens",
-    y = "Accuracy (proportion direction match)",
-    title = "Model-Human Direction Agreement Over Training",
-    subtitle = "Attested (top) vs. Nonce (bottom) binomials; dashed line = chance (50%)"
+    x        = "Training tokens",
+    y        = "Accuracy (proportion direction match)",
+    title    = "Model-Human Direction Agreement Over Training",
+    subtitle = "Attested (top) vs. Nonce (bottom) | BabyLM (left) → C4 (right); dashed = chance (50%)"
   ) +
   theme_minimal(base_size = 13) +
   theme(
-    strip.text = element_text(face = "bold"),
-    legend.position = "none",
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none",
     panel.grid.minor = element_blank()
   )
 ```
@@ -244,70 +264,9 @@ bind_rows(
 ## Analysis 3: Individual Constraint Effects Over Training
 
 For each checkpoint, fit:
-- `lm(preference ~ Form + Percept + Culture + Power + Intense + Icon + Freq + Len + Lapse + BStress)`
-
-This gives us the coefficient for each constraint, controlling for all others.
+`lm(preference ~ Form + Percept + Culture + Power + Intense + Icon + Freq + Len + Lapse + BStress)`
 
 ```{r constraint-analysis}
-# Function to fit constraint model at each checkpoint
-fit_constraint_models <- function(data) {
-  result <- data %>%
-    # Average preference across prompts
-    group_by(model, binom, checkpoint, step, tokens,
-             Form, Percept, Culture, Power, Intense, Icon, Freq, Len, Lapse, BStress) %>%
-    summarize(preference = mean(preference), .groups = 'drop') %>%
-    # Fit model at each checkpoint
-    group_by(model, checkpoint, step, tokens) %>%
-    summarize(
-      # Check if we have enough complete cases
-      n_complete = sum(complete.cases(preference, Form, Percept, Culture, Power,
-                                       Intense, Icon, Freq, Len, Lapse, BStress)),
-      # Fit the model only if we have enough data
-      model_fit = if (n_complete >= 15) {  # Need more cases for 10 predictors
-        list(lm(preference ~ Form + Percept + Culture + Power +
-                             Intense + Icon + Freq + Len + Lapse + BStress))
-      } else {
-        list(NULL)
-      },
-      .groups = 'drop'
-    ) %>%
-    # Remove checkpoints with insufficient data
-    filter(!map_lgl(model_fit, is.null))
-
-  # If no valid models, return empty tibble with correct structure
-  if (nrow(result) == 0) {
-    return(tibble(
-      model = character(),
-      checkpoint = character(),
-      step = numeric(),
-      tokens = numeric(),
-      constraint = character(),
-      coefficient = numeric(),
-      se = numeric(),
-      p_value = numeric()
-    ))
-  }
-
-  # Extract coefficients
-  result %>%
-    mutate(
-      coefs = map(model_fit, ~ broom::tidy(.x))
-    ) %>%
-    select(-model_fit, -n_complete) %>%
-    unnest(coefs) %>%
-    filter(term != "(Intercept)") %>%
-    select(model, checkpoint, step, tokens, constraint = term,
-           coefficient = estimate, se = std.error, p_value = p.value)
-}
-
-# Compute for both item types
-cat("Fitting constraint models for nonce items...\n")
-nonce_constraints <- fit_constraint_models(llm_and_human_data_nonce)
-
-cat("Fitting constraint models for attested items...\n")
-attested_constraints <- fit_constraint_models(llm_and_human_data_attested)
-
-# Print final coefficients
 cat("\n=== FINAL CONSTRAINT COEFFICIENTS ===\n\n")
 cat("NONCE BINOMIALS (final checkpoint):\n")
 nonce_constraints %>%
@@ -328,52 +287,54 @@ attested_constraints %>%
 
 ### Plot: Individual Constraint Coefficients Over Training (Nonce)
 
-```{r plot-constraints-nonce, fig.width=14, fig.height=10}
+```{r plot-constraints-nonce, fig.width=16, fig.height=8}
 nonce_constraints %>%
+  mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ model, scales = "free_x", ncol = 2) +
+  facet_wrap(~ model, scales = "free_x", ncol = 3) +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
   scale_color_viridis_d() +
   labs(
-    x = "Training tokens",
-    y = "Coefficient",
-    title = "Individual Constraint Effects Over Training — NONCE Binomials",
-    subtitle = "lm(preference ~ Form + Percept + Culture + Power + Intense + Icon + Freq + Len + Lapse + BStress)",
-    color = "Constraint"
+    x        = "Training tokens",
+    y        = "Coefficient",
+    title    = "Individual Constraint Effects Over Training — NONCE Binomials",
+    subtitle = "OLS: preference ~ constraints | BabyLM (top row) → C4 (bottom row)",
+    color    = "Constraint"
   ) +
   theme_minimal(base_size = 12) +
   theme(
-    strip.text = element_text(face = "bold"),
+    strip.text       = element_text(face = "bold"),
     panel.grid.minor = element_blank(),
-    legend.position = "bottom"
+    legend.position  = "bottom"
   ) +
   guides(color = guide_legend(nrow = 2))
 ```
 
 ### Plot: Individual Constraint Coefficients Over Training (Attested)
 
-```{r plot-constraints-attested, fig.width=14, fig.height=10}
+```{r plot-constraints-attested, fig.width=16, fig.height=8}
 attested_constraints %>%
+  mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ model, scales = "free_x", ncol = 2) +
+  facet_wrap(~ model, scales = "free_x", ncol = 3) +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
   scale_color_viridis_d() +
   labs(
-    x = "Training tokens",
-    y = "Coefficient",
-    title = "Individual Constraint Effects Over Training — ATTESTED Binomials",
-    subtitle = "lm(preference ~ Form + Percept + Culture + Power + Intense + Icon + Freq + Len + Lapse + BStress)",
-    color = "Constraint"
+    x        = "Training tokens",
+    y        = "Coefficient",
+    title    = "Individual Constraint Effects Over Training — ATTESTED Binomials",
+    subtitle = "OLS: preference ~ constraints | BabyLM (top row) → C4 (bottom row)",
+    color    = "Constraint"
   ) +
   theme_minimal(base_size = 12) +
   theme(
-    strip.text = element_text(face = "bold"),
+    strip.text       = element_text(face = "bold"),
     panel.grid.minor = element_blank(),
-    legend.position = "bottom"
+    legend.position  = "bottom"
   ) +
   guides(color = guide_legend(nrow = 2))
 ```
@@ -382,63 +343,10 @@ attested_constraints %>%
 
 ## Analysis 4: GenPref Effect Over Training
 
-Fit `lm(preference ~ GenPref)` at each checkpoint to track overall sensitivity to the composite measure.
+Fit `lm(preference ~ GenPref)` at each checkpoint to track overall sensitivity
+to the composite measure.
 
 ```{r genpref-analysis}
-# Function to fit GenPref model at each checkpoint
-fit_genpref_models <- function(data) {
-  result <- data %>%
-    # Average preference across prompts
-    group_by(model, binom, checkpoint, step, tokens, GenPref) %>%
-    summarize(preference = mean(preference), .groups = 'drop') %>%
-    # Fit model at each checkpoint
-    group_by(model, checkpoint, step, tokens) %>%
-    summarize(
-      # Only fit if we have enough complete cases
-      n_complete = sum(complete.cases(preference, GenPref)),
-      model_fit = if (n_complete >= 5) {
-        list(lm(preference ~ GenPref))
-      } else {
-        list(NULL)
-      },
-      .groups = 'drop'
-    ) %>%
-    # Remove checkpoints with insufficient data
-    filter(!map_lgl(model_fit, is.null))
-
-  # If no valid models, return empty tibble with correct structure
-  if (nrow(result) == 0) {
-    return(tibble(
-      model = character(),
-      checkpoint = character(),
-      step = numeric(),
-      tokens = numeric(),
-      coefficient = numeric(),
-      se = numeric(),
-      p_value = numeric()
-    ))
-  }
-
-  # Extract GenPref coefficient
-  result %>%
-    mutate(
-      coefs = map(model_fit, ~ broom::tidy(.x))
-    ) %>%
-    select(-model_fit, -n_complete) %>%
-    unnest(coefs) %>%
-    filter(term == "GenPref") %>%
-    select(model, checkpoint, step, tokens,
-           coefficient = estimate, se = std.error, p_value = p.value)
-}
-
-# Compute for both item types
-cat("Fitting GenPref models for nonce items...\n")
-nonce_genpref <- fit_genpref_models(llm_and_human_data_nonce)
-
-cat("Fitting GenPref models for attested items...\n")
-attested_genpref <- fit_genpref_models(llm_and_human_data_attested)
-
-# Print final GenPref coefficients
 cat("\n=== FINAL GENPREF COEFFICIENTS ===\n\n")
 cat("NONCE BINOMIALS:\n")
 nonce_genpref %>%
@@ -457,27 +365,28 @@ attested_genpref %>%
 
 ### Plot: GenPref Coefficient Over Training
 
-```{r plot-genpref, fig.width=12, fig.height=8}
-# Combine and plot
+```{r plot-genpref, fig.width=14, fig.height=8}
 bind_rows(
-  nonce_genpref %>% mutate(item_type = "Nonce"),
+  nonce_genpref    %>% mutate(item_type = "Nonce"),
   attested_genpref %>% mutate(item_type = "Attested")
 ) %>%
+  mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = coefficient, color = model)) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
   facet_grid(item_type ~ model, scales = "free_x") +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  scale_color_manual(values = CORPUS_COLORS) +
   labs(
-    x = "Training tokens",
-    y = "GenPref coefficient",
-    title = "GenPref Effect Over Training",
-    subtitle = "lm(preference ~ GenPref); Nonce (top) vs. Attested (bottom)"
+    x        = "Training tokens",
+    y        = "GenPref coefficient",
+    title    = "GenPref Effect Over Training",
+    subtitle = "OLS: preference ~ GenPref | Nonce (top) vs. Attested (bottom) | BabyLM (left) → C4 (right)"
   ) +
   theme_minimal(base_size = 13) +
   theme(
-    strip.text = element_text(face = "bold"),
-    legend.position = "none",
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none",
     panel.grid.minor = element_blank()
   )
 ```
@@ -486,17 +395,15 @@ bind_rows(
 
 ## Combined Visualization: Correlation vs. Accuracy
 
-```{r plot-corr-acc-combined, fig.width=14, fig.height=10}
-# Combine correlation and accuracy data
-combined_data <- bind_rows(
-  nonce_correlations %>% mutate(item_type = "Nonce", metric = "Correlation", value = correlation),
+```{r plot-corr-acc-combined, fig.width=16, fig.height=10}
+bind_rows(
+  nonce_correlations    %>% mutate(item_type = "Nonce",    metric = "Correlation", value = correlation),
   attested_correlations %>% mutate(item_type = "Attested", metric = "Correlation", value = correlation),
-  nonce_accuracy %>% mutate(item_type = "Nonce", metric = "Accuracy", value = accuracy),
-  attested_accuracy %>% mutate(item_type = "Attested", metric = "Accuracy", value = accuracy)
+  nonce_accuracy        %>% mutate(item_type = "Nonce",    metric = "Accuracy",    value = accuracy),
+  attested_accuracy     %>% mutate(item_type = "Attested", metric = "Accuracy",    value = accuracy)
 ) %>%
-  select(model, tokens, item_type, metric, value)
-
-combined_data %>%
+  select(model, tokens, item_type, metric, value) %>%
+  mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = value, color = metric)) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray60", alpha = 0.5) +
@@ -504,17 +411,17 @@ combined_data %>%
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
   scale_color_manual(values = c("Correlation" = "#E41A1C", "Accuracy" = "#377EB8")) +
   labs(
-    x = "Training tokens",
-    y = "Value",
-    title = "Model-Human Alignment: Correlation vs. Accuracy",
-    subtitle = "Nonce (top) vs. Attested (bottom) binomials; dashed line = 0.5",
-    color = "Metric"
+    x        = "Training tokens",
+    y        = "Value",
+    title    = "Model-Human Alignment: Correlation vs. Accuracy",
+    subtitle = "Nonce (top) vs. Attested (bottom) | BabyLM (left) → C4 (right); dashed = 0.5",
+    color    = "Metric"
   ) +
   theme_minimal(base_size = 13) +
   theme(
-    strip.text = element_text(face = "bold"),
+    strip.text       = element_text(face = "bold"),
     panel.grid.minor = element_blank(),
-    legend.position = "bottom"
+    legend.position  = "bottom"
   )
 ```
 
@@ -525,16 +432,15 @@ combined_data %>%
 ```{r summary-stats}
 cat("\n=== SUMMARY: INITIAL vs. FINAL VALUES ===\n\n")
 
-# Function to get initial and final values
 get_init_final <- function(data, value_col) {
   data %>%
     group_by(model) %>%
     arrange(tokens) %>%
     summarize(
-      initial = first({{value_col}}),
-      final = last({{value_col}}),
-      change = final - initial,
-      .groups = 'drop'
+      initial = first({{ value_col }}),
+      final   = last({{ value_col }}),
+      change  = final - initial,
+      .groups = "drop"
     )
 }
 
@@ -561,20 +467,16 @@ get_init_final(attested_genpref, coefficient) %>% kable(digits = 3)
 
 ## Analysis 5: Bayesian Mixed-Effects Models
 
-This analysis fits Bayesian regression models using brms to provide formal inference on
-linguistic effects while accounting for item-level variability.
-
 ```{r setup-brms}
 library(brms)
 
-# Create cache directory for brms models
 dir.create("brms_cache", showWarnings = FALSE)
 
 # Weakly informative priors centered at zero
 bayes_priors <- c(
-  prior(normal(0, 0.5), class = b),      # Fixed effects
-  prior(exponential(1), class = sd),     # Random effect SDs
-  prior(exponential(1), class = sigma)   # Residual SD
+  prior(normal(0, 0.5), class = b),
+  prior(exponential(1), class = sd),
+  prior(exponential(1), class = sigma)
 )
 ```
 
@@ -582,533 +484,626 @@ bayes_priors <- c(
 
 ### Part A: Final Checkpoint Analysis
 
-Fit models on the final (fully trained) checkpoint for each model to assess
-the learned representations after complete training.
+Fit models on the final (fully trained) checkpoint for each model.
 
 ```{r final-checkpoint-data}
-# Get final checkpoint for each model
-final_data <- llm_and_human_data %>%
-  group_by(model) %>%
-  filter(tokens == max(tokens)) %>%
-  ungroup() %>%
-  mutate(GenPref_centered = GenPref - 0.5)
-
-cat(sprintf("Final checkpoint data: %d observations across %d models\n",
-            nrow(final_data), n_distinct(final_data$model)))
-
-# Split by item type
-final_nonce <- final_data %>% filter(Attested == 0)
-final_attested <- final_data %>% filter(Attested == 1)
+cat(sprintf(
+  "Final checkpoint data: nonce %d rows, attested %d rows, across %d models\n",
+  nrow(final_nonce), nrow(final_attested),
+  n_distinct(c(final_nonce$model, final_attested$model))
+))
 ```
 
 #### Nonce Binomials: Final Checkpoint
 
-```{r brms-nonce-final, cache=TRUE, results='hide', message=FALSE, warning=FALSE}
-# Get unique models
-models_list <- unique(final_nonce$model)
+```{r brms-nonce-final}
+# fit → extract → discard within each iteration
+nonce_final_results <- map(
+  setNames(unique(final_nonce$model), unique(final_nonce$model)),
+  function(model_name) {
+    cat(sprintf("\n=== %s (NONCE - FINAL) ===\n", model_name))
+    md <- final_nonce %>% filter(model == model_name)
+    cat(sprintf("  %d rows | NAs — preference: %d, GenPref_centered: %d, binom: %d\n",
+                nrow(md),
+                sum(is.na(md$preference)),
+                sum(is.na(md$GenPref_centered)),
+                sum(is.na(md$binom))))
 
-# Store results
-nonce_final_results <- list()
+    result <- list()
 
-for (model_name in models_list) {
-  cat(sprintf("\n=== Fitting models for %s (NONCE - FINAL) ===\n", model_name))
+    # ── Model A: GenPref effect ──────────────────────────────────────────────
+    md_a <- md %>%
+      filter(!is.na(preference), !is.na(GenPref_centered), !is.na(binom))
 
-  model_data <- final_nonce %>% filter(model == model_name)
+    if (nrow(md_a) < 10) {
+      message("  Skipping Model A: < 10 complete cases")
+    } else {
+      cat("  → Model A: preference ~ GenPref_centered + (1 | binom)\n")
+      fit_a <- brm(
+        preference ~ GenPref_centered + (1 | binom),
+        data    = md_a, family = gaussian(), prior = bayes_priors,
+        chains  = 4, cores = 4, iter = 12000, warmup = 6000, seed = 964,
+        silent  = 2,
+        file    = sprintf("brms_cache/final_nonce_%s_modelA",
+                          gsub("[/:-]", "_", model_name)),
+        control = list(adapt_delta = 0.98)
+      )
+      print(round(summary(fit_a)$fixed, 3))
+      rstan::check_hmc_diagnostics(fit_a$fit)
 
-  # Model A: GenPref effect
-  cat("  Fitting Model A: preference ~ GenPref_centered...\n")
-  model_a <- brm(
-    preference ~ GenPref_centered + (1 | binom),
-    data = model_data,
-    family = gaussian(),
-    prior = bayes_priors,
-    chains = 4,
-    cores = 4,
-    iter = 6000,
-    warmup = 3000,
-    seed = 964,
-    file = sprintf("brms_cache/final_nonce_%s_modelA", gsub("[/:-]", "_", model_name)),
-    control = list(adapt_delta = 0.95)
-  )
+      # Extract what we need, then discard the model object
+      fe_a <- fixef(fit_a)
+      result$model_a_fixed <- as.data.frame(fe_a) %>%
+        rownames_to_column("parameter") %>%
+        mutate(model = model_name, item_type = "Nonce", checkpoint = "final")
 
-  # Model B: Individual constraints
-  cat("  Fitting Model B: preference ~ individual constraints...\n")
-  model_b <- brm(
-    preference ~ Form + Percept + Culture + Power + Intense + Icon +
-                 Freq + Len + Lapse + BStress +
-                 (1 | binom),
-    data = model_data,
-    family = gaussian(),
-    prior = bayes_priors,
-    chains = 4,
-    cores = 4,
-    iter = 6000,
-    warmup = 3000,
-    seed = 964,
-    file = sprintf("brms_cache/final_nonce_%s_modelB", gsub("[/:-]", "_", model_name)),
-    control = list(adapt_delta = 0.95)
-  )
+      rm(fit_a); gc()
+    }
 
-  nonce_final_results[[model_name]] <- list(
-    model_a = model_a,
-    model_b = model_b
-  )
-}
+    # ── Model B: Individual constraints ─────────────────────────────────────
+    md_b <- md %>%
+      filter(!is.na(preference), !is.na(binom),
+             !is.na(Form), !is.na(Percept), !is.na(Culture), !is.na(Power),
+             !is.na(Intense), !is.na(Icon), !is.na(Freq), !is.na(Len),
+             !is.na(Lapse), !is.na(BStress))
+
+    if (nrow(md_b) < 15) {
+      message("  Skipping Model B: < 15 complete cases")
+    } else {
+      cat("  → Model B: preference ~ individual constraints + (1 | binom)\n")
+      fit_b <- brm(
+        preference ~ Form + Percept + Culture + Power + Intense + Icon +
+                     Freq + Len + Lapse + BStress + (1 | binom),
+        data    = md_b, family = gaussian(), prior = bayes_priors,
+        chains  = 4, cores = 4, iter = 12000, warmup = 6000, seed = 964,
+        silent  = 2,
+        file    = sprintf("brms_cache/final_nonce_%s_modelB",
+                          gsub("[/:-]", "_", model_name)),
+        control = list(adapt_delta = 0.98)
+      )
+      print(round(summary(fit_b)$fixed, 3))
+      rstan::check_hmc_diagnostics(fit_b$fit)
+
+      fe_b <- fixef(fit_b)
+      result$model_b_fixed <- as.data.frame(fe_b) %>%
+        rownames_to_column("parameter") %>%
+        mutate(model = model_name, item_type = "Nonce", checkpoint = "final")
+
+      rm(fit_b); gc()
+    }
+
+    result
+  }
+)
 ```
 
 ```{r nonce-final-summaries}
-cat("\n=== NONCE BINOMIALS (FINAL CHECKPOINT): BAYESIAN MODEL SUMMARIES ===\n\n")
-
+cat("\n=== NONCE BINOMIALS (FINAL CHECKPOINT): FIXED EFFECTS SUMMARIES ===\n\n")
 for (model_name in names(nonce_final_results)) {
-  cat(sprintf("\n\n########################################\n"))
-  cat(sprintf("# %s - NONCE (FINAL)\n", model_name))
-  cat(sprintf("########################################\n\n"))
-
+  cat(sprintf("\n### %s - NONCE (FINAL)\n", model_name))
   cat("--- Model A: GenPref Effect ---\n")
-  print(summary(nonce_final_results[[model_name]]$model_a))
-
+  print(kable(nonce_final_results[[model_name]]$model_a_fixed, digits = 3))
   cat("\n--- Model B: Individual Constraints ---\n")
-  print(summary(nonce_final_results[[model_name]]$model_b))
+  print(kable(nonce_final_results[[model_name]]$model_b_fixed, digits = 3))
 }
 ```
 
 #### Attested Binomials: Final Checkpoint
 
-```{r brms-attested-final, cache=TRUE, results='hide', message=FALSE, warning=FALSE}
-# Get unique models
-models_list <- unique(final_attested$model)
+```{r brms-attested-final}
+attested_final_results <- map(
+  setNames(unique(final_attested$model), unique(final_attested$model)),
+  function(model_name) {
+    cat(sprintf("\n=== %s (ATTESTED - FINAL) ===\n", model_name))
+    md <- final_attested %>% filter(model == model_name)
 
-# Store results
-attested_final_results <- list()
+    result <- list()
 
-# Prepare frequency variables (center and scale)
-final_attested <- final_attested %>%
-  mutate(
-    RelFreq_centered = RelFreq - 0.5,
-    OverallFreq_log = log(OverallFreq),
-    OverallFreq_scaled = scale(OverallFreq_log)[, 1]
-  )
+    # ── Model A: GenPref + frequency interactions ────────────────────────────
+    cat("  → Model A: preference ~ GenPref_centered * OverallFreq + RelFreq * OverallFreq + (1 | binom)\n")
+    fit_a <- brm(
+      preference ~ GenPref_centered * OverallFreq_scaled +
+                   RelFreq_centered * OverallFreq_scaled + (1 | binom),
+      data    = md, family = gaussian(), prior = bayes_priors,
+      chains  = 4, cores = 4, iter = 12000, warmup = 6000, seed = 964,
+      silent  = 2,
+      file    = sprintf("brms_cache/final_attested_%s_modelA",
+                        gsub("[/:-]", "_", model_name)),
+      control = list(adapt_delta = 0.98)
+    )
+    print(round(summary(fit_a)$fixed, 3))
+    rstan::check_hmc_diagnostics(fit_a$fit)
 
-for (model_name in models_list) {
-  cat(sprintf("\n=== Fitting models for %s (ATTESTED - FINAL) ===\n", model_name))
+    fe_a <- fixef(fit_a)
+    result$model_a_fixed <- as.data.frame(fe_a) %>%
+      rownames_to_column("parameter") %>%
+      mutate(model = model_name, item_type = "Attested", checkpoint = "final")
 
-  model_data <- final_attested %>% filter(model == model_name)
+    rm(fit_a); gc()
 
-  # Model A: GenPref + frequency interactions
-  cat("  Fitting Model A: preference ~ GenPref_centered * OverallFreq + RelFreq * OverallFreq...\n")
-  model_a <- brm(
-    preference ~ GenPref_centered * OverallFreq_scaled + RelFreq_centered * OverallFreq_scaled +
-                 (1 | binom),
-    data = model_data,
-    family = gaussian(),
-    prior = bayes_priors,
-    chains = 4,
-    cores = 4,
-    iter = 6000,
-    warmup = 3000,
-    seed = 964,
-    file = sprintf("brms_cache/final_attested_%s_modelA", gsub("[/:-]", "_", model_name)),
-    control = list(adapt_delta = 0.95)
-  )
+    # ── Model B: Individual constraints + frequency interactions ─────────────
+    cat("  → Model B: preference ~ constraints + frequencies + interactions + (1 | binom)\n")
+    fit_b <- brm(
+      preference ~ Form + Percept + Culture + Power + Intense + Icon +
+                   Freq + Len + Lapse + BStress +
+                   OverallFreq_scaled + RelFreq_centered +
+                   RelFreq_centered:OverallFreq_scaled +
+                   Form:OverallFreq_scaled     + Percept:OverallFreq_scaled  +
+                   Culture:OverallFreq_scaled  + Power:OverallFreq_scaled    +
+                   Intense:OverallFreq_scaled  + Icon:OverallFreq_scaled     +
+                   Freq:OverallFreq_scaled     + Len:OverallFreq_scaled      +
+                   Lapse:OverallFreq_scaled    + BStress:OverallFreq_scaled  +
+                   (1 | binom),
+      data    = md, family = gaussian(), prior = bayes_priors,
+      chains  = 4, cores = 4, iter = 12000, warmup = 6000, seed = 964,
+      silent  = 2,
+      file    = sprintf("brms_cache/final_attested_%s_modelB",
+                        gsub("[/:-]", "_", model_name)),
+      control = list(adapt_delta = 0.98, max_treedepth = 12)
+    )
+    print(round(summary(fit_b)$fixed, 3))
+    rstan::check_hmc_diagnostics(fit_b$fit)
 
-  # Model B: Individual constraints + frequency interactions
-  cat("  Fitting Model B: preference ~ constraints + frequencies + interactions...\n")
-  model_b <- brm(
-    preference ~ Form + Percept + Culture + Power + Intense + Icon +
-                 Freq + Len + Lapse + BStress +
-                 OverallFreq_scaled + RelFreq_centered +
-                 RelFreq_centered:OverallFreq_scaled +
-                 Form:OverallFreq_scaled + Percept:OverallFreq_scaled +
-                 Culture:OverallFreq_scaled + Power:OverallFreq_scaled +
-                 Intense:OverallFreq_scaled + Icon:OverallFreq_scaled +
-                 Freq:OverallFreq_scaled + Len:OverallFreq_scaled +
-                 Lapse:OverallFreq_scaled + BStress:OverallFreq_scaled +
-                 (1 | binom),
-    data = model_data,
-    family = gaussian(),
-    prior = bayes_priors,
-    chains = 4,
-    cores = 4,
-    iter = 6000,
-    warmup = 3000,
-    seed = 964,
-    file = sprintf("brms_cache/final_attested_%s_modelB", gsub("[/:-]", "_", model_name)),
-    control = list(adapt_delta = 0.99, max_treedepth = 12)
-  )
+    fe_b <- fixef(fit_b)
+    result$model_b_fixed <- as.data.frame(fe_b) %>%
+      rownames_to_column("parameter") %>%
+      mutate(model = model_name, item_type = "Attested", checkpoint = "final")
 
-  attested_final_results[[model_name]] <- list(
-    model_a = model_a,
-    model_b = model_b
-  )
-}
+    rm(fit_b); gc()
+
+    result
+  }
+)
 ```
 
 ```{r attested-final-summaries}
-cat("\n=== ATTESTED BINOMIALS (FINAL CHECKPOINT): BAYESIAN MODEL SUMMARIES ===\n\n")
-
+cat("\n=== ATTESTED BINOMIALS (FINAL CHECKPOINT): FIXED EFFECTS SUMMARIES ===\n\n")
 for (model_name in names(attested_final_results)) {
-  cat(sprintf("\n\n########################################\n"))
-  cat(sprintf("# %s - ATTESTED (FINAL)\n", model_name))
-  cat(sprintf("########################################\n\n"))
-
+  cat(sprintf("\n### %s - ATTESTED (FINAL)\n", model_name))
   cat("--- Model A: GenPref + Frequency Interactions ---\n")
-  print(summary(attested_final_results[[model_name]]$model_a))
-
+  print(kable(attested_final_results[[model_name]]$model_a_fixed, digits = 3))
   cat("\n--- Model B: Individual Constraints + Frequency Interactions ---\n")
-  print(summary(attested_final_results[[model_name]]$model_b))
+  print(kable(attested_final_results[[model_name]]$model_b_fixed, digits = 3))
 }
 ```
 
-#### Final Checkpoint: Convergence Diagnostics
-
-```{r brms-final-diagnostics}
-cat("\n=== CONVERGENCE DIAGNOSTICS (FINAL CHECKPOINT) ===\n\n")
-
-# Function to check convergence
-check_convergence <- function(model, model_label) {
-  rhat_vals <- brms::rhat(model)
-  n_bad <- sum(rhat_vals > 1.01, na.rm = TRUE)
-  max_rhat <- max(rhat_vals, na.rm = TRUE)
-
-  cat(sprintf("%s: max Rhat = %.4f | parameters with Rhat > 1.01: %d\n",
-              model_label, max_rhat, n_bad))
-
-  if (n_bad > 0) {
-    cat("  WARNING: Some parameters did not converge!\n")
-  }
-}
-
-cat("NONCE BINOMIALS:\n")
-for (model_name in names(nonce_final_results)) {
-  check_convergence(nonce_final_results[[model_name]]$model_a,
-                   sprintf("%s Model A", model_name))
-  check_convergence(nonce_final_results[[model_name]]$model_b,
-                   sprintf("%s Model B", model_name))
-}
-
-cat("\nATTESTED BINOMIALS:\n")
-for (model_name in names(attested_final_results)) {
-  check_convergence(attested_final_results[[model_name]]$model_a,
-                   sprintf("%s Model A", model_name))
-  check_convergence(attested_final_results[[model_name]]$model_b,
-                   sprintf("%s Model B", model_name))
-}
-```
-
-#### Final Checkpoint: Effect Sizes Summary
+#### Final Checkpoint: Key Effects Summary (95% Credible Intervals)
 
 ```{r brms-final-effects-summary}
-# Extract fixed effects for easy comparison
-extract_fixed_effects <- function(model) {
-  fixef(model) %>%
-    as.data.frame() %>%
-    rownames_to_column("parameter") %>%
-    select(parameter, Estimate, Est.Error, Q2.5, Q97.5)
-}
-
 cat("\n=== KEY EFFECTS AT FINAL CHECKPOINT: 95% CREDIBLE INTERVALS ===\n\n")
 
 cat("NONCE BINOMIALS - GenPref Effects:\n")
-for (model_name in names(nonce_final_results)) {
-  cat(sprintf("\n%s:\n", model_name))
-  extract_fixed_effects(nonce_final_results[[model_name]]$model_a) %>%
-    filter(parameter == "GenPref_centered") %>%
-    kable(digits = 3) %>%
-    print()
-}
+map_dfr(names(nonce_final_results), function(mn) {
+  nonce_final_results[[mn]]$model_a_fixed %>%
+    filter(parameter == "GenPref_centered")
+}) %>%
+  select(model, parameter, Estimate, Est.Error, Q2.5, Q97.5) %>%
+  kable(digits = 3)
 
 cat("\n\nATTESTED BINOMIALS - GenPref and Frequency Effects:\n")
-for (model_name in names(attested_final_results)) {
-  cat(sprintf("\n%s (Model A):\n", model_name))
-  extract_fixed_effects(attested_final_results[[model_name]]$model_a) %>%
-    filter(grepl("GenPref_centered|OverallFreq|RelFreq", parameter)) %>%
-    kable(digits = 3) %>%
-    print()
-}
+map_dfr(names(attested_final_results), function(mn) {
+  attested_final_results[[mn]]$model_a_fixed %>%
+    filter(grepl("GenPref_centered|OverallFreq|RelFreq", parameter))
+}) %>%
+  select(model, parameter, Estimate, Est.Error, Q2.5, Q97.5) %>%
+  kable(digits = 3)
+```
+
+#### Final Checkpoint: Plots
+
+```{r extract-final-effects}
+# GenPref effect at final checkpoint
+nonce_genpref_final <- map_dfr(names(nonce_final_results), function(mn) {
+  nonce_final_results[[mn]]$model_a_fixed %>%
+    filter(parameter == "GenPref_centered") %>%
+    transmute(
+      model     = mn,
+      item_type = "Nonce",
+      estimate  = Estimate,
+      lower     = Q2.5,
+      upper     = Q97.5
+    )
+})
+
+attested_genpref_final <- map_dfr(names(attested_final_results), function(mn) {
+  attested_final_results[[mn]]$model_a_fixed %>%
+    filter(parameter == "GenPref_centered") %>%
+    transmute(
+      model     = mn,
+      item_type = "Attested",
+      estimate  = Estimate,
+      lower     = Q2.5,
+      upper     = Q97.5
+    )
+})
+
+# Individual constraint effects at final checkpoint
+nonce_constraint_final <- map_dfr(names(nonce_final_results), function(mn) {
+  nonce_final_results[[mn]]$model_b_fixed %>%
+    filter(parameter %in% CONSTRAINT_COLS) %>%
+    transmute(
+      model      = mn,
+      item_type  = "Nonce",
+      constraint = parameter,
+      estimate   = Estimate,
+      lower      = Q2.5,
+      upper      = Q97.5
+    )
+})
+
+attested_constraint_final <- map_dfr(names(attested_final_results), function(mn) {
+  attested_final_results[[mn]]$model_b_fixed %>%
+    filter(parameter %in% CONSTRAINT_COLS) %>%
+    transmute(
+      model      = mn,
+      item_type  = "Attested",
+      constraint = parameter,
+      estimate   = Estimate,
+      lower      = Q2.5,
+      upper      = Q97.5
+    )
+})
+```
+
+```{r plot-final-genpref, fig.width=10, fig.height=5}
+bind_rows(nonce_genpref_final, attested_genpref_final) %>%
+  mutate(
+    model     = fct_model(model),
+    item_type = factor(item_type, levels = c("Nonce", "Attested"))
+  ) %>%
+  ggplot(aes(x = model, y = estimate, color = model, shape = item_type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.25,
+                position = position_dodge(0.5), linewidth = 0.8) +
+  geom_point(size = 3.5, position = position_dodge(0.5)) +
+  scale_color_manual(values = CORPUS_COLORS, guide = "none") +
+  scale_shape_manual(values = c("Nonce" = 16, "Attested" = 17)) +
+  labs(
+    x        = NULL,
+    y        = "GenPref coefficient (posterior mean ± 95% CrI)",
+    title    = "GenPref Effect at Final Checkpoint",
+    subtitle = "Bayesian: preference ~ GenPref_centered + (1 | binom)",
+    shape    = "Binomial type"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x      = element_text(angle = 30, hjust = 1),
+    panel.grid.minor = element_blank(),
+    legend.position  = "right"
+  )
+```
+
+```{r plot-final-constraints, fig.width=16, fig.height=10}
+bind_rows(nonce_constraint_final, attested_constraint_final) %>%
+  mutate(
+    model      = fct_model(model),
+    item_type  = factor(item_type, levels = c("Nonce", "Attested")),
+    constraint = factor(constraint, levels = CONSTRAINT_COLS)
+  ) %>%
+  ggplot(aes(x = model, y = estimate, color = model, shape = item_type)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.25,
+                position = position_dodge(0.5), linewidth = 0.7) +
+  geom_point(size = 2.5, position = position_dodge(0.5)) +
+  facet_wrap(~ constraint, scales = "free_y", ncol = 5) +
+  scale_color_manual(values = CORPUS_COLORS, guide = "none") +
+  scale_shape_manual(values = c("Nonce" = 16, "Attested" = 17)) +
+  labs(
+    x        = NULL,
+    y        = "Coefficient (posterior mean ± 95% CrI)",
+    title    = "Individual Constraint Effects at Final Checkpoint",
+    subtitle = "Bayesian: preference ~ all constraints + (1 | binom) | BabyLM (left) → C4 (right) within each panel",
+    shape    = "Binomial type"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x      = element_text(angle = 45, hjust = 1, size = 8),
+    strip.text       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position  = "right"
+  )
 ```
 
 ---
 
 ### Part B: Effects Over Training
 
-Fit separate Bayesian models at logarithmically-sampled checkpoints to track how
-effects emerge and evolve during training.
+Fit Bayesian models at logarithmically-sampled checkpoints using a
+**fit → extract → discard** strategy: model objects are never accumulated in
+memory. Extracted coefficients are saved to CSV after each item-type loop so
+the notebook is resumable if interrupted (brms will skip refitting from cache,
+and the CSVs will already hold any completed extractions).
 
 ```{r training-checkpoint-data}
-# Function to sample checkpoints logarithmically
-get_sampled_checkpoints <- function(data, n_samples = 20) {
-  checkpoints <- data %>%
-    arrange(tokens) %>%
-    pull(checkpoint) %>%
-    unique()
+cat(sprintf(
+  "Training data: nonce %d rows (%d checkpoints), attested %d rows (%d checkpoints)\n",
+  nrow(training_nonce),    n_distinct(training_nonce$checkpoint),
+  nrow(training_attested), n_distinct(training_attested$checkpoint)
+))
 
-  if (length(checkpoints) <= n_samples) {
-    return(checkpoints)
-  }
-
-  # Log-spaced indices
-  log_indices <- exp(seq(log(1), log(length(checkpoints)), length.out = n_samples))
-  indices <- unique(round(log_indices))
-
-  checkpoints[indices]
-}
-
-# Sample checkpoints for each model
-cat("Sampling checkpoints for training trajectory analysis...\n")
-training_data <- llm_and_human_data %>%
-  group_by(model) %>%
-  group_modify(~ {
-    ckpts <- get_sampled_checkpoints(.x, n_samples = 20)
-    .x %>% filter(checkpoint %in% ckpts)
-  }) %>%
-  ungroup()
-
-cat(sprintf("Training data: %d observations across %d checkpoints\n",
-            nrow(training_data), n_distinct(training_data$checkpoint)))
-
-# Split by item type
-training_nonce <- training_data %>%
-  filter(Attested == 0) %>%
-  mutate(GenPref_centered = GenPref - 0.5)
-
-training_attested <- training_data %>%
-  filter(Attested == 1) %>%
-  mutate(
-    GenPref_centered = GenPref - 0.5,
-    RelFreq_centered = RelFreq - 0.5,
-    OverallFreq_log = log(OverallFreq),
-    OverallFreq_scaled = scale(OverallFreq_log)[, 1]
-  )
+# Paths for cached trajectory CSVs
+traj_cache <- list(
+  nonce_genpref    = file.path(processed_path, "traj_nonce_genpref_bayes.csv"),
+  attested_genpref = file.path(processed_path, "traj_attested_genpref_bayes.csv"),
+  attested_freq    = file.path(processed_path, "traj_attested_freq_bayes.csv")
+)
 ```
 
 #### Nonce Binomials: Training Trajectory
 
-```{r brms-nonce-training, cache=TRUE, results='hide', message=FALSE, warning=FALSE}
-# Store results for each checkpoint
-nonce_training_results <- list()
+```{r brms-nonce-training}
+# ── Load from cache if available, otherwise fit ──────────────────────────────
+if (file.exists(traj_cache$nonce_genpref)) {
+  message("Loading nonce GenPref trajectory from cache: ", traj_cache$nonce_genpref)
+  nonce_genpref_traj <- read_csv(traj_cache$nonce_genpref, show_col_types = FALSE)
+} else {
+  nonce_traj_rows <- list()
 
-models_list <- unique(training_nonce$model)
-checkpoints_list <- unique(training_nonce$checkpoint)
+  for (model_name in unique(training_nonce$model)) {
+    model_df <- training_nonce %>% filter(model == model_name)
 
-for (model_name in models_list) {
-  nonce_training_results[[model_name]] <- list()
+    for (ckpt in unique(model_df$checkpoint)) {
+      cat(sprintf("\n=== %s | checkpoint %s (NONCE) ===\n", model_name, ckpt))
+      ckpt_data <- model_df %>% filter(checkpoint == ckpt)
 
-  model_data <- training_nonce %>% filter(model == model_name)
-  model_checkpoints <- unique(model_data$checkpoint)
+      fit_a <- brm(
+        preference ~ GenPref_centered + (1 | binom),
+        data    = ckpt_data, family = gaussian(), prior = bayes_priors,
+        chains  = 4, cores = 4, iter = 12000, warmup = 6000, seed = 964,
+        silent  = 2,
+        file    = sprintf("brms_cache/training_nonce_%s_%s_modelA",
+                          gsub("[/:-]", "_", model_name), ckpt),
+        control = list(adapt_delta = 0.98)
+      )
+      print(round(summary(fit_a)$fixed, 3))
+      rstan::check_hmc_diagnostics(fit_a$fit)
 
-  for (ckpt in model_checkpoints) {
-    cat(sprintf("\n=== %s - Checkpoint %s (NONCE) ===\n", model_name, ckpt))
+      # Extract immediately, discard model
+      coefs <- fixef(fit_a)
+      nonce_traj_rows[[length(nonce_traj_rows) + 1]] <- tibble(
+        model      = model_name,
+        checkpoint = ckpt,
+        tokens     = unique(ckpt_data$tokens),
+        step       = unique(ckpt_data$step),
+        item_type  = "Nonce",
+        estimate   = coefs["GenPref_centered", "Estimate"],
+        lower      = coefs["GenPref_centered", "Q2.5"],
+        upper      = coefs["GenPref_centered", "Q97.5"]
+      )
 
-    ckpt_data <- model_data %>% filter(checkpoint == ckpt)
-
-    # Model A: GenPref effect
-    cat("  Fitting Model A: preference ~ GenPref_centered...\n")
-    model_a <- brm(
-      preference ~ GenPref_centered + (1 | binom),
-      data = ckpt_data,
-      family = gaussian(),
-      prior = bayes_priors,
-      chains = 4,
-      cores = 4,
-      iter = 6000,
-      warmup = 3000,
-      seed = 964,
-      file = sprintf("brms_cache/training_nonce_%s_%s_modelA",
-                     gsub("[/:-]", "_", model_name), ckpt),
-      control = list(adapt_delta = 0.95)
-    )
-
-    nonce_training_results[[model_name]][[ckpt]] <- list(
-      model_a = model_a,
-      tokens = unique(ckpt_data$tokens),
-      step = unique(ckpt_data$step)
-    )
+      rm(fit_a); gc()
+    }
   }
+
+  nonce_genpref_traj <- bind_rows(nonce_traj_rows)
+  write_csv(nonce_genpref_traj, traj_cache$nonce_genpref)
+  message("Saved nonce GenPref trajectory to: ", traj_cache$nonce_genpref)
 }
 ```
 
 #### Attested Binomials: Training Trajectory
 
-```{r brms-attested-training, cache=TRUE, results='hide', message=FALSE, warning=FALSE}
-# Store results for each checkpoint
-attested_training_results <- list()
+```{r brms-attested-training}
+# ── Frequency parameters to track ───────────────────────────────────────────
+FREQ_PARAMS <- c(
+  "OverallFreq_scaled",
+  "RelFreq_centered",
+  "GenPref_centered:OverallFreq_scaled",
+  "RelFreq_centered:OverallFreq_scaled"
+)
 
-models_list <- unique(training_attested$model)
+if (file.exists(traj_cache$attested_genpref) && file.exists(traj_cache$attested_freq)) {
+  message("Loading attested trajectories from cache.")
+  attested_genpref_traj <- read_csv(traj_cache$attested_genpref, show_col_types = FALSE)
+  attested_freq_traj    <- read_csv(traj_cache$attested_freq,    show_col_types = FALSE)
+} else {
+  attested_genpref_rows <- list()
+  attested_freq_rows    <- list()
 
-for (model_name in models_list) {
-  attested_training_results[[model_name]] <- list()
+  for (model_name in unique(training_attested$model)) {
+    model_df <- training_attested %>% filter(model == model_name)
 
-  model_data <- training_attested %>% filter(model == model_name)
-  model_checkpoints <- unique(model_data$checkpoint)
+    for (ckpt in unique(model_df$checkpoint)) {
+      cat(sprintf("\n=== %s | checkpoint %s (ATTESTED) ===\n", model_name, ckpt))
+      ckpt_data <- model_df %>% filter(checkpoint == ckpt)
 
-  for (ckpt in model_checkpoints) {
-    cat(sprintf("\n=== %s - Checkpoint %s (ATTESTED) ===\n", model_name, ckpt))
-
-    ckpt_data <- model_data %>% filter(checkpoint == ckpt)
-
-    # Model A: GenPref + frequency interactions
-    cat("  Fitting Model A: preference ~ GenPref_centered * OverallFreq + RelFreq * OverallFreq...\n")
-    model_a <- brm(
-      preference ~ GenPref_centered * OverallFreq_scaled + RelFreq_centered * OverallFreq_scaled +
-                   (1 | binom),
-      data = ckpt_data,
-      family = gaussian(),
-      prior = bayes_priors,
-      chains = 4,
-      cores = 4,
-      iter = 6000,
-      warmup = 3000,
-      seed = 964,
-      file = sprintf("brms_cache/training_attested_%s_%s_modelA",
-                     gsub("[/:-]", "_", model_name), ckpt),
-      control = list(adapt_delta = 0.95)
-    )
-
-    attested_training_results[[model_name]][[ckpt]] <- list(
-      model_a = model_a,
-      tokens = unique(ckpt_data$tokens),
-      step = unique(ckpt_data$step)
-    )
-  }
-}
-```
-
-#### Training Trajectory: Extract Coefficients
-
-```{r training-extract-coefficients}
-# Extract GenPref coefficient trajectories
-extract_genpref_trajectory <- function(results_list, item_type) {
-  all_results <- list()
-
-  for (model_name in names(results_list)) {
-    model_results <- results_list[[model_name]]
-
-    for (ckpt in names(model_results)) {
-      ckpt_info <- model_results[[ckpt]]
-      model_obj <- ckpt_info$model_a
-
-      # Extract GenPref_centered coefficient
-      coefs <- fixef(model_obj)
-      genpref_row <- coefs["GenPref_centered", , drop = FALSE]
-
-      all_results[[length(all_results) + 1]] <- data.frame(
-        model = model_name,
-        checkpoint = ckpt,
-        tokens = ckpt_info$tokens,
-        step = ckpt_info$step,
-        item_type = item_type,
-        parameter = "GenPref_centered",
-        estimate = genpref_row[1, "Estimate"],
-        lower = genpref_row[1, "Q2.5"],
-        upper = genpref_row[1, "Q97.5"]
+      fit_a <- brm(
+        preference ~ GenPref_centered * OverallFreq_scaled +
+                     RelFreq_centered * OverallFreq_scaled + (1 | binom),
+        data    = ckpt_data, family = gaussian(), prior = bayes_priors,
+        chains  = 4, cores = 4, iter = 12000, warmup = 6000, seed = 964,
+        silent  = 2,
+        file    = sprintf("brms_cache/training_attested_%s_%s_modelA",
+                          gsub("[/:-]", "_", model_name), ckpt),
+        control = list(adapt_delta = 0.98)
       )
-    }
-  }
+      print(round(summary(fit_a)$fixed, 3))
+      rstan::check_hmc_diagnostics(fit_a$fit)
 
-  bind_rows(all_results)
-}
+      coefs  <- fixef(fit_a)
+      tokens <- unique(ckpt_data$tokens)
+      step   <- unique(ckpt_data$step)
 
-# Extract frequency coefficient trajectories (attested only)
-extract_freq_trajectory <- function(results_list) {
-  all_results <- list()
+      # GenPref trajectory row
+      attested_genpref_rows[[length(attested_genpref_rows) + 1]] <- tibble(
+        model      = model_name,
+        checkpoint = ckpt,
+        tokens     = tokens,
+        step       = step,
+        item_type  = "Attested",
+        estimate   = coefs["GenPref_centered", "Estimate"],
+        lower      = coefs["GenPref_centered", "Q2.5"],
+        upper      = coefs["GenPref_centered", "Q97.5"]
+      )
 
-  for (model_name in names(results_list)) {
-    model_results <- results_list[[model_name]]
-
-    for (ckpt in names(model_results)) {
-      ckpt_info <- model_results[[ckpt]]
-      model_obj <- ckpt_info$model_a
-
-      coefs <- fixef(model_obj)
-
-      # Extract OverallFreq and RelFreq coefficients
-      for (param in c("OverallFreq_scaled", "RelFreq_centered",
-                      "GenPref_centered:OverallFreq_scaled", "RelFreq_centered:OverallFreq_scaled")) {
+      # Frequency trajectory rows (one row per parameter)
+      for (param in FREQ_PARAMS) {
         if (param %in% rownames(coefs)) {
-          param_row <- coefs[param, , drop = FALSE]
-
-          all_results[[length(all_results) + 1]] <- data.frame(
-            model = model_name,
+          attested_freq_rows[[length(attested_freq_rows) + 1]] <- tibble(
+            model      = model_name,
             checkpoint = ckpt,
-            tokens = ckpt_info$tokens,
-            step = ckpt_info$step,
-            parameter = param,
-            estimate = param_row[1, "Estimate"],
-            lower = param_row[1, "Q2.5"],
-            upper = param_row[1, "Q97.5"]
+            tokens     = tokens,
+            step       = step,
+            parameter  = param,
+            estimate   = coefs[param, "Estimate"],
+            lower      = coefs[param, "Q2.5"],
+            upper      = coefs[param, "Q97.5"]
           )
         }
       }
+
+      rm(fit_a); gc()
     }
   }
 
-  bind_rows(all_results)
-}
+  attested_genpref_traj <- bind_rows(attested_genpref_rows)
+  attested_freq_traj    <- bind_rows(attested_freq_rows)
 
-# Extract trajectories
-nonce_genpref_traj <- extract_genpref_trajectory(nonce_training_results, "Nonce")
-attested_genpref_traj <- extract_genpref_trajectory(attested_training_results, "Attested")
-attested_freq_traj <- extract_freq_trajectory(attested_training_results)
+  write_csv(attested_genpref_traj, traj_cache$attested_genpref)
+  write_csv(attested_freq_traj,    traj_cache$attested_freq)
+  message("Saved attested trajectories to cache.")
+}
 ```
 
 #### Training Trajectory: Plots
 
-```{r plot-genpref-trajectory, fig.width=12, fig.height=8}
-# Plot GenPref coefficient over training
+```{r plot-genpref-trajectory, fig.width=14, fig.height=8}
 bind_rows(nonce_genpref_traj, attested_genpref_traj) %>%
-  ggplot(aes(x = tokens, y = estimate, color = model)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper, fill = model), alpha = 0.2, color = NA) +
+  mutate(model = fct_model(model)) %>%
+  ggplot(aes(x = tokens, y = estimate, color = model, fill = model)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
   facet_grid(item_type ~ model, scales = "free_x") +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  scale_color_manual(values = CORPUS_COLORS) +
+  scale_fill_manual(values  = CORPUS_COLORS) +
   labs(
-    x = "Training tokens",
-    y = "GenPref coefficient (posterior mean ± 95% CrI)\n(GenPref centered at 0.5)",
-    title = "Bayesian GenPref Effect Over Training",
-    subtitle = "Nonce (top) vs. Attested (bottom) binomials"
+    x        = "Training tokens",
+    y        = "GenPref coefficient (posterior mean ± 95% CrI)",
+    title    = "Bayesian GenPref Effect Over Training",
+    subtitle = "Nonce (top) vs. Attested (bottom) | BabyLM (left) → C4 (right)"
   ) +
   theme_minimal(base_size = 13) +
   theme(
-    strip.text = element_text(face = "bold"),
-    legend.position = "none",
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none",
     panel.grid.minor = element_blank()
   )
 ```
 
-```{r plot-freq-trajectory, fig.width=12, fig.height=10}
-# Plot frequency effects over training (attested only)
+```{r plot-freq-trajectory, fig.width=14, fig.height=10}
 attested_freq_traj %>%
-  mutate(parameter = factor(parameter,
-                             levels = c("OverallFreq_scaled", "RelFreq_centered",
-                                        "GenPref_centered:OverallFreq_scaled",
-                                        "RelFreq_centered:OverallFreq_scaled"),
-                             labels = c("OverallFreq", "RelFreq",
-                                        "GenPref × OverallFreq",
-                                        "RelFreq × OverallFreq"))) %>%
-  ggplot(aes(x = tokens, y = estimate, color = model)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper, fill = model), alpha = 0.2, color = NA) +
+  mutate(
+    model     = fct_model(model),
+    parameter = factor(
+      parameter,
+      levels = FREQ_PARAMS,
+      labels = c("OverallFreq", "RelFreq",
+                 "GenPref × OverallFreq", "RelFreq × OverallFreq")
+    )
+  ) %>%
+  ggplot(aes(x = tokens, y = estimate, color = model, fill = model)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
   facet_grid(parameter ~ model, scales = "free") +
   scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  scale_color_manual(values = CORPUS_COLORS) +
+  scale_fill_manual(values  = CORPUS_COLORS) +
   labs(
-    x = "Training tokens",
-    y = "Coefficient (posterior mean ± 95% CrI)",
-    title = "Bayesian Frequency Effects Over Training (Attested Binomials)"
+    x        = "Training tokens",
+    y        = "Coefficient (posterior mean ± 95% CrI)",
+    title    = "Bayesian Frequency Effects Over Training (Attested Binomials)",
+    subtitle = "BabyLM (left) → C4 (right)"
   ) +
   theme_minimal(base_size = 13) +
   theme(
-    strip.text = element_text(face = "bold"),
-    legend.position = "none",
+    strip.text       = element_text(face = "bold"),
+    legend.position  = "none",
     panel.grid.minor = element_blank()
   )
 ```
 
----
+#### Training Trajectory: Individual Constraint Effects (OLS)
 
-## Session Info
+```{r plot-constraint-trajectory-nonce, fig.width=16, fig.height=8}
+nonce_constraints %>%
+  mutate(model = fct_model(model)) %>%
+  ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  facet_wrap(~ model, scales = "free_x", ncol = 3) +
+  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  scale_color_viridis_d() +
+  labs(
+    x        = "Training tokens",
+    y        = "OLS coefficient",
+    title    = "Individual Constraint Effects Over Training — NONCE Binomials",
+    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (top row) → C4 (bottom row)",
+    color    = "Constraint"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position  = "bottom"
+  ) +
+  guides(color = guide_legend(nrow = 2))
+```
 
-```{r session-info}
-sessionInfo()
+```{r plot-constraint-trajectory-attested, fig.width=16, fig.height=8}
+attested_constraints %>%
+  mutate(model = fct_model(model)) %>%
+  ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  facet_wrap(~ model, scales = "free_x", ncol = 3) +
+  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  scale_color_viridis_d() +
+  labs(
+    x        = "Training tokens",
+    y        = "OLS coefficient",
+    title    = "Individual Constraint Effects Over Training — ATTESTED Binomials",
+    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (top row) → C4 (bottom row)",
+    color    = "Constraint"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position  = "bottom"
+  ) +
+  guides(color = guide_legend(nrow = 2))
+```
+
+```{r plot-constraint-trajectory-combined, fig.width=16, fig.height=12}
+bind_rows(
+  nonce_constraints    %>% mutate(item_type = "Nonce"),
+  attested_constraints %>% mutate(item_type = "Attested")
+) %>%
+  mutate(
+    model     = fct_model(model),
+    item_type = factor(item_type, levels = c("Nonce", "Attested"))
+  ) %>%
+  ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
+  geom_line(linewidth = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
+  facet_grid(item_type ~ model, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  scale_color_viridis_d() +
+  labs(
+    x        = "Training tokens",
+    y        = "OLS coefficient",
+    title    = "Constraint Effects Over Training: Nonce vs. Attested",
+    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (left) → C4 (right)",
+    color    = "Constraint"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    strip.text       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    legend.position  = "bottom"
+  ) +
+  guides(color = guide_legend(nrow = 2))
 ```
