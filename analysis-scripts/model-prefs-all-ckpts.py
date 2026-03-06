@@ -11,8 +11,6 @@ Multi-GPU checkpoint scoring (2x H100):
 """
 
 import os
-import sys
-import glob
 import traceback
 import multiprocessing as mp
 from dataclasses import dataclass
@@ -26,10 +24,6 @@ import pandas as pd
 from tqdm import tqdm
 from huggingface_hub import HfApi
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-def tokens_per_step(block_size: int, batch: int, grad_accum: int, num_gpus: int) -> int:
-    return block_size * batch * grad_accum * num_gpus
-
 
 # =========================
 # CONFIG
