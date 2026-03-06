@@ -427,8 +427,9 @@ def to_tokens_and_logprobs(
                 return_tensors="pt",
                 pad_to_multiple_of=8,
             )
-            input_ids = enc["input_ids"].to(device)
-            attention_mask = enc["attention_mask"].to(device)
+            first_device = next(model.parameters()).device
+            input_ids = enc["input_ids"].to(first_device)
+            attention_mask = enc["attention_mask"].to(first_device)
 
             outputs = model(input_ids, attention_mask=attention_mask)
             logits = outputs.logits
@@ -588,13 +589,19 @@ def run_work_item(item: WorkItem, device: str, out_dir: str) -> None:
     tmp_cache = tempfile.mkdtemp(prefix="hf_ckpt_")
     model = None
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+        load_kwargs = dict(
             revision=ckpt["tag"],
-            torch_dtype=torch.float16 if device != "cpu" else torch.float32,
             low_cpu_mem_usage=True,
             cache_dir=tmp_cache,
-        ).to(device).eval()
+        )
+        if device == "auto":
+            load_kwargs["device_map"] = "auto"
+            load_kwargs["torch_dtype"] = torch.float16
+        else:
+            load_kwargs["torch_dtype"] = torch.float16 if device != "cpu" else torch.float32
+            load_kwargs["device_map"] = device
+
+        model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs).eval()
 
         if USE_TORCH_COMPILE:
             try:
@@ -733,6 +740,7 @@ def build_work_items() -> List[WorkItem]:
 def shard_items(items: List[WorkItem], num_shards: int) -> List[List[WorkItem]]:
     return [items[i::num_shards] for i in range(num_shards)]
 
+LARGE_MODELS = {"allenai/Olmo-3-1025-7B", "allenai/Olmo-3-1125-32B", "EleutherAI/pythia-2.8b"}
 
 def main():
     print("🔧 Building work items (all checkpoints across models)...")
@@ -743,62 +751,35 @@ def main():
 
     num_gpus = detect_num_gpus()
     print(f"\n🖥️  Detected {num_gpus} GPU(s)")
-
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # =========================
-    # CPU-only fallback
-    # =========================
-    if num_gpus == 0:
-        print("⚠️ No GPUs detected — running serially on CPU")
-        for item in items:
-            run_work_item(
-                item,
-                device="cpu",
-                out_dir=OUT_DIR,
-            )
-        print("\n🏁 RUN COMPLETE (CPU)")
-        return
+    # Split into large (need both GPUs) and small (can shard)
+    large_items = [it for it in items if it.model_name in LARGE_MODELS]
+    small_items = [it for it in items if it.model_name not in LARGE_MODELS]
 
-    # =========================
-    # Single-GPU path
-    # =========================
-    if num_gpus == 1:
-        print("🚀 Single GPU detected — running serially on the visible GPU")
-        torch.cuda.set_device(0)
-    
-        for item in items:
-            run_work_item(
-                item,
-                device="cuda:0",
-                out_dir=OUT_DIR,
-            )
-        print("\n🏁 RUN COMPLETE (1 GPU)")
-        return
+    # ── Large models: run serially with device_map="auto" across all GPUs ──
+    if large_items:
+        print(f"\n🐘 Running {len(large_items)} large-model checkpoints serially (device_map=auto)")
+        for item in large_items:
+            run_work_item(item, device="auto", out_dir=OUT_DIR)
 
+    # ── Small models: shard across GPUs as before ──
+    if small_items and num_gpus >= 2:
+        print(f"\n🚀 Sharding {len(small_items)} small-model checkpoints across {num_gpus} GPUs")
+        shards = shard_items(small_items, num_gpus)
+        ctx = mp.get_context("spawn")
+        procs = []
+        for rank in range(num_gpus):
+            p = ctx.Process(target=worker_main, args=(rank, shards[rank]))
+            p.start()
+            procs.append(p)
+        for p in procs:
+            p.join()
+    elif small_items:
+        for item in small_items:
+            run_work_item(item, device="cuda:0", out_dir=OUT_DIR)
 
-    # =========================
-    # Multi-GPU path
-    # =========================
-    print(f"🚀 Multi-GPU mode — sharding across {num_gpus} GPUs")
-    shards = shard_items(items, num_gpus)
-
-    for r, sh in enumerate(shards):
-        print(f"GPU {r}: {len(sh)} checkpoints")
-
-    ctx = mp.get_context("spawn")
-    procs = []
-    for rank in range(num_gpus):
-        p = ctx.Process(target=worker_main, args=(rank, shards[rank]))
-        p.start()
-        procs.append(p)
-
-    for p in procs:
-        p.join()
-
-    print("\n🏁 RUN COMPLETE (multi-GPU)")
-
-
+    print("\n🏁 RUN COMPLETE")
 
 if __name__ == "__main__":
     main()
