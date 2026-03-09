@@ -168,25 +168,46 @@ cat(sprintf("GenPref results:    nonce %d rows, attested %d rows\n",
 ```
 
 ```{r model-setup}
-# Consistent model ordering for all plots:
-# BabyLM (125M → 350M → 1.3B) then C4 (125M → 350M → 1.3B)
+# Consistent model ordering: BabyLM → C4 → Pythia → OLMo3, ascending params within family
 MODEL_LEVELS <- c(
   "znhoughton/opt-babylm-125m-64eps-seed964",
   "znhoughton/opt-babylm-350m-64eps-seed964",
   "znhoughton/opt-babylm-1.3b-64eps-seed964",
   "znhoughton/opt-c4-125m-seed964",
   "znhoughton/opt-c4-350m-seed964",
-  "znhoughton/opt-c4-1.3b-seed964"
+  "znhoughton/opt-c4-1.3b-seed964",
+  "EleutherAI/pythia-160m",
+  "EleutherAI/pythia-410m",
+  "EleutherAI/pythia-1.4b",
+  "EleutherAI/pythia-2.8b",
+  "allenai/Olmo-3-1025-7B",
+  "allenai/Olmo-3-1125-32B"
 )
 MODEL_LABELS <- c(
   "BabyLM 125M", "BabyLM 350M", "BabyLM 1.3B",
-  "C4 125M",     "C4 350M",     "C4 1.3B"
+  "C4 125M",     "C4 350M",     "C4 1.3B",
+  "Pythia 160M", "Pythia 410M", "Pythia 1.4B", "Pythia 2.8B",
+  "OLMo3 7B",    "OLMo3 32B"
 )
 fct_model <- function(x) factor(x, levels = MODEL_LEVELS, labels = MODEL_LABELS)
 
+FAMILY_LEVELS <- c("BabyLM", "C4", "Pythia", "OLMo3")
+model_family <- function(x) {
+  case_when(
+    grepl("babylm", x, ignore.case = TRUE) ~ "BabyLM",
+    grepl("opt-c4", x, ignore.case = TRUE) ~ "C4",
+    grepl("pythia", x, ignore.case = TRUE) ~ "Pythia",
+    grepl("olmo",   x, ignore.case = TRUE) ~ "OLMo3",
+    TRUE ~ "Other"
+  ) %>% factor(levels = FAMILY_LEVELS)
+}
+
 CORPUS_COLORS <- c(
   "BabyLM 125M" = "#1b7837", "BabyLM 350M" = "#5aae61", "BabyLM 1.3B" = "#a6dba0",
-  "C4 125M"     = "#762a83", "C4 350M"     = "#af8dc3", "C4 1.3B"     = "#e7d4e8"
+  "C4 125M"     = "#762a83", "C4 350M"     = "#af8dc3", "C4 1.3B"     = "#e7d4e8",
+  "Pythia 160M" = "#08519c", "Pythia 410M" = "#2171b5",
+  "Pythia 1.4B" = "#6baed6", "Pythia 2.8B" = "#bdd7e7",
+  "OLMo3 7B"    = "#d94801", "OLMo3 32B"   = "#fd8d3c"
 )
 ```
 
@@ -215,30 +236,35 @@ attested_correlations %>%
 
 ### Plot: Correlation Over Training
 
-```{r plot-correlation, fig.width=14, fig.height=8}
+```{r plot-correlation, fig.width=16, fig.height=8}
 bind_rows(
   nonce_correlations    %>% mutate(item_type = "Nonce"),
   attested_correlations %>% mutate(item_type = "Attested")
 ) %>%
-  mutate(model = fct_model(model)) %>%
+  mutate(
+    model_family = model_family(model),
+    model        = fct_model(model)
+  ) %>%
   ggplot(aes(x = tokens, y = correlation, color = model)) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_grid(item_type ~ model, scales = "free_x") +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_grid(item_type ~ model_family, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "Pearson r (model vs. human preference)",
     title    = "Model-Human Correlation Over Training",
-    subtitle = "Attested (top) vs. Nonce (bottom) | BabyLM models (left) → C4 models (right)"
+    subtitle = "Nonce (top) vs. Attested (bottom) | columns = model family (note: different x-axis scales)",
+    color    = "Model"
   ) +
   theme_minimal(base_size = 13) +
   theme(
     strip.text       = element_text(face = "bold"),
-    legend.position  = "none",
+    legend.position  = "bottom",
     panel.grid.minor = element_blank()
-  )
+  ) +
+  guides(color = guide_legend(nrow = 3))
 ```
 
 ---
@@ -270,31 +296,36 @@ attested_accuracy %>%
 
 ### Plot: Accuracy Over Training
 
-```{r plot-accuracy, fig.width=14, fig.height=8}
+```{r plot-accuracy, fig.width=16, fig.height=8}
 bind_rows(
   nonce_accuracy    %>% mutate(item_type = "Nonce"),
   attested_accuracy %>% mutate(item_type = "Attested")
 ) %>%
-  mutate(model = fct_model(model)) %>%
+  mutate(
+    model_family = model_family(model),
+    model        = fct_model(model)
+  ) %>%
   ggplot(aes(x = tokens, y = accuracy, color = model)) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray60") +
-  facet_grid(item_type ~ model, scales = "free_x") +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_grid(item_type ~ model_family, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
   scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "Accuracy (proportion direction match)",
     title    = "Model-Human Direction Agreement Over Training",
-    subtitle = "Attested (top) vs. Nonce (bottom) | BabyLM (left) → C4 (right); dashed = chance (50%)"
+    subtitle = "Nonce (top) vs. Attested (bottom) | columns = model family (note: different x-axis scales); dashed = chance (50%)",
+    color    = "Model"
   ) +
   theme_minimal(base_size = 13) +
   theme(
     strip.text       = element_text(face = "bold"),
-    legend.position  = "none",
+    legend.position  = "bottom",
     panel.grid.minor = element_blank()
-  )
+  ) +
+  guides(color = guide_legend(nrow = 3))
 ```
 
 ---
@@ -325,20 +356,20 @@ attested_constraints %>%
 
 ### Plot: Individual Constraint Coefficients Over Training (Nonce)
 
-```{r plot-constraints-nonce, fig.width=16, fig.height=8}
+```{r plot-constraints-nonce, fig.width=20, fig.height=12}
 nonce_constraints %>%
   mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ model, scales = "free_x", ncol = 3) +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_wrap(~ model, scales = "free_x", ncol = 4) +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_viridis_d() +
   labs(
     x        = "Training tokens",
     y        = "Coefficient",
     title    = "Individual Constraint Effects Over Training — NONCE Binomials",
-    subtitle = "OLS: preference ~ constraints | BabyLM (top row) → C4 (bottom row)",
+    subtitle = "OLS: preference ~ constraints | columns ordered by parameter size within family",
     color    = "Constraint"
   ) +
   theme_minimal(base_size = 12) +
@@ -352,20 +383,20 @@ nonce_constraints %>%
 
 ### Plot: Individual Constraint Coefficients Over Training (Attested)
 
-```{r plot-constraints-attested, fig.width=16, fig.height=8}
+```{r plot-constraints-attested, fig.width=20, fig.height=12}
 attested_constraints %>%
   mutate(model = fct_model(model)) %>%
   ggplot(aes(x = tokens, y = coefficient, color = constraint)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ model, scales = "free_x", ncol = 3) +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_wrap(~ model, scales = "free_x", ncol = 4) +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_viridis_d() +
   labs(
     x        = "Training tokens",
     y        = "Coefficient",
     title    = "Individual Constraint Effects Over Training — ATTESTED Binomials",
-    subtitle = "OLS: preference ~ constraints | BabyLM (top row) → C4 (bottom row)",
+    subtitle = "OLS: preference ~ constraints + frequency covariates | columns ordered by parameter size within family",
     color    = "Constraint"
   ) +
   theme_minimal(base_size = 12) +
@@ -403,30 +434,35 @@ attested_genpref %>%
 
 ### Plot: GenPref Coefficient Over Training
 
-```{r plot-genpref, fig.width=14, fig.height=8}
+```{r plot-genpref, fig.width=16, fig.height=8}
 bind_rows(
   nonce_genpref    %>% mutate(item_type = "Nonce"),
   attested_genpref %>% mutate(item_type = "Attested")
 ) %>%
-  mutate(model = fct_model(model)) %>%
+  mutate(
+    model_family = model_family(model),
+    model        = fct_model(model)
+  ) %>%
   ggplot(aes(x = tokens, y = coefficient, color = model)) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_grid(item_type ~ model, scales = "free_x") +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_grid(item_type ~ model_family, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "GenPref coefficient",
-    title    = "GenPref Effect Over Training",
-    subtitle = "OLS: preference ~ GenPref | Nonce (top) vs. Attested (bottom) | BabyLM (left) → C4 (right)"
+    title    = "GenPref Effect Over Training (OLS)",
+    subtitle = "Nonce (top) vs. Attested (bottom) | columns = model family (note: different x-axis scales)",
+    color    = "Model"
   ) +
   theme_minimal(base_size = 13) +
   theme(
     strip.text       = element_text(face = "bold"),
-    legend.position  = "none",
+    legend.position  = "bottom",
     panel.grid.minor = element_blank()
-  )
+  ) +
+  guides(color = guide_legend(nrow = 3))
 ```
 
 ---
@@ -441,25 +477,35 @@ bind_rows(
   attested_accuracy     %>% mutate(item_type = "Attested", metric = "Accuracy",    value = accuracy)
 ) %>%
   select(model, tokens, item_type, metric, value) %>%
-  mutate(model = fct_model(model)) %>%
-  ggplot(aes(x = tokens, y = value, color = metric)) +
-  geom_line(linewidth = 1) +
+  mutate(
+    model_family = model_family(model),
+    model        = fct_model(model),
+    item_type    = factor(item_type, levels = c("Nonce", "Attested")),
+    metric       = factor(metric,    levels = c("Correlation", "Accuracy"))
+  ) %>%
+  ggplot(aes(x = tokens, y = value, color = model, linetype = item_type)) +
+  geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray60", alpha = 0.5) +
-  facet_grid(item_type ~ model, scales = "free_x") +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
-  scale_color_manual(values = c("Correlation" = "#E41A1C", "Accuracy" = "#377EB8")) +
+  facet_grid(metric ~ model_family, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_color_manual(values = CORPUS_COLORS) +
+  scale_linetype_manual(values = c("Nonce" = "solid", "Attested" = "dashed")) +
   labs(
     x        = "Training tokens",
     y        = "Value",
     title    = "Model-Human Alignment: Correlation vs. Accuracy",
-    subtitle = "Nonce (top) vs. Attested (bottom) | BabyLM (left) → C4 (right); dashed = 0.5",
-    color    = "Metric"
+    subtitle = "Correlation (top) vs. Accuracy (bottom) | columns = model family | solid = Nonce, dashed = Attested",
+    color    = "Model", linetype = "Binomial type"
   ) +
   theme_minimal(base_size = 13) +
   theme(
     strip.text       = element_text(face = "bold"),
     panel.grid.minor = element_blank(),
     legend.position  = "bottom"
+  ) +
+  guides(
+    color    = guide_legend(nrow = 3),
+    linetype = guide_legend(nrow = 1)
   )
 ```
 
@@ -830,7 +876,7 @@ bind_rows(nonce_constraint_final, attested_constraint_final) %>%
     x        = NULL,
     y        = "Coefficient (posterior mean ± 95% CrI)",
     title    = "Individual Constraint Effects at Final Checkpoint",
-    subtitle = "Nonce: preference ~ constraints + (1|binom); Attested: preference ~ constraints × frequency + (1|binom) | BabyLM (left) → C4 (right) within each panel",
+    subtitle = "Nonce: preference ~ constraints + (1|binom); Attested: preference ~ constraints × frequency + (1|binom)",
     shape    = "Binomial type"
   ) +
   theme_minimal(base_size = 11) +
@@ -870,14 +916,26 @@ traj_cache <- list(
 #### Nonce Binomials: Training Trajectory
 
 ```{r brms-nonce-training}
-# ── Load from cache if available, otherwise fit ──────────────────────────────
+# ── Load cache; fit only models not yet present ───────────────────────────────
 if (file.exists(traj_cache$nonce_genpref)) {
-  message("Loading nonce GenPref trajectory from cache: ", traj_cache$nonce_genpref)
   nonce_genpref_traj <- read_csv(traj_cache$nonce_genpref, show_col_types = FALSE)
+  missing_models     <- setdiff(unique(training_nonce$model),
+                                unique(nonce_genpref_traj$model))
+  if (length(missing_models) == 0) {
+    message("Nonce GenPref trajectory fully cached.")
+  } else {
+    message(sprintf("Fitting %d model(s) missing from nonce cache: %s",
+                    length(missing_models), paste(missing_models, collapse = ", ")))
+  }
 } else {
+  nonce_genpref_traj <- NULL
+  missing_models     <- unique(training_nonce$model)
+}
+
+if (length(missing_models) > 0) {
   nonce_traj_rows <- list()
 
-  for (model_name in unique(training_nonce$model)) {
+  for (model_name in missing_models) {
     model_df <- training_nonce %>% filter(model == model_name)
 
     for (ckpt in unique(model_df$checkpoint)) {
@@ -896,7 +954,6 @@ if (file.exists(traj_cache$nonce_genpref)) {
       print(round(summary(fit_a)$fixed, 3))
       rstan::check_hmc_diagnostics(fit_a$fit)
 
-      # Extract immediately, discard model
       coefs <- fixef(fit_a)
       nonce_traj_rows[[length(nonce_traj_rows) + 1]] <- tibble(
         model      = model_name,
@@ -913,9 +970,9 @@ if (file.exists(traj_cache$nonce_genpref)) {
     }
   }
 
-  nonce_genpref_traj <- bind_rows(nonce_traj_rows)
+  nonce_genpref_traj <- bind_rows(nonce_genpref_traj, bind_rows(nonce_traj_rows))
   write_csv(nonce_genpref_traj, traj_cache$nonce_genpref)
-  message("Saved nonce GenPref trajectory to: ", traj_cache$nonce_genpref)
+  message("Updated nonce GenPref trajectory cache: ", traj_cache$nonce_genpref)
 }
 ```
 
@@ -930,15 +987,29 @@ FREQ_PARAMS <- c(
   "RelFreq_centered:OverallFreq_scaled"
 )
 
+# ── Load cache; fit only models not yet present ───────────────────────────────
 if (file.exists(traj_cache$attested_genpref) && file.exists(traj_cache$attested_freq)) {
-  message("Loading attested trajectories from cache.")
   attested_genpref_traj <- read_csv(traj_cache$attested_genpref, show_col_types = FALSE)
   attested_freq_traj    <- read_csv(traj_cache$attested_freq,    show_col_types = FALSE)
+  missing_models <- setdiff(unique(training_attested$model),
+                            unique(attested_genpref_traj$model))
+  if (length(missing_models) == 0) {
+    message("Attested trajectories fully cached.")
+  } else {
+    message(sprintf("Fitting %d model(s) missing from attested cache: %s",
+                    length(missing_models), paste(missing_models, collapse = ", ")))
+  }
 } else {
+  attested_genpref_traj <- NULL
+  attested_freq_traj    <- NULL
+  missing_models        <- unique(training_attested$model)
+}
+
+if (length(missing_models) > 0) {
   attested_genpref_rows <- list()
   attested_freq_rows    <- list()
 
-  for (model_name in unique(training_attested$model)) {
+  for (model_name in missing_models) {
     model_df <- training_attested %>% filter(model == model_name)
 
     for (ckpt in unique(model_df$checkpoint)) {
@@ -962,7 +1033,6 @@ if (file.exists(traj_cache$attested_genpref) && file.exists(traj_cache$attested_
       tokens <- unique(ckpt_data$tokens)
       step   <- unique(ckpt_data$step)
 
-      # GenPref trajectory row
       attested_genpref_rows[[length(attested_genpref_rows) + 1]] <- tibble(
         model      = model_name,
         checkpoint = ckpt,
@@ -974,7 +1044,6 @@ if (file.exists(traj_cache$attested_genpref) && file.exists(traj_cache$attested_
         upper      = coefs["GenPref_centered", "Q97.5"]
       )
 
-      # Frequency trajectory rows (one row per parameter)
       for (param in FREQ_PARAMS) {
         if (param %in% rownames(coefs)) {
           attested_freq_rows[[length(attested_freq_rows) + 1]] <- tibble(
@@ -994,47 +1063,55 @@ if (file.exists(traj_cache$attested_genpref) && file.exists(traj_cache$attested_
     }
   }
 
-  attested_genpref_traj <- bind_rows(attested_genpref_rows)
-  attested_freq_traj    <- bind_rows(attested_freq_rows)
+  attested_genpref_traj <- bind_rows(attested_genpref_traj, bind_rows(attested_genpref_rows))
+  attested_freq_traj    <- bind_rows(attested_freq_traj,    bind_rows(attested_freq_rows))
 
   write_csv(attested_genpref_traj, traj_cache$attested_genpref)
   write_csv(attested_freq_traj,    traj_cache$attested_freq)
-  message("Saved attested trajectories to cache.")
+  message("Updated attested trajectory cache.")
 }
 ```
 
 #### Training Trajectory: Plots
 
-```{r plot-genpref-trajectory, fig.width=14, fig.height=8}
+```{r plot-genpref-trajectory, fig.width=16, fig.height=8}
+# Columns = model family (each with its own token scale); rows = item type
 bind_rows(nonce_genpref_traj, attested_genpref_traj) %>%
-  mutate(model = fct_model(model)) %>%
+  mutate(
+    model_family = model_family(model),
+    model        = fct_model(model)
+  ) %>%
   ggplot(aes(x = tokens, y = estimate, color = model, fill = model)) +
   geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_grid(item_type ~ model, scales = "free_x") +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_grid(item_type ~ model_family, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_manual(values = CORPUS_COLORS) +
   scale_fill_manual(values  = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "GenPref coefficient (posterior mean ± 95% CrI)",
     title    = "Bayesian GenPref Effect Over Training",
-    subtitle = "Nonce (top) vs. Attested (bottom) | BabyLM (left) → C4 (right)"
+    subtitle = "Nonce (top) vs. Attested (bottom) | columns = model family (note: different x-axis scales)",
+    color    = "Model", fill = "Model"
   ) +
   theme_minimal(base_size = 13) +
   theme(
     strip.text       = element_text(face = "bold"),
-    legend.position  = "none",
+    legend.position  = "bottom",
     panel.grid.minor = element_blank()
-  )
+  ) +
+  guides(color = guide_legend(nrow = 3), fill = guide_legend(nrow = 3))
 ```
 
-```{r plot-freq-trajectory, fig.width=14, fig.height=10}
+```{r plot-freq-trajectory, fig.width=16, fig.height=10}
+# Columns = model family; rows = frequency parameter
 attested_freq_traj %>%
   mutate(
-    model     = fct_model(model),
-    parameter = factor(
+    model_family = model_family(model),
+    model        = fct_model(model),
+    parameter    = factor(
       parameter,
       levels = FREQ_PARAMS,
       labels = c("OverallFreq", "RelFreq",
@@ -1045,43 +1122,46 @@ attested_freq_traj %>%
   geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
   geom_line(linewidth = 1) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_grid(parameter ~ model, scales = "free") +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_grid(parameter ~ model_family, scales = "free") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_manual(values = CORPUS_COLORS) +
   scale_fill_manual(values  = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "Coefficient (posterior mean ± 95% CrI)",
     title    = "Bayesian Frequency Effects Over Training (Attested Binomials)",
-    subtitle = "BabyLM (left) → C4 (right)"
+    subtitle = "Columns = model family (note: different x-axis scales)",
+    color    = "Model", fill = "Model"
   ) +
   theme_minimal(base_size = 13) +
   theme(
     strip.text       = element_text(face = "bold"),
-    legend.position  = "none",
+    legend.position  = "bottom",
     panel.grid.minor = element_blank()
-  )
+  ) +
+  guides(color = guide_legend(nrow = 3), fill = guide_legend(nrow = 3))
 ```
 
 #### Training Trajectory: Individual Constraint Effects (OLS)
 
-```{r plot-constraint-trajectory-nonce, fig.width=16, fig.height=8}
+```{r plot-constraint-trajectory-nonce, fig.width=20, fig.height=20}
 nonce_constraints %>%
   mutate(
-    model      = fct_model(model),
-    constraint = factor(constraint, levels = CONSTRAINT_COLS)
+    model_family = model_family(model),
+    model        = fct_model(model),
+    constraint   = factor(constraint, levels = CONSTRAINT_COLS)
   ) %>%
   ggplot(aes(x = tokens, y = coefficient, color = model)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ constraint, scales = "free_y", ncol = 5) +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_grid(constraint ~ model_family, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "OLS coefficient",
     title    = "Individual Constraint Effects Over Training — NONCE Binomials",
-    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (green) → C4 (purple)",
+    subtitle = "OLS at ~20 log-sampled checkpoints per model family",
     color    = "Model"
   ) +
   theme_minimal(base_size = 12) +
@@ -1090,26 +1170,27 @@ nonce_constraints %>%
     panel.grid.minor = element_blank(),
     legend.position  = "bottom"
   ) +
-  guides(color = guide_legend(nrow = 2))
+  guides(color = guide_legend(nrow = 3))
 ```
 
-```{r plot-constraint-trajectory-attested, fig.width=16, fig.height=8}
+```{r plot-constraint-trajectory-attested, fig.width=20, fig.height=20}
 attested_constraints %>%
   mutate(
-    model      = fct_model(model),
-    constraint = factor(constraint, levels = CONSTRAINT_COLS)
+    model_family = model_family(model),
+    model        = fct_model(model),
+    constraint   = factor(constraint, levels = CONSTRAINT_COLS)
   ) %>%
   ggplot(aes(x = tokens, y = coefficient, color = model)) +
   geom_line(linewidth = 0.8) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_wrap(~ constraint, scales = "free_y", ncol = 5) +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
+  facet_grid(constraint ~ model_family, scales = "free_x") +
+  scale_x_continuous(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
   scale_color_manual(values = CORPUS_COLORS) +
   labs(
     x        = "Training tokens",
     y        = "OLS coefficient",
     title    = "Individual Constraint Effects Over Training — ATTESTED Binomials",
-    subtitle = "OLS controlling for OverallFreq & RelFreq at ~19 log-sampled checkpoints | BabyLM (green) → C4 (purple)",
+    subtitle = "OLS controlling for OverallFreq & RelFreq at ~20 log-sampled checkpoints per model family",
     color    = "Model"
   ) +
   theme_minimal(base_size = 12) +
@@ -1118,39 +1199,6 @@ attested_constraints %>%
     panel.grid.minor = element_blank(),
     legend.position  = "bottom"
   ) +
-  guides(color = guide_legend(nrow = 2))
+  guides(color = guide_legend(nrow = 3))
 ```
 
-```{r plot-constraint-trajectory-combined, fig.width=16, fig.height=10}
-bind_rows(
-  nonce_constraints    %>% mutate(item_type = "Nonce"),
-  attested_constraints %>% mutate(item_type = "Attested")
-) %>%
-  mutate(
-    model      = fct_model(model),
-    item_type  = factor(item_type, levels = c("Nonce", "Attested")),
-    constraint = factor(constraint, levels = CONSTRAINT_COLS)
-  ) %>%
-  ggplot(aes(x = tokens, y = coefficient, color = model)) +
-  geom_line(linewidth = 0.7) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray60") +
-  facet_grid(item_type ~ constraint, scales = "free_y") +
-  scale_x_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B")) +
-  scale_color_manual(values = CORPUS_COLORS) +
-  labs(
-    x        = "Training tokens",
-    y        = "OLS coefficient",
-    title    = "Constraint Effects Over Training: Nonce vs. Attested",
-    subtitle = "OLS at ~19 log-sampled checkpoints | BabyLM (green) → C4 (purple)",
-    color    = "Model"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(
-    strip.text       = element_text(face = "bold"),
-    panel.grid.minor = element_blank(),
-    axis.text.x      = element_blank(),
-    axis.ticks.x     = element_blank(),
-    legend.position  = "bottom"
-  ) +
-  guides(color = guide_legend(nrow = 2))
-```

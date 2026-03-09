@@ -4,3 +4,4 @@ opt-training.ipynb
 # Ignore brms model cache directories
 brms_cache/
 model_cache/
+models/

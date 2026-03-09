@@ -141,8 +141,12 @@ for data in [nonce, attested]:
 
 attested["RelFreq_centered"]   = attested["RelFreq"] - 0.5
 attested["OverallFreq_log"]    = np.log(attested["OverallFreq"].astype(float))
-log_freq = attested["OverallFreq_log"]
-attested["OverallFreq_scaled"] = (log_freq - log_freq.mean()) / log_freq.std()
+# Compute mean/std on unique binomials (not all rows, which repeat each binomial
+# once per model×checkpoint and would give a wrong ddof denominator).
+log_freq_unique = attested.drop_duplicates("binom")["OverallFreq_log"]
+freq_mean = log_freq_unique.mean()
+freq_std  = log_freq_unique.std()
+attested["OverallFreq_scaled"] = (attested["OverallFreq_log"] - freq_mean) / freq_std
 
 save_csv(nonce,    "nonce_agg")
 save_csv(attested, "attested_agg")
@@ -171,6 +175,8 @@ print("Computing accuracy...")
 
 def compute_accuracy(data):
     data = data.copy()
+    mask = data["preference"].notna() & data["hum_pref"].notna()
+    data = data[mask]
     data["correct"] = (
         (data["preference"] > 0.5).astype(int) ==
         (data["hum_pref"]   > 0.5).astype(int)

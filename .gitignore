@@ -2,3 +2,10 @@
 .Rhistory
 .RData
 .Ruserdata
+analysis-scripts/.venv/
+
+# Too large for GitHub LFS (30 GB, exceeds 2 GB limit)
+Data/processed/checkpoint_results_with_exposures.csv
+
+# R Markdown cache (regenerable, can be very large)
+analysis-scripts/exposure_preference_analysis_cache/
