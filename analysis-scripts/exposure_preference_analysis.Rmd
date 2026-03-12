@@ -38,6 +38,7 @@ library(tidyverse)
 library(duckdb)
 library(scales)
 library(patchwork)
+library(lme4)
 library(brms)
 ```
 
@@ -88,6 +89,11 @@ parse_size <- function(x) {
 
 SIZE_LEVELS  <- c("125M", "350M", "1.3B")
 SIZE_COLOURS <- c("125M" = "#1b7837", "350M" = "#762a83", "1.3B" = "#b2182b")
+
+# Two-category semantic colours (corpus/frequency reference vs. model preference)
+COL_CORPUS <- "#ff7f0e"  # warm orange: corpus / frequency-expectation reference
+COL_MODEL  <- "#1f77b4"  # cool blue:  model preference
+COL_OVER   <- "#d62728"  # red:        over-prediction / positive-direction indicator
 ```
 
 ---
@@ -149,271 +155,6 @@ cat(sprintf("Rows with total_seen > 0:           %s (%.1f%%)\n",
 cat(sprintf("Rows with both orderings seen (log ratio defined): %s (%.1f%%)\n",
             format(sum(!is.na(agg$log_freq_ratio)), big.mark = ","),
             100 * mean(!is.na(agg$log_freq_ratio))))
-```
-
----
-
-## Plot 1: Does the Log Frequency Ratio Predict the Preference Score?
-
-For each model x checkpoint x binomial where both orderings appeared at least
-once, we ask whether `log(alpha_seen / beta_seen)` predicts the preference score.
-
-If the model tracks relative frequency, the relationship should be monotonically
-increasing and pass through zero at x = 0 (equal exposure -> no preference).
-
-Two versions are shown: (1a) raw scatter with a LOESS smoother per model size,
-and (1b) binned summary with +/-1 SE ribbons.
-
-```{r plot1-raw-data}
-p1_raw <- agg %>%
-  filter(!is.na(log_freq_ratio), !is.na(model_size))
-```
-
-### Plot 1a: Raw scatter + LOESS smoother
-
-```{r plot1a-scatter, fig.width = 10, fig.height = 5}
-ggplot(p1_raw, aes(x = log_freq_ratio, y = mean_preference,
-                   colour = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_point(alpha = 0.04, size = 0.4, show.legend = FALSE) +
-  geom_smooth(method = "loess", span = 0.4, se = TRUE, linewidth = 1,
-              aes(fill = model_size)) +
-  scale_x_continuous(name = "log(alpha_seen / beta_seen)  [training frequency log-ratio]") +
-  scale_y_continuous(name = "Mean preference score  (alpha_logprob - nonalpha_logprob)") +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  facet_wrap(~corpus) +
-  labs(
-    title    = "Does training frequency log-ratio predict model preference score?",
-    subtitle = "Each point = one model x checkpoint x binomial  -  LOESS smoother +/- 95% CI per model size"
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
-### Plot 1b: Binned summary (raw points in background)
-
-```{r plot1b-binned, fig.width = 10, fig.height = 5}
-p1_data <- p1_raw %>%
-  mutate(
-    lrat_bin = cut(log_freq_ratio,
-                   breaks = c(-Inf, -3, -2, -1, -0.5, 0,
-                                0.5,  1,  2,  3,  Inf),
-                   labels = c("<-3", "-3--2", "-2--1", "-1--.5",
-                              "-.5-0", "0-.5", ".5-1", "1-2",
-                              "2-3", ">3"))
-  ) %>%
-  group_by(corpus, model_size, lrat_bin) %>%
-  summarize(
-    mean_pref = mean(mean_preference, na.rm = TRUE),
-    se        = sd(mean_preference, na.rm = TRUE) / sqrt(n()),
-    midpoint  = mean(log_freq_ratio, na.rm = TRUE),
-    n         = n(),
-    .groups   = "drop"
-  )
-
-ggplot(p1_data, aes(x = midpoint, y = mean_pref,
-                    colour = model_size, fill = model_size,
-                    group  = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_point(data = p1_raw,
-             aes(x = log_freq_ratio, y = mean_preference, colour = model_size),
-             alpha = 0.04, size = 0.4, inherit.aes = FALSE, show.legend = FALSE) +
-  geom_ribbon(aes(ymin = mean_pref - se, ymax = mean_pref + se),
-              alpha = 0.25, colour = NA) +
-  geom_line(linewidth = 0.9) +
-  geom_point(size = 2.5) +
-  scale_x_continuous(name = "log(alpha_seen / beta_seen)  [training frequency log-ratio]") +
-  scale_y_continuous(name = "Mean preference score  (alpha_logprob - nonalpha_logprob)") +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  facet_wrap(~corpus) +
-  labs(
-    title    = "Does training frequency log-ratio predict model preference score?",
-    subtitle = "Grey cloud = raw data  -  Lines = bin means +/- 1 SE  -  Dashed lines at x = 0, y = 0"
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
----
-
-## Plot 2: Preference-Frequency Correlation vs. Total Exposure
-
-Does seeing more tokens of a binomial strengthen the relationship between
-preference and log frequency ratio? We compute the Pearson correlation between
-`mean_preference` and `log_freq_ratio` within bins of `log10(total_seen)`.
-
-```{r plot2-corr-vs-freq, fig.width = 10, fig.height = 5}
-p2_data <- agg %>%
-  filter(!is.na(log_freq_ratio), total_seen > 0) %>%
-  mutate(
-    log_total = log(total_seen),
-    freq_bin  = cut(log_total,
-                    breaks = c(0, 0.5, 1, 1.5, 2, 2.5, 3, Inf),
-                    labels = c("1-3", "3-10", "10-32", "32-100",
-                               "100-316", "316-1k", ">1k"),
-                    include.lowest = TRUE)
-  ) %>%
-  group_by(corpus, model_size, freq_bin) %>%
-  summarize(
-    r        = cor(mean_preference, log_freq_ratio, use = "complete.obs"),
-    midpoint = mean(log_total, na.rm = TRUE),
-    n        = n(),
-    .groups  = "drop"
-  )
-
-ggplot(p2_data, aes(x = midpoint, y = r,
-                    colour = model_size, fill = model_size,
-                    group  = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_line(linewidth = 0.9) +
-  geom_point(size = 2.5) +
-  scale_x_continuous(
-    name   = "Total frequency, either ordering (log10 scale)",
-    breaks = 0:4,
-    labels = c("1", "10", "100", "1k", "10k")
-  ) +
-  scale_y_continuous(
-    name   = "Pearson r  (preference ~ log frequency ratio)",
-    limits = c(-0.1, 1)
-  ) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  facet_wrap(~corpus) +
-  labs(
-    title    = "Preference-frequency correlation vs. total exposure",
-    subtitle = "Higher r = model preference score tracks training frequency ratio more closely"
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
----
-
-## Plot 3: Correlation Between Preference and Log Frequency Ratio Over Training
-
-Does the model's preference score come to track training frequency more closely
-as training progresses? For each checkpoint we compute the Pearson r across all
-binomials where both orderings were seen.
-
-```{r plot3-corr-over-training, fig.width = 11, fig.height = 5}
-p3_data <- agg %>%
-  filter(!is.na(log_freq_ratio)) %>%
-  group_by(corpus, model_size, tokens) %>%
-  summarize(
-    r        = cor(mean_preference, log_freq_ratio, use = "complete.obs"),
-    n_binoms = n(),
-    .groups  = "drop"
-  )
-
-ggplot(p3_data, aes(x = tokens / 1e9, y = r,
-                    colour = model_size, fill = model_size,
-                    group  = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_line(linewidth = 0.7, alpha = 0.9) +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(
-    name   = "Pearson r  (preference ~ log frequency ratio)",
-    limits = c(-0.1, 1)
-  ) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  facet_wrap(~corpus, scales = "free_x") +
-  labs(
-    title    = "Preference-frequency correlation over training",
-    subtitle = "r computed across binomials where both orderings appear in training at that checkpoint"
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
-```{r plot3-n-binoms, fig.width = 11, fig.height = 4}
-# Companion: how many binomials contribute at each point?
-ggplot(p3_data, aes(x = tokens / 1e9, y = n_binoms,
-                    colour = model_size, group = model_size)) +
-  geom_line(linewidth = 0.7) +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "# binomials with both orderings seen", labels = comma) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  facet_wrap(~corpus, scales = "free_x") +
-  labs(title = "Number of binomials contributing to the correlation at each checkpoint") +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
----
-
-## Plot 4: Regression Slope  -  How Well Does Preference Scale with Log Frequency Ratio?
-
-Beyond correlation (direction + monotonicity), we also care about **scaling**:
-does each unit increase in `log(alpha_seen / beta_seen)` produce a consistent
-shift in the preference score? We fit `mean_preference ~ log_freq_ratio` at
-each checkpoint and track the slope over training.
-
-A steeper slope means a stronger, more calibrated frequency signal in the
-model's preferences.
-
-```{r plot4-slope-over-training, fig.width = 11, fig.height = 5}
-p4_data <- agg %>%
-  filter(!is.na(log_freq_ratio)) %>%
-  group_by(corpus, model_size, tokens) %>%
-  group_map(function(g, keys) {
-    if (nrow(g) < 5 || sd(g$log_freq_ratio, na.rm = TRUE) == 0) return(NULL)
-    fit <- lm(mean_preference ~ log_freq_ratio, data = g)
-    cf  <- coef(summary(fit))
-    tibble(
-      corpus     = keys$corpus,
-      model_size = keys$model_size,
-      tokens     = keys$tokens,
-      slope      = cf["log_freq_ratio", "Estimate"],
-      se         = cf["log_freq_ratio", "Std. Error"]
-    )
-  }, .keep = TRUE) %>%
-  bind_rows()
-
-ggplot(p4_data, aes(x = tokens / 1e9, y = slope,
-                    colour = model_size, fill = model_size,
-                    group  = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_ribbon(aes(ymin = slope - se, ymax = slope + se),
-              alpha = 0.15, colour = NA) +
-  geom_line(linewidth = 0.7, alpha = 0.9) +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "Regression slope  (preference ~ log frequency ratio)") +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  facet_wrap(~corpus, scales = "free_x") +
-  labs(
-    title    = "Slope of preference ~ log frequency ratio over training",
-    subtitle = "Steeper slope = stronger, more calibrated frequency signal  -  +/-1 SE ribbon"
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
----
-
-## Summary Table
-
-```{r summary}
-agg %>%
-  filter(!is.na(log_freq_ratio)) %>%
-  group_by(corpus, model_size) %>%
-  summarize(
-    overall_r      = cor(mean_preference, log_freq_ratio, use = "complete.obs"),
-    n_observations = n(),
-    .groups        = "drop"
-  ) %>%
-  arrange(corpus, model_size) %>%
-  mutate(overall_r = round(overall_r, 3)) %>%
-  knitr::kable(
-    col.names = c("Corpus", "Model size", "Overall r", "N observations"),
-    caption   = paste("Pearson r between mean preference score and log frequency ratio,",
-                      "pooled across all checkpoints.")
-  )
 ```
 
 ---
@@ -514,77 +255,50 @@ cat(sprintf("Rows with GenPref after join: %s / %s  (%.1f%%)\n",
 
 ---
 
-## Plot 5: GenPref vs. Mean Preference Score
+## Plot 1: Does the Log Frequency Ratio Predict the Preference Score?
 
-Does the model's preference score correlate with the linguistic/generative
-preference, independent of relative frequency? We average across all checkpoints
-and frequency conditions, then plot.
+For each model x checkpoint x binomial where both orderings appeared at least
+once, we ask whether `log(alpha_seen / beta_seen)` predicts the preference score.
 
-```{r plot5-genpref-vs-pref, fig.width = 10, fig.height = 5}
-p5_data <- agg_gp %>%
-  filter(!is.na(genpref)) %>%
-  mutate(
-    gp_bin = cut(genpref,
-                 breaks = c(-Inf, -0.3, -0.15, -0.05, 0.05, 0.15, 0.3, Inf),
-                 labels = c("<-0.3", "-0.3--0.15", "-0.15--0.05",
-                            "-0.05-0.05", "0.05-0.15", "0.15-0.3", ">0.3"))
-  ) %>%
-  group_by(corpus, model_size, gp_bin) %>%
-  summarize(
-    mean_pref = mean(mean_preference, na.rm = TRUE),
-    se        = sd(mean_preference, na.rm = TRUE) / sqrt(n()),
-    midpoint  = mean(genpref, na.rm = TRUE),
-    n         = n(),
-    .groups   = "drop"
-  )
+If the model tracks relative frequency, the relationship should be monotonically
+increasing and pass through zero at x = 0 (equal exposure -> no preference).
 
-ggplot(p5_data, aes(x = midpoint, y = mean_pref,
-                    colour = model_size, fill = model_size,
-                    group  = model_size)) +
+Two versions are shown: (1a) raw scatter with a LOESS smoother per model size,
+and (1b) binned summary with 95% CI ribbons.
+
+```{r plot1-raw-data}
+p1_raw <- agg %>%
+  filter(!is.na(log_freq_ratio), !is.na(model_size))
+```
+
+### Plot 1a: Raw scatter + LOESS smoother
+
+```{r plot1a-scatter, fig.width = 10, fig.height = 5}
+ggplot(p1_raw, aes(x = log_freq_ratio, y = mean_preference,
+                   colour = model_size)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
   geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_ribbon(aes(ymin = mean_pref - se, ymax = mean_pref + se),
-              alpha = 0.15, colour = NA) +
-  geom_line(linewidth = 0.9) +
-  geom_point(size = 2.5) +
-  scale_x_continuous(name = "GenPref  (linguistic/generative preference score)") +
+  geom_point(alpha = 0.04, size = 0.4, show.legend = FALSE) +
+  geom_smooth(method = "loess", span = 0.4, se = TRUE, linewidth = 1,
+              aes(fill = model_size)) +
+  scale_x_continuous(name = "log(alpha_seen / beta_seen)  [training frequency log-ratio]") +
   scale_y_continuous(name = "Mean preference score  (alpha_logprob - nonalpha_logprob)") +
   scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
   scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
   facet_wrap(~corpus) +
   labs(
-    title    = "Does linguistic preference (GenPref) predict model preference?",
-    subtitle = "Averaged over all checkpoints  -  +/-1 SE ribbon"
+    title    = "Does training frequency log-ratio predict model preference score?",
+    subtitle = "Each point = one model x checkpoint x binomial  -  LOESS smoother 95% CI per model size"
   ) +
-  theme_bw(base_size = 12) +
+  theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank())
 ```
 
----
+### Plot 1b: Binned summary (raw points in background)
 
-## Plot 6: The "Pull"  -  GenPref x Log Frequency Ratio -> Preference
-
-Key question: when relative frequency and GenPref **agree**, does the model show
-stronger preference than when they **conflict**? We split binomials into three
-GenPref levels (negative / neutral / positive) and plot mean preference as a
-function of `log(alpha_seen / beta_seen)`.
-
-If GenPref adds an independent pull, binomials with positive GenPref should sit
-*above* binomials with negative GenPref at the same frequency ratio.
-
-```{r plot6-pull, fig.width = 11, fig.height = 6}
-p6_data <- agg_gp %>%
-  filter(!is.na(genpref), !is.na(log_freq_ratio)) %>%
+```{r plot1b-binned, fig.width = 10, fig.height = 5}
+p1_data <- p1_raw %>%
   mutate(
-    gp_level = case_when(
-      genpref >  0.05 ~ "GenPref positive (>0.05)",
-      genpref < -0.05 ~ "GenPref negative (<-0.05)",
-      TRUE            ~ "GenPref neutral (-0.05-0.05)"
-    ),
-    gp_level = factor(gp_level,
-                      levels = c("GenPref negative (<-0.05)",
-                                 "GenPref neutral (-0.05-0.05)",
-                                 "GenPref positive (>0.05)")),
     lrat_bin = cut(log_freq_ratio,
                    breaks = c(-Inf, -3, -2, -1, -0.5, 0,
                                 0.5,  1,  2,  3,  Inf),
@@ -592,7 +306,7 @@ p6_data <- agg_gp %>%
                               "-.5-0", "0-.5", ".5-1", "1-2",
                               "2-3", ">3"))
   ) %>%
-  group_by(corpus, model_size, gp_level, lrat_bin) %>%
+  group_by(corpus, model_size, lrat_bin) %>%
   summarize(
     mean_pref = mean(mean_preference, na.rm = TRUE),
     se        = sd(mean_preference, na.rm = TRUE) / sqrt(n()),
@@ -601,554 +315,178 @@ p6_data <- agg_gp %>%
     .groups   = "drop"
   )
 
-GP_COLOURS <- c(
-  "GenPref negative (<-0.05)"   = "#d73027",
-  "GenPref neutral (-0.05-0.05)" = "#999999",
-  "GenPref positive (>0.05)"    = "#4575b4"
-)
-
-ggplot(p6_data, aes(x = midpoint, y = mean_pref,
-                    colour = gp_level, fill = gp_level,
-                    group  = gp_level)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_ribbon(aes(ymin = mean_pref - se, ymax = mean_pref + se),
-              alpha = 0.15, colour = NA) +
-  geom_line(linewidth = 0.9) +
-  geom_point(size = 2) +
-  scale_x_continuous(name = "log(alpha_seen / beta_seen)  [training frequency log-ratio]") +
-  scale_y_continuous(name = "Mean preference score  (alpha_logprob - nonalpha_logprob)") +
-  scale_colour_manual(values = GP_COLOURS, name = "GenPref level") +
-  scale_fill_manual(values   = GP_COLOURS, name = "GenPref level") +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "GenPref 'pull': does linguistic preference shift model output beyond frequency alone?",
-    subtitle = "If GenPref adds signal, coloured lines should be vertically separated at the same x"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
----
-
-## Plot 7: Conflict Cases  -  Does GenPref Pull Away from Frequency?
-
-Here we isolate **conflict binomials** where relative frequency and GenPref point
-in opposite directions (i.e., `sign(log_freq_ratio) != sign(genpref)`). Among
-these, we ask: does the strength of GenPref predict how far the model's
-preference *deviates* from what frequency alone would predict?
-
-We define:
-- **Frequency-predicted preference**: the fitted value from the regression
-  `mean_preference ~ log_freq_ratio` (using the final checkpoint only)
-- **Residual preference**: `mean_preference - fitted` (positive = pulled toward GenPref)
-
-```{r plot7-conflict, fig.width = 10, fig.height = 5}
-# Use the last checkpoint for each model (highest token count)
-last_ckpt <- agg_gp %>%
-  filter(!is.na(genpref), !is.na(log_freq_ratio)) %>%
-  group_by(corpus, model_size, model) %>%
-  filter(tokens == max(tokens)) %>%
-  ungroup()
-
-# Fit frequency baseline per model and compute residual
-last_ckpt_resid <- last_ckpt %>%
-  group_by(corpus, model_size) %>%
-  group_map(function(g, keys) {
-    if (nrow(g) < 10) return(NULL)
-    fit <- lm(mean_preference ~ log_freq_ratio, data = g)
-    g %>%
-      mutate(
-        fitted_by_freq = fitted(fit),
-        resid_from_freq = mean_preference - fitted_by_freq,
-        corpus     = keys$corpus,
-        model_size = keys$model_size
-      )
-  }, .keep = TRUE) %>%
-  bind_rows() %>%
-  # Conflict cases only: frequency and GenPref in opposite directions
-  filter(
-    !is.na(genpref),
-    sign(log_freq_ratio) != 0,
-    sign(genpref) != 0,
-    sign(log_freq_ratio) != sign(genpref)
-  ) %>%
-  mutate(
-    # Flip residual so positive = pulled toward GenPref direction
-    pull_toward_genpref = resid_from_freq * sign(genpref),
-    abs_genpref_bin = cut(abs(genpref),
-                          breaks = c(0, 0.05, 0.1, 0.2, 0.3, Inf),
-                          labels = c("0-0.05", "0.05-0.1", "0.1-0.2",
-                                     "0.2-0.3", ">0.3"))
-  )
-
-p7_data <- last_ckpt_resid %>%
-  group_by(corpus, model_size, abs_genpref_bin) %>%
-  summarize(
-    mean_pull = mean(pull_toward_genpref, na.rm = TRUE),
-    se        = sd(pull_toward_genpref,   na.rm = TRUE) / sqrt(n()),
-    midpoint  = mean(abs(genpref),        na.rm = TRUE),
-    n         = n(),
-    .groups   = "drop"
-  )
-
-ggplot(p7_data, aes(x = midpoint, y = mean_pull,
+ggplot(p1_data, aes(x = midpoint, y = mean_pref,
                     colour = model_size, fill = model_size,
                     group  = model_size)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_ribbon(aes(ymin = mean_pull - se, ymax = mean_pull + se),
-              alpha = 0.15, colour = NA) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(data = p1_raw,
+             aes(x = log_freq_ratio, y = mean_preference, colour = model_size),
+             alpha = 0.04, size = 0.4, inherit.aes = FALSE, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = mean_pref - 1.96 * se, ymax = mean_pref + 1.96 * se),
+              alpha = 0.25, colour = NA) +
   geom_line(linewidth = 0.9) +
   geom_point(size = 2.5) +
-  scale_x_continuous(name = "|GenPref|  (strength of linguistic preference)") +
-  scale_y_continuous(name = "Mean pull toward GenPref\n(residual from frequency baseline, sign-flipped)") +
+  scale_x_continuous(name = "log(alpha_seen / beta_seen)  [training frequency log-ratio]") +
+  scale_y_continuous(name = "Mean preference score  (alpha_logprob - nonalpha_logprob)") +
   scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
   scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
   facet_wrap(~corpus) +
   labs(
-    title    = "Do conflict binomials get pulled toward GenPref?",
-    subtitle = paste("Conflict = frequency and GenPref disagree  -",
-                     "Positive y = model leans toward GenPref despite frequency signal  -  +/-1 SE")
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
-```{r plot7-n-conflict}
-cat("N conflict binomials per corpus x model size (at final checkpoint):\n")
-last_ckpt_resid %>%
-  count(corpus, model_size) %>%
-  knitr::kable(col.names = c("Corpus", "Model size", "N conflict binomials"))
-```
-
----
-
-## Plot 8: GenPref vs. Frequency Signal Over Training, by Exposure Level
-
-This plot brings the three threads together: **training dynamics**, **relative pull
-of GenPref vs. relative frequency**, and **total exposure**.
-
-At each checkpoint, binomials are placed into frequency bins based on how many
-times the model has seen them *at that point in training* (`total_seen`). Within
-each bin we fit:
-
-$$\text{mean\_preference} \sim \beta_{\text{freq}} \cdot z(\log\text{freq\_ratio}) + \beta_{\text{gp}} \cdot z(\text{GenPref})$$
-
-Both predictors are z-scored so that $\beta_{\text{freq}}$ and $\beta_{\text{gp}}$
-are directly comparable. We then plot both coefficients over training, split by
-exposure level.
-
-If relative frequency gradually takes over from GenPref as the model accumulates
-evidence, we expect $\beta_{\text{freq}}$ to rise and $\beta_{\text{gp}}$ to
-shrink  -  particularly for the **high-frequency bins** where the frequency signal
-is strongest.
-
-```{r plot8-pushpull-over-training, fig.width = 12, fig.height = 8}
-FREQ_BREAKS  <- c(0, 1, 2, 3, Inf)
-FREQ_LABELS  <- c("1-10 tokens", "10-100 tokens", "100-1k tokens", ">1k tokens")
-
-p8_data <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(genpref), total_seen >= 1) %>%
-  mutate(
-    freq_bin = cut(log(total_seen),
-                   breaks = FREQ_BREAKS,
-                   labels = FREQ_LABELS,
-                   include.lowest = TRUE)
-  ) %>%
-  group_by(corpus, model_size, tokens, freq_bin) %>%
-  group_map(function(g, keys) {
-    if (nrow(g) < 10) return(NULL)
-    # Check SD before scaling  -  scale() returns NaN (not 0) when SD = 0,
-    # and NaN == 0 evaluates to NA which breaks if()
-    sd_lograt  <- sd(g$log_freq_ratio, na.rm = TRUE)
-    sd_genpref <- sd(g$genpref,        na.rm = TRUE)
-    if (is.na(sd_lograt)  || sd_lograt  == 0) return(NULL)
-    if (is.na(sd_genpref) || sd_genpref == 0) return(NULL)
-    z_lograt  <- scale(g$log_freq_ratio)[, 1]
-    z_genpref <- scale(g$genpref)[, 1]
-    fit <- lm(g$mean_preference ~ z_lograt + z_genpref)
-    cf  <- coef(summary(fit))
-    bind_rows(
-      tibble(
-        corpus     = keys$corpus,
-        model_size = keys$model_size,
-        tokens     = keys$tokens,
-        freq_bin   = keys$freq_bin,
-        predictor  = "RelFreq\n(log freq ratio)",
-        slope      = cf["z_lograt",  "Estimate"],
-        se         = cf["z_lograt",  "Std. Error"]
-      ),
-      tibble(
-        corpus     = keys$corpus,
-        model_size = keys$model_size,
-        tokens     = keys$tokens,
-        freq_bin   = keys$freq_bin,
-        predictor  = "Linguistic preference\n(GenPref)",
-        slope      = cf["z_genpref", "Estimate"],
-        se         = cf["z_genpref", "Std. Error"]
-      )
-    )
-  }, .keep = TRUE) %>%
-  bind_rows() %>%
-  mutate(
-    model_size = factor(model_size, levels = SIZE_LEVELS),
-    freq_bin   = factor(freq_bin,   levels = FREQ_LABELS)
-  )
-
-PRED_COLOURS <- c(
-  "RelFreq\n(log freq ratio)" = "#e66101",
-  "Linguistic preference\n(GenPref)"   = "#5e3c99"
-)
-
-ggplot(p8_data, aes(x = tokens / 1e9, y = slope,
-                    colour   = predictor,
-                    linetype = model_size,
-                    group    = interaction(predictor, model_size))) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
-  geom_line(linewidth = 0.75, alpha = 0.9) +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "Standardised regression coefficient\n(preference ~ z(log freq ratio) + z(GenPref))") +
-  scale_colour_manual(values = PRED_COLOURS, name = "Predictor") +
-  scale_linetype_manual(
-    values = c("125M" = "dotted", "350M" = "dashed", "1.3B" = "solid"),
-    name   = "Model size"
-  ) +
-  facet_grid(freq_bin ~ corpus, scales = "free_x") +
-  labs(
-    title    = "Push-and-pull of relative frequency vs. linguistic preference over training",
-    subtitle = paste("Both predictors z-scored  -  coefficients directly comparable  -",
-                     "Rows = exposure level at each checkpoint")
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "bottom",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
----
-
-## Plot 9: Three Attractors  -  Where GenPref, Frequency, and the Model All Land
-
-The key question made visual: for each binomial, where is the model's preference
-relative to its two "attractors"  -  the linguistic preference (GenPref) and the
-relative frequency signal?
-
-**How values are made comparable:** each predictor is multiplied by its
-pooled OLS regression slope on `mean_preference` (fit across all checkpoints
-within corpus x model size), putting GenPref and log frequency ratio on the
-same log-probability scale as the actual preference. All three are then
-mean-centred so the origin (0) represents the average preference.
-
-Two sub-plots:
-
-- **9a (dumbbell):** At the final checkpoint, binomials are grouped into
-  GenPref deciles. Each row shows three dots  -  where frequency expects the
-  preference to be, where GenPref expects it to be, and where it actually is  - 
-  connected by a line so you can see the "tug-of-war."
-- **9b (trajectory):** The three averaged signals over training, showing
-  whether the model drifts toward the frequency attractor as it trains.
-
-```{r plot9-setup}
-ATTRACTOR_COLS <- c(
-  "Frequency expectation" = "#e66101",
-  "Actual preference"     = "#404040",
-  "GenPref expectation"   = "#5e3c99"
-)
-
-# Pooled regression slopes (all checkpoints, within corpus x model_size)
-# These act as "exchange rates" to put log_freq_ratio and genpref
-# on the same log-probability scale as mean_preference.
-attractor_slopes <- agg_gp %>%
-  filter(!is.na(genpref), !is.na(log_freq_ratio)) %>%
-  group_by(corpus, model_size) %>%
-  summarize(
-    b_freq = coef(lm(mean_preference ~ log_freq_ratio))["log_freq_ratio"],
-    b_gp   = coef(lm(mean_preference ~ genpref))["genpref"],
-    .groups = "drop"
-  )
-
-# Scale predictors to preference units, then mean-centre all three
-attractors <- agg_gp %>%
-  filter(!is.na(genpref), !is.na(log_freq_ratio)) %>%
-  left_join(attractor_slopes, by = c("corpus", "model_size")) %>%
-  mutate(
-    freq_scaled = b_freq * log_freq_ratio,
-    gp_scaled   = b_gp   * genpref
-  ) %>%
-  group_by(corpus, model_size) %>%
-  mutate(
-    actual_c = mean_preference - mean(mean_preference, na.rm = TRUE),
-    freq_c   = freq_scaled     - mean(freq_scaled,     na.rm = TRUE),
-    gp_c     = gp_scaled       - mean(gp_scaled,       na.rm = TRUE)
-  ) %>%
-  ungroup()
-```
-
-### Plot 9a: Dumbbell at the final checkpoint
-
-```{r plot9a-dumbbell, fig.width = 11, fig.height = 7}
-dumbbell_data <- attractors %>%
-  group_by(corpus, model_size, model) %>%
-  filter(tokens == max(tokens)) %>%
-  ungroup() %>%
-  group_by(corpus, model_size) %>%
-  mutate(gp_decile = ntile(genpref, 10)) %>%
-  ungroup() %>%
-  group_by(corpus, model_size, gp_decile) %>%
-  summarize(
-    gp_mid  = mean(genpref,  na.rm = TRUE),
-    actual  = mean(actual_c, na.rm = TRUE),
-    freq    = mean(freq_c,   na.rm = TRUE),
-    genpref = mean(gp_c,     na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  pivot_longer(cols = c(actual, freq, genpref),
-               names_to = "signal", values_to = "value") %>%
-  mutate(signal = factor(signal,
-                         levels = c("freq", "actual", "genpref"),
-                         labels = c("Frequency expectation",
-                                    "Actual preference",
-                                    "GenPref expectation")))
-
-# Range segment per row (connects min to max of the three dots)
-dumbbell_range <- dumbbell_data %>%
-  group_by(corpus, model_size, gp_decile, gp_mid) %>%
-  summarize(lo = min(value), hi = max(value), .groups = "drop")
-
-ggplot(dumbbell_data,
-       aes(x = value,
-           y = reorder(factor(gp_decile), gp_mid),
-           colour = signal)) +
-  geom_segment(data = dumbbell_range,
-               aes(x = lo, xend = hi,
-                   y = reorder(factor(gp_decile), gp_mid),
-                   yend = reorder(factor(gp_decile), gp_mid)),
-               colour = "grey70", linewidth = 0.7,
-               inherit.aes = FALSE) +
-  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_point(size = 3.5) +
-  scale_x_continuous(name = "Value (preference-scale units, mean-centred)") +
-  scale_y_discrete(name = "GenPref decile  (low <- -> high)") +
-  scale_colour_manual(values = ATTRACTOR_COLS, name = NULL) +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Three attractors at the final checkpoint",
-    subtitle = paste("Each row = one GenPref decile bin  -",
-                     "Dots: where frequency, GenPref, and the model's actual preference each fall")
+    title    = "Does training frequency log-ratio predict model preference score?",
+    subtitle = "Grey cloud = raw data  -  Lines = bin means 95% CI  -  Dashed lines at x = 0, y = 0"
   ) +
   theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank())
 ```
 
-### Plot 9b: Trajectories over training
+---
 
-```{r plot9b-trajectory, fig.width = 11, fig.height = 5}
-traj_data <- attractors %>%
+## Plot 2: Correlation Between Preference and Log Frequency Ratio Over Training
+
+Does the model's preference score come to track training frequency more closely
+as training progresses? For each checkpoint we compute the Pearson r across all
+binomials where both orderings were seen.
+
+```{r plot3-corr-over-training, fig.width = 11, fig.height = 5}
+p3_data <- agg %>%
+  filter(!is.na(log_freq_ratio)) %>%
   group_by(corpus, model_size, tokens) %>%
   summarize(
-    `Frequency expectation` = mean(freq_c,   na.rm = TRUE),
-    `Actual preference`     = mean(actual_c, na.rm = TRUE),
-    `GenPref expectation`   = mean(gp_c,     na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  pivot_longer(cols = -c(corpus, model_size, tokens),
-               names_to = "signal", values_to = "value") %>%
-  mutate(signal = factor(signal,
-                         levels = c("Frequency expectation",
-                                    "Actual preference",
-                                    "GenPref expectation")))
+    r        = cor(mean_preference, log_freq_ratio, use = "complete.obs"),
+    n_binoms = n(),
+    .groups  = "drop"
+  )
 
-ggplot(traj_data,
-       aes(x = tokens / 1e9, y = value,
-           colour   = signal,
-           linetype = model_size,
-           group    = interaction(signal, model_size))) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
-  geom_line(linewidth = 0.8) +
+ggplot(p3_data, aes(x = tokens / 1e9, y = r,
+                    colour = model_size, fill = model_size,
+                    group  = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 0.7, alpha = 0.9) +
   scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "Mean value (preference-scale units, mean-centred)") +
-  scale_colour_manual(values = ATTRACTOR_COLS, name = NULL) +
-  scale_linetype_manual(
-    values = c("125M" = "dotted", "350M" = "dashed", "1.3B" = "solid"),
-    name   = "Model size"
+  scale_y_continuous(
+    name   = "Pearson r  (preference ~ log frequency ratio)",
+    limits = c(-0.1, 1)
   ) +
+  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
   facet_wrap(~corpus, scales = "free_x") +
   labs(
-    title    = "Three attractors over training",
-    subtitle = paste("Does actual preference track frequency or GenPref as training progresses?",
-                     "  -  Averaged across all binomials at each checkpoint")
+    title    = "Preference-frequency correlation over training",
+    subtitle = "r computed across binomials where both orderings appear in training at that checkpoint"
   ) +
-  theme_bw(base_size = 12) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
+```{r plot3-n-binoms, fig.width = 11, fig.height = 4}
+# Companion: how many binomials contribute at each point?
+ggplot(p3_data, aes(x = tokens / 1e9, y = n_binoms,
+                    colour = model_size, group = model_size)) +
+  geom_line(linewidth = 0.7) +
+  scale_x_continuous(name = "Tokens seen (billions)") +
+  scale_y_continuous(name = "# binomials with both orderings seen", labels = comma) +
+  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+  facet_wrap(~corpus, scales = "free_x") +
+  labs(title = "Number of binomials contributing to the correlation at each checkpoint") +
+  theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank())
 ```
 
 ---
 
-## Plot 10: Three Attractors on the Probability Scale (Real Binomials)
+## Summary Table
 
-Same idea as Plot 9a, but:
+```{r summary}
+agg %>%
+  filter(!is.na(log_freq_ratio)) %>%
+  group_by(corpus, model_size) %>%
+  summarize(
+    overall_r      = cor(mean_preference, log_freq_ratio, use = "complete.obs"),
+    n_observations = n(),
+    .groups        = "drop"
+  ) %>%
+  arrange(corpus, model_size) %>%
+  mutate(overall_r = round(overall_r, 3)) %>%
+  knitr::kable(
+    col.names = c("Corpus", "Model size", "Overall r", "N observations"),
+    caption   = paste("Pearson r between mean preference score and log frequency ratio,",
+                      "pooled across all checkpoints.")
+  )
+```
 
-- All values are on the **probability scale** (0 = always prefer non-alpha,
-  1 = always prefer alpha, 0.5 = no preference):
-  - **GenPref** -> `genpref + 0.5` (GenPref is already a +/-0.5 deviation from 0.5)
-  - **Frequency expectation** -> `plogis(log_freq_ratio)` (raw frequency
-    log-odds converted to probability, assuming perfect calibration)
-  - **Model preference** -> `plogis(mean_preference)` (logistic of the
-    log-probability difference, averaged across model sizes)
-- Instead of GenPref decile bins, we show **real sampled binomials**,
-  stratified by GenPref level x overall frequency so the sample covers
-  the full range of both dimensions.
-- Binomials with the largest GenPref-frequency conflict are **annotated**.
+---
 
-```{r plot10-prob-dumbbell, fig.width = 13, fig.height = 11}
-library(ggrepel)
+## Plot 3: GenPref vs. Mean Preference Score
 
-N_SAMPLE <- 45   # binomials to show per corpus panel
-set.seed(964)
+Does the model's preference score correlate with the linguistic/generative
+preference, independent of relative frequency? We use only the final checkpoint
+for each model and fit a Bayesian quadratic regression.
 
-# ── Probability-scale values at the final checkpoint ─────────────────────────
-prob_final <- agg_gp %>%
+```{r plot5-brms-setup, cache=TRUE, cache.lazy=FALSE}
+# Filter to final checkpoint only
+p5_final <- agg_gp %>%
+  filter(!is.na(genpref)) %>%
   group_by(corpus, model_size, model) %>%
   filter(tokens == max(tokens)) %>%
   ungroup() %>%
-  filter(!is.na(genpref), !is.na(log_freq_ratio)) %>%
   mutate(
-    pref_prob = plogis(mean_preference),   # model -> probability
-    freq_prob = plogis(log_freq_ratio),    # relative frequency ratio -> probability
-    gp_prob   = genpref + 0.5             # GenPref deviation -> probability
-  ) %>%
-  # Frequency and GenPref are corpus-level constants; average model preference
-  # across model sizes for a single "overall model" estimate per binomial.
-  group_by(corpus, binom) %>%
-  summarize(
-    pref_prob  = mean(pref_prob,  na.rm = TRUE),
-    freq_prob  = first(freq_prob),
-    gp_prob    = first(gp_prob),
-    total_seen = mean(total_seen, na.rm = TRUE),
-    .groups    = "drop"
+    model_size = factor(model_size, levels = SIZE_LEVELS),
+    # Mean-centre genpref
+    genpref_c  = genpref - mean(genpref, na.rm = TRUE)
   )
 
-# ── Stratified sample: 3 GenPref levels x 3 corpus-frequency levels ──────────
-sampled10 <- prob_final %>%
-  group_by(corpus) %>%
-  mutate(
-    gp_str   = ntile(gp_prob,                      3),
-    freq_str = ntile(log(pmax(total_seen, 1)), 3)
-  ) %>%
-  group_by(corpus, gp_str, freq_str) %>%
-  slice_sample(n = ceiling(N_SAMPLE / 9), replace = FALSE) %>%
-  ungroup()
-
-# ── Pre-compute binom factor ordering (by gp_prob, within corpus) ─────────────
-# Must be done before pivot_longer drops gp_prob as a column.
-binom_levels10 <- sampled10 %>%
-  arrange(corpus, gp_prob) %>%
-  pull(binom) %>%
-  unique()
-
-sampled10 <- sampled10 %>%
-  mutate(binom_f = factor(binom, levels = binom_levels10))
-
-# ── Binomials to annotate: largest |GenPref - frequency| conflict ─────────────
-annotate10 <- sampled10 %>%
-  group_by(corpus) %>%
-  mutate(conflict = abs(gp_prob - freq_prob)) %>%
-  slice_max(conflict, n = 8) %>%
-  ungroup()
-
-# ── Long format for three-dot layer ──────────────────────────────────────────
-long10 <- sampled10 %>%
-  pivot_longer(
-    cols      = c(freq_prob, pref_prob, gp_prob),
-    names_to  = "signal",
-    values_to = "probability"
-  ) %>%
-  mutate(
-    signal  = factor(signal,
-                     levels = c("freq_prob", "pref_prob", "gp_prob"),
-                     labels = c("Frequency expectation",
-                                "Model preference",
-                                "GenPref")),
-    binom_f = factor(binom, levels = binom_levels10)
-  )
-
-PROB_COLS <- c(
-  "Frequency expectation" = "#e66101",
-  "Model preference"      = "#1a1a1a",
-  "GenPref"               = "#5e3c99"
+plot5_fit <- brm(
+  mean_preference ~ genpref_c + I(genpref_c^2) + (1 | binom),
+  data    = p5_final,
+  family  = gaussian(),
+  prior   = BRMS_PRIORS,
+  iter    = BRMS_ITER,
+  warmup  = BRMS_WARMUP,
+  chains  = BRMS_CHAINS,
+  cores   = BRMS_CORES,
+  file    = file.path(MODELS_DIR, "plot5_fit"),
+  seed    = BRMS_SEED
 )
 
-ggplot() +
-  # Grey segment spanning the two attractors (freq ↔ GenPref)
-  geom_segment(
-    data = sampled10,
-    aes(x    = pmin(freq_prob, gp_prob),
-        xend = pmax(freq_prob, gp_prob),
-        y    = binom_f,
-        yend = binom_f),
-    colour    = "grey82",
-    linewidth = 0.55
-  ) +
-  # 0.5 = no preference
-  geom_vline(xintercept = 0.5, linetype = "dashed",
-             colour = "grey55", linewidth = 0.4) +
-  # Three coloured dots per binomial
-  geom_point(
-    data = long10,
-    aes(x      = probability,
-        y      = binom_f,
-        colour = signal,
-        shape  = signal),
-    size = 2.8
-  ) +
-  # Text labels on highest-conflict binomials
-  geom_text_repel(
-    data           = annotate10,
-    aes(x = pref_prob, y = binom_f, label = binom),
-    colour         = "grey20",
-    size           = 2.5,
-    nudge_x        = 0.08,
-    direction      = "y",
-    hjust          = 0,
-    segment.colour = "grey60",
-    segment.size   = 0.25,
-    max.overlaps   = Inf
-  ) +
-  scale_x_continuous(
-    name   = "P(alpha ordering)",
-    limits = c(0, 1.4),
-    breaks = seq(0, 1, 0.25),
-    labels = c("0", ".25", ".50", ".75", "1")
-  ) +
-  scale_y_discrete(
-    name   = "Binomials  (sorted low -> high GenPref)",
-    labels = NULL
-  ) +
-  scale_colour_manual(values = PROB_COLS, name = NULL) +
-  scale_shape_manual(
-    values = c("Frequency expectation" = 16,
-               "Model preference"      = 18,
-               "GenPref"               = 15),
-    name   = NULL
-  ) +
-  facet_wrap(~corpus, scales = "free_y", nrow = 1) +
+print(summary(plot5_fit))
+```
+
+```{r plot5-genpref-vs-pref, fig.width=10, fig.height=5}
+# Population-level predictions over a grid, replicated per corpus for faceting
+gp_seq <- seq(min(p5_final$genpref_c, na.rm = TRUE),
+              max(p5_final$genpref_c, na.rm = TRUE), length.out = 100)
+
+gp_grid <- purrr::map_dfr(unique(p5_final$corpus), function(corp) {
+  grid <- data.frame(genpref_c = gp_seq, corpus = corp)
+  pred <- fitted(plot5_fit, newdata = grid, re_formula = NA)
+  grid$estimate <- pred[, "Estimate"]
+  grid$lo       <- pred[, "Q2.5"]
+  grid$hi       <- pred[, "Q97.5"]
+  grid$genpref  <- grid$genpref_c + mean(p5_final$genpref, na.rm = TRUE)
+  grid
+})
+
+ggplot(data = gp_grid, aes(x = genpref)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_point(data = p5_final,
+             aes(x = genpref, y = mean_preference, colour = model_size),
+             alpha = 0.05, size = 0.5, show.legend = FALSE) +
+  geom_ribbon(aes(ymin = lo, ymax = hi, group = corpus),
+              fill = "grey40", alpha = 0.25) +
+  geom_line(aes(y = estimate, group = corpus),
+            colour = "grey20", linewidth = 1) +
+  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+  scale_x_continuous(name = "GenPref  (linguistic/generative preference score)") +
+  scale_y_continuous(name = "Mean preference score  (alpha_logprob - nonalpha_logprob)") +
+  facet_wrap(~corpus) +
   labs(
-    title    = "Three attractors on the probability scale  -  sampled binomials",
-    subtitle = sprintf(
-      paste("N <= %d binomials per corpus, stratified by GenPref x overall frequency",
-            "  -  Sorted bottom -> top by GenPref  -  Labels = highest GenPref-frequency conflict"),
-      N_SAMPLE
-    )
+    title    = "Does linguistic preference (GenPref) predict model preference?",
+    subtitle = "Bayesian polynomial regression (degree 2)  -  95% credible ribbon  -  Final checkpoint"
   ) +
   theme_bw(base_size = 11) +
-  theme(
-    legend.position    = "bottom",
-    axis.ticks.y       = element_blank(),
-    panel.grid.major.y = element_blank(),
-    panel.grid.minor   = element_blank()
-  )
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
 ```
 
 ---
@@ -1226,13 +564,13 @@ cat(sprintf("Regression coefficients: %s rows across %d checkpoints\n",
 
 ---
 
-### Plot 11a: Regression Coefficients  -  All Checkpoints Pooled
+### Plot 4a: Regression Coefficients  -  All Checkpoints Pooled
 
 Each (binomial x checkpoint) pair is one observation. The regression is run
 once per corpus x model size using the full dataset, so rarer binomials
 contribute their early-checkpoint observations alongside frequent ones.
 
-```{r plot11a-reg-pooled, cache=TRUE, fig.width = 11, fig.height = 5}
+```{r plot11a-reg-pooled, fig.width = 11, fig.height = 5}
 TERM_LEVELS <- c("log_freq_ratio", "genpref", "log_total_c",
                  "log_freq_ratio:log_total_c", "genpref:log_total_c")
 TERM_LABELS <- c("RelFreq\n(log ratio)", "GenPref",
@@ -1250,10 +588,18 @@ reg_pooled <- reg_data %>%
         is.na(sd_gp)  || sd_gp  == 0 ||
         is.na(sd_lt)  || sd_lt  == 0) return(NULL)
     g2 <- g %>% mutate(log_total_c = log_total - mean(log_total, na.rm = TRUE))
-    fit <- lm(mean_preference ~ log_freq_ratio * log_total_c +
-                genpref * log_total_c,
-              data = g2)
+    fit <- lmer(mean_preference ~ log_freq_ratio * log_total_c +
+                  genpref * log_total_c + (1 | binom),
+                data    = g2,
+                REML    = FALSE,
+                control = lmerControl(optimizer = "bobyqa"))
     cf <- coef(summary(fit))
+    # Normalise interaction names: R orders by variable index, not formula order,
+    # so genpref:log_total_c may be stored as log_total_c:genpref
+    rownames(cf) <- dplyr::recode(rownames(cf),
+      "log_total_c:genpref"        = "genpref:log_total_c",
+      "log_total_c:log_freq_ratio" = "log_freq_ratio:log_total_c"
+    )
     purrr::map_dfr(TERM_LEVELS, function(tm) {
       if (!tm %in% rownames(cf)) return(NULL)
       tibble(
@@ -1276,26 +622,104 @@ ggplot(reg_pooled,
        aes(x = term, y = estimate,
            colour = model_size, group = model_size)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_errorbar(aes(ymin = estimate - se, ymax = estimate + se),
+  geom_errorbar(aes(ymin = estimate - 1.96 * se, ymax = estimate + 1.96 * se),
                 width = 0.2, position = position_dodge(0.5),
                 linewidth = 0.7) +
   geom_point(size = 3, position = position_dodge(0.5)) +
   scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
   scale_x_discrete(name = NULL) +
-  scale_y_continuous(name = "OLS coefficient  (+/-1 SE)") +
+  scale_y_continuous(name = "Mixed-effects coefficient  (95% CI)") +
   facet_wrap(~corpus) +
   labs(
     title    = "Regression: mean_preference ~ RelFreq x overall freq + GenPref x overall freq",
-    subtitle = "All checkpoints pooled  -  Each obs = one binomial x checkpoint  -  +/-1 SE"
+    subtitle = "All checkpoints pooled  -  Random intercept by binomial  -  95% CI"
   ) +
   theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank(),
         axis.text.x = element_text(size = 9))
 ```
 
+### Plot 4b: GenPref vs. Preference (final checkpoint)
+
+Direct scatterplot of GenPref against model preference at the final
+checkpoint, pooled across model sizes within each corpus. Each point is
+one binomial. A degree-2 polynomial smooth shows the overall shape of
+the relationship after controlling for nothing else.
+
+```{r plot11c-genpref-scatter, fig.width = 11, fig.height = 5}
+p11c_data <- reg_data %>%
+  group_by(corpus, model_size, model) %>%
+  filter(tokens == max(tokens)) %>%
+  ungroup()
+
+ggplot(p11c_data, aes(x = genpref, y = mean_preference,
+                      colour = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(alpha = 0.07, size = 0.6, show.legend = FALSE) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
+              linewidth = 1, aes(fill = model_size)) +
+  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+  scale_x_continuous(name = "GenPref  (linguistic preference, -0.5 to +0.5)") +
+  scale_y_continuous(name = "Mean preference score  (log-odds)") +
+  facet_wrap(~corpus) +
+  labs(
+    title    = "GenPref vs. model preference at final checkpoint",
+    subtitle = "Each point = one binomial  -  Degree-2 polynomial 95% CI per model size"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
+### Plot 4c: GenPref x Overall Frequency interaction (final checkpoint)
+
+To visualise the `genpref:log_total_c` interaction, binomials are split
+into three GenPref terciles and the relationship between overall frequency
+and model preference is shown for each. If the interaction is real, the
+slope of the frequency-preference curve should differ across GenPref levels.
+
+```{r plot11d-genpref-overall-interaction, fig.width = 12, fig.height = 5}
+p11d_data <- reg_data %>%
+  group_by(corpus, model_size, model) %>%
+  filter(tokens == max(tokens)) %>%
+  ungroup() %>%
+  group_by(corpus) %>%
+  mutate(genpref_tercile = cut(genpref,
+    breaks = quantile(genpref, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE),
+    labels = c("Low GenPref", "Mid GenPref", "High GenPref"),
+    include.lowest = TRUE)) %>%
+  ungroup() %>%
+  filter(!is.na(genpref_tercile))
+
+ggplot(p11d_data, aes(x = log_total, y = mean_preference,
+                      colour = genpref_tercile)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
+              linewidth = 1, aes(fill = genpref_tercile), alpha = 0.12) +
+  scale_colour_manual(values = c("Low GenPref"  = "#d73027",
+                                 "Mid GenPref"  = "#999999",
+                                 "High GenPref" = "#1a9850"),
+                      name = NULL) +
+  scale_fill_manual(values = c("Low GenPref"  = "#d73027",
+                               "Mid GenPref"  = "#999999",
+                               "High GenPref" = "#1a9850"),
+                    name = NULL) +
+  scale_x_continuous(name   = "Overall frequency  (ln total seen)",
+                     labels = function(x) scales::comma(round(exp(x)))) +
+  scale_y_continuous(name = "Mean preference score  (log-odds)") +
+  facet_wrap(~corpus) +
+  labs(
+    title    = "GenPref x Overall frequency interaction at final checkpoint",
+    subtitle = "Binomials split by GenPref tercile  -  if interaction exists, slopes differ  -  Degree-2 polynomial 95% CI"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
 ---
 
-### Plot 11b: Regression Coefficients Over Training (per-checkpoint)
+### Plot 4d: Regression Coefficients Over Training (per-checkpoint)
 
 ```{r plot11b-reg-traj, cache=TRUE, fig.width = 13, fig.height = 9}
 ggplot(reg_coefs,
@@ -1303,589 +727,32 @@ ggplot(reg_coefs,
            colour = model_size, fill = model_size,
            group  = model_size)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-  geom_ribbon(aes(ymin = estimate - se, ymax = estimate + se),
+  geom_ribbon(aes(ymin = estimate - 1.96 * se, ymax = estimate + 1.96 * se),
               alpha = 0.15, colour = NA) +
   geom_line(linewidth = 0.7) +
   scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "OLS coefficient  (+/-1 SE ribbon)") +
+  scale_y_continuous(name = "OLS coefficient  (95% CI ribbon)") +
   scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
   scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
   facet_grid(term ~ corpus, scales = "free_y") +
   labs(
     title    = "Regression coefficients over training",
     subtitle = paste("Rows = predictor  -  RelFreq + GenPref + overall + interaction",
-                     "  -  +/-1 SE ribbon")
+                     "  -  95% CI ribbon")
   ) +
   theme_bw(base_size = 11) +
   theme(
     legend.position  = "bottom",
     panel.grid.minor = element_blank(),
-    strip.text.y     = element_text(size = 8, angle = 0, hjust = 0)
+    strip.text.y     = element_text(size = 9, angle = 0, hjust = 0)
   )
 ```
 
 ---
 
-## Plot 12: Expected vs. Actual Preference for Sampled Binomials Across Frequencies
+# Section A: Systematic Divergence by GenPref Strength
 
-For a representative set of binomials spanning different overall corpus
-frequencies, this plot shows:
-
-- **Orange dot**  -  expected preference from relative frequency (`plogis(log_freq_ratio)`)
-- **Dark dot**  -  actual model preference (`plogis(mean_preference)`)
-- **Connecting line**  -  coloured by whether the deviation aligns with GenPref
-  (green = model pulled toward GenPref; red = model pulled away)
-
-The x-axis is `log(total_seen)` so we can see whether the gap between
-expected and actual varies with how much frequency evidence the model had.
-
-```{r plot12-setup, cache=TRUE}
-# ── sample at the final checkpoint ──────────────────────────────────────────
-plot12_base <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(genpref), !is.na(total_seen),
-         total_seen > 0) %>%
-  group_by(corpus, model_size, model) %>%
-  filter(tokens == max(tokens)) %>%
-  ungroup() %>%
-  mutate(
-    freq_prob  = plogis(log_freq_ratio),   # expected from corpus
-    pref_prob  = plogis(mean_preference),  # actual model
-    gp_prob    = genpref + 0.5,            # GenPref on [0,1]
-    deviation  = pref_prob - freq_prob,    # +ve = model prefers alpha more than freq predicts
-    gp_direction = sign(genpref),          # +1 = GenPref favours alpha
-    # Aligned = deviation goes in same direction as GenPref
-    aligned = case_when(
-      gp_direction > 0 & deviation > 0  ~ "Toward GenPref",
-      gp_direction < 0 & deviation < 0  ~ "Toward GenPref",
-      gp_direction == 0                  ~ "GenPref neutral",
-      TRUE                               ~ "Away from GenPref"
-    ),
-    log_total = log(total_seen)
-  )
-
-# Stratified sample: 5 freq bins x 3 genpref terciles = 15 cells,
-# pick up to 4 binomials per cell per corpus x model_size
-set.seed(42)
-sampled12 <- plot12_base %>%
-  mutate(
-    freq_tier = ntile(log_total, 5),
-    gp_tier   = ntile(genpref,     3)
-  ) %>%
-  group_by(corpus, model_size, freq_tier, gp_tier) %>%
-  slice_sample(n = 4) %>%
-  ungroup() %>%
-  # Assign a fixed per-binomial jitter so segment and both dots share the same x
-  group_by(binom) %>%
-  mutate(jitter_x = log_total + runif(1, -0.08, 0.08)) %>%
-  ungroup()
-
-cat(sprintf("Plot 12 sample: %d binomials\n", n_distinct(sampled12$binom)))
-```
-
-```{r plot12-dumbbell, fig.width = 13, fig.height = 7}
-ggplot(sampled12, aes(x = jitter_x)) +
-  # Connecting segment (neutral grey  -  just shows the gap)
-  geom_segment(aes(xend = jitter_x,
-                   y    = freq_prob,
-                   yend = pref_prob),
-               colour = "grey55", linewidth = 1, alpha = 0.7) +
-  # Expected (relative frequency) dot  -  orange
-  geom_point(aes(y = freq_prob),
-             shape = 21, fill = "#ff7f0e", colour = "white",
-             size = 2.8, stroke = 0.5) +
-  # Actual (model preference) dot  -  blue
-  geom_point(aes(y = pref_prob),
-             shape = 16, colour = "#1f77b4",
-             size = 2.8) +
-  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
-  scale_x_continuous(
-    name   = "Overall frequency  (ln total seen)",
-    labels = function(x) scales::comma(round(exp(x)))
-  ) +
-  scale_y_continuous(
-    name   = "P(alpha order)",
-    limits = c(0, 1),
-    labels = scales::percent_format(accuracy = 1)
-  ) +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Expected vs. actual model preference across relative frequency levels",
-    subtitle = "Orange = expected from relative frequency  -  Blue = actual model preference  -  Points jittered to reduce overlap"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "none",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
-```{r plot12-annotated, fig.width = 14, fig.height = 8}
-# Annotated version: label binomials with the largest absolute deviation
-top_annotate <- sampled12 %>%
-  group_by(corpus, model_size) %>%
-  slice_max(abs(deviation), n = 6) %>%
-  ungroup()
-
-ggplot(sampled12, aes(x = jitter_x)) +
-  geom_segment(aes(xend = jitter_x,
-                   y    = freq_prob,
-                   yend = pref_prob),
-               colour = "grey55", linewidth = 1, alpha = 0.7) +
-  geom_point(aes(y = freq_prob),
-             shape = 21, fill = "#ff7f0e", colour = "white",
-             size = 2.5, stroke = 0.5) +
-  geom_point(aes(y = pref_prob),
-             shape = 16, colour = "#1f77b4", size = 2.5) +
-  ggrepel::geom_label_repel(
-    data = top_annotate,
-    aes(y = pref_prob, label = binom),
-    size = 2.5, max.overlaps = 20,
-    box.padding = 0.3, point.padding = 0.2,
-    segment.colour = "grey40", segment.size = 0.3,
-    fill = alpha("white", 0.8)
-  ) +
-  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
-  scale_x_continuous(
-    name   = "Overall frequency  (ln total seen)",
-    labels = function(x) scales::comma(round(exp(x)))
-  ) +
-  scale_y_continuous(
-    name   = "P(alpha order)",
-    limits = c(0, 1),
-    labels = scales::percent_format(accuracy = 1)
-  ) +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Expected vs. actual model preference  -  annotated extremes",
-    subtitle = "Labels on binomials with largest deviation from frequency expectation"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "none",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
----
-
-## Plot 13: Gap Between Actual and Expected Preference Over Training
-
-How does the absolute deviation `|pref_prob - freq_prob|` change as training
-progresses, and does it differ by how often the binomial was seen in the corpus?
-
-```{r plot13-setup, cache=TRUE}
-FREQ_BREAKS13 <- c(0, 1, 2, 3, Inf)
-FREQ_LABELS13 <- c("1-10", "10-100", "100-1k", ">1k")
-
-gap_traj <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(total_seen), total_seen > 0) %>%
-  mutate(
-    freq_prob   = plogis(log_freq_ratio),
-    pref_prob   = plogis(mean_preference),
-    abs_gap     = abs(pref_prob - freq_prob),
-    log_total = log(total_seen),
-    freq_bin    = cut(log_total,
-                      breaks = FREQ_BREAKS13,
-                      labels = FREQ_LABELS13,
-                      include.lowest = TRUE)
-  ) %>%
-  group_by(corpus, model_size, tokens, freq_bin) %>%
-  summarise(
-    mean_gap = mean(abs_gap, na.rm = TRUE),
-    se_gap   = sd(abs_gap,   na.rm = TRUE) / sqrt(n()),
-    n        = n(),
-    .groups  = "drop"
-  ) %>%
-  mutate(
-    model_size = factor(model_size, levels = SIZE_LEVELS),
-    freq_bin   = factor(freq_bin,   levels = FREQ_LABELS13)
-  )
-```
-
-```{r plot13-traj, fig.width = 13, fig.height = 8}
-ggplot(gap_traj,
-       aes(x = tokens / 1e9, y = mean_gap,
-           colour = model_size, fill = model_size,
-           group  = model_size)) +
-  geom_ribbon(aes(ymin = mean_gap - se_gap, ymax = mean_gap + se_gap),
-              alpha = 0.15, colour = NA) +
-  geom_line(linewidth = 0.8) +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(
-    name   = "Mean |P(model) - P(frequency)|",
-    labels = scales::percent_format(accuracy = 0.1)
-  ) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  facet_grid(freq_bin ~ corpus, scales = "free_x") +
-  labs(
-    title    = "Gap between actual and expected preference over training, by overall frequency",
-    subtitle = "Rows = overall frequency bin  -  +/-1 SE ribbon  -  All binomials (no sampling)"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "bottom",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
----
-
-## Plot 14: Gap Between Actual and Expected Preference vs. Binomial Frequency
-
-At the final checkpoint, how does the absolute deviation vary continuously
-with `log(total_seen)`? A LOESS smoother reveals the overall trend.
-
-```{r plot14-gap-vs-freq, fig.width = 11, fig.height = 6}
-gap_final <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(total_seen), total_seen > 0) %>%
-  group_by(corpus, model_size, model) %>%
-  filter(tokens == max(tokens)) %>%
-  ungroup() %>%
-  mutate(
-    freq_prob   = plogis(log_freq_ratio),
-    pref_prob   = plogis(mean_preference),
-    abs_gap     = abs(pref_prob - freq_prob),
-    log_total = log(total_seen),
-    model_size  = factor(model_size, levels = SIZE_LEVELS)
-  )
-
-ggplot(gap_final, aes(x = log_total, y = abs_gap, colour = model_size)) +
-  geom_point(alpha = 0.04, size = 0.6, show.legend = FALSE) +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
-              aes(fill = model_size), linewidth = 1, alpha = 0.15) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  scale_x_continuous(
-    name   = "Overall frequency  (ln total seen)",
-    labels = function(x) scales::comma(round(exp(x)))
-  ) +
-  scale_y_continuous(
-    name   = "|P(model) - P(frequency expected)|",
-    labels = scales::percent_format(accuracy = 1),
-    limits = c(0, NA)
-  ) +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Absolute gap between model and frequency-expected preference vs. overall frequency",
-    subtitle = "Final checkpoint  -  Each point = one binomial  -  Degree-2 polynomial +/- 95% CI"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "none",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
-
----
-
-## Plot 15: Gap vs. Frequency Across All Checkpoints
-
-Same as Plot 14 but every checkpoint contributes its own points. Because
-`total_seen` grows with training, the same binomial traces a path rightward
-across checkpoints  -  each observation is one (binomial x checkpoint) pair.
-This lets the LOESS span the full range of exposure levels rather than only
-the final snapshot.
-
-```{r plot15-gap-all-checkpoints, cache=TRUE, fig.width = 11, fig.height = 6}
-gap_all <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(total_seen), total_seen > 0) %>%
-  mutate(
-    freq_prob   = plogis(log_freq_ratio),
-    pref_prob   = plogis(mean_preference),
-    abs_gap     = abs(pref_prob - freq_prob),
-    log_total = log(total_seen),
-    model_size  = factor(model_size, levels = SIZE_LEVELS)
-  )
-
-ggplot(gap_all, aes(x = log_total, y = abs_gap, colour = model_size)) +
-  geom_point(alpha = 0.01, size = 0.4, show.legend = FALSE) +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
-              aes(fill = model_size), linewidth = 1, alpha = 0.15) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  scale_x_continuous(
-    name   = "Overall frequency at checkpoint  (ln total seen)",
-    labels = function(x) scales::comma(round(exp(x)))
-  ) +
-  scale_y_continuous(
-    name   = "|P(model) - P(frequency expected)|",
-    labels = scales::percent_format(accuracy = 1),
-    limits = c(0, NA)
-  ) +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Absolute gap vs. overall frequency - all checkpoints pooled",
-    subtitle = "Each point = one binomial x checkpoint  .  Same binomial appears at increasing x as training progresses  .  Degree-2 polynomial +/- 95% CI"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "none",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
----
-
-## Plot 16: Signed Gap vs. Frequency Across All Checkpoints
-
-Like Plot 15 but using the raw signed difference `P(model) - P(frequency expected)`.
-Negative values mean the model prefers the alpha order *less* than corpus
-frequency would predict; positive values mean it prefers it *more*.
-
-```{r plot16-signed-gap-all, cache=TRUE, fig.width = 11, fig.height = 6}
-signed_all <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(total_seen), total_seen > 0) %>%
-  mutate(
-    freq_prob   = plogis(log_freq_ratio),
-    pref_prob   = plogis(mean_preference),
-    signed_gap  = pref_prob - freq_prob,
-    log_total = log(total_seen),
-    model_size  = factor(model_size, levels = SIZE_LEVELS)
-  )
-
-ggplot(signed_all, aes(x = log_total, y = signed_gap, colour = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
-  geom_point(alpha = 0.01, size = 0.4, show.legend = FALSE) +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
-              aes(fill = model_size), linewidth = 1, alpha = 0.15) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  scale_x_continuous(
-    name   = "Overall frequency at checkpoint  (ln total seen)",
-    labels = function(x) scales::comma(round(exp(x)))
-  ) +
-  scale_y_continuous(
-    name   = "P(model) - P(frequency expected)",
-    labels = scales::percent_format(accuracy = 1)
-  ) +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Signed gap between model and frequency-expected preference vs. overall frequency  -  all checkpoints pooled",
-    subtitle = "Negative = model under-predicts alpha order relative to frequency  .  Positive = over-predicts  .  Degree-2 polynomial +/- 95% CI"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "none",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
----
-
-## Plots 15b / 16b: Absolute and Signed Gap on Logit Scale
-
-Rather than converting to probability first, these use `mean_preference` and
-`log_freq_ratio` directly (both already in log-odds). The difference is the
-gap in log-odds units, which is more symmetric and avoids probability-scale
-compression near 0 and 1.
-
-```{r plot15b-abs-logit, cache=TRUE, fig.width = 11, fig.height = 6}
-gap_logit <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(total_seen), total_seen > 0) %>%
-  mutate(
-    abs_gap_logit    = abs(mean_preference - log_freq_ratio),
-    signed_gap_logit = mean_preference - log_freq_ratio,
-    log_total      = log(total_seen),
-    model_size       = factor(model_size, levels = SIZE_LEVELS)
-  )
-
-# Plot 15b: absolute gap, logit scale
-ggplot(gap_logit, aes(x = log_total, y = abs_gap_logit, colour = model_size)) +
-  geom_point(alpha = 0.01, size = 0.4, show.legend = FALSE) +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
-              aes(fill = model_size), linewidth = 1, alpha = 0.15) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  scale_x_continuous(
-    name   = "Overall frequency at checkpoint  (ln total seen)",
-    labels = function(x) scales::comma(round(exp(x)))
-  ) +
-  scale_y_continuous(name = "|preference - log_freq_ratio|  (log-odds)") +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Absolute gap vs. overall frequency (logit scale)  -  all checkpoints pooled",
-    subtitle = "Each point = one binomial x checkpoint  .  Degree-2 polynomial +/- 95% CI"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "none",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
-```{r plot16b-signed-logit, cache=TRUE, fig.width = 11, fig.height = 6}
-# Plot 16b: signed gap, logit scale
-ggplot(gap_logit, aes(x = log_total, y = signed_gap_logit, colour = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
-  geom_point(alpha = 0.01, size = 0.4, show.legend = FALSE) +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
-              aes(fill = model_size), linewidth = 1, alpha = 0.15) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-  scale_x_continuous(
-    name   = "Overall frequency at checkpoint  (ln total seen)",
-    labels = function(x) scales::comma(round(exp(x)))
-  ) +
-  scale_y_continuous(name = "preference - log_freq_ratio  (log-odds)") +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Signed gap vs. overall frequency (logit scale)  -  all checkpoints pooled",
-    subtitle = "Negative = model under-predicts alpha order relative to frequency  .  Positive = over-predicts  .  Degree-2 polynomial +/- 95% CI"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position  = "none",
-    panel.grid.minor = element_blank(),
-    strip.text       = element_text(size = 9)
-  )
-```
-
----
-
-# Section A: Calibration  -  How Well Does the Model Copy Corpus Frequency?
-
-## Plot 17: R^2, Slope, and Intercept of preference ~ log_freq_ratio Over Training
-
-R^2 answers "how much variance does relative frequency explain?". The slope
-answers "does the model copy frequency faithfully (slope ≈ 1) or compress it
-toward neutrality (slope < 1)?". The intercept answers "is there a systematic
-alpha-order bias independent of frequency?"
-
-```{r plot17-r2-slope, cache=TRUE}
-r2_traj <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(mean_preference)) %>%
-  group_by(corpus, model_size, tokens) %>%
-  group_map(function(g, keys) {
-    if (nrow(g) < 10) return(NULL)
-    sd_lfr <- sd(g$log_freq_ratio, na.rm = TRUE)
-    if (is.na(sd_lfr) || sd_lfr == 0) return(NULL)
-    fit <- lm(mean_preference ~ log_freq_ratio, data = g)
-    cf  <- coef(fit)
-    tibble(
-      corpus     = keys$corpus,
-      model_size = keys$model_size,
-      tokens     = keys$tokens,
-      r2         = summary(fit)$r.squared,
-      slope      = cf["log_freq_ratio"],
-      intercept  = cf["(Intercept)"],
-      n          = nrow(g)
-    )
-  }, .keep = TRUE) %>%
-  bind_rows() %>%
-  mutate(model_size = factor(model_size, levels = SIZE_LEVELS))
-
-cat(sprintf("R2 trajectory: %d rows\n", nrow(r2_traj)))
-```
-
-```{r plot17a-r2, fig.width = 11, fig.height = 5}
-ggplot(r2_traj, aes(x = tokens / 1e9, y = r2,
-                    colour = model_size, group = model_size)) +
-  geom_line(linewidth = 0.8) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "R^2  (preference ~ log_freq_ratio)",
-                     limits = c(0, 1)) +
-  facet_wrap(~corpus, scales = "free_x") +
-  labs(
-    title    = "R^2 of model preference ~ RelFreq over training",
-    subtitle = "Higher = model preference more explained by corpus distribution"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank())
-```
-
-```{r plot17b-slope-intercept, fig.width = 12, fig.height = 7}
-ref_df <- tibble(
-  param = factor(c("Slope  (1 = faithful copy)", "Intercept  (0 = no alpha bias)")),
-  ref   = c(1, 0)
-)
-
-r2_long <- r2_traj %>%
-  pivot_longer(cols = c(slope, intercept),
-               names_to = "param", values_to = "value") %>%
-  mutate(param = factor(param,
-                        levels = c("slope", "intercept"),
-                        labels = c("Slope  (1 = faithful copy)",
-                                   "Intercept  (0 = no alpha bias)")))
-
-ggplot(r2_long, aes(x = tokens / 1e9, y = value,
-                    colour = model_size, group = model_size)) +
-  geom_hline(data = ref_df, aes(yintercept = ref),
-             linetype = "dashed", colour = "grey50") +
-  geom_line(linewidth = 0.8) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "Estimate") +
-  facet_grid(param ~ corpus, scales = "free") +
-  labs(
-    title    = "Slope and intercept of preference ~ log_freq_ratio over training",
-    subtitle = "Slope < 1 = compression toward neutrality  .  Non-zero intercept = systematic alpha bias"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank(),
-        strip.text.y = element_text(size = 9, angle = 0, hjust = 0))
-```
-
----
-
-## Plot 18: Calibration Scatter  -  Model vs. Frequency Expectation
-
-If the model is a perfect frequency-copier, points lie on the 45° line.
-Points above it = model is more alpha-preferring than frequency predicts;
-below = less alpha-preferring.
-
-```{r plot18-calibration, fig.width = 12, fig.height = 7}
-calib_data <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(mean_preference),
-         !is.na(total_seen), total_seen > 0) %>%
-  group_by(corpus, model_size, model) %>%
-  filter(tokens == max(tokens)) %>%
-  ungroup() %>%
-  mutate(
-    freq_bin = cut(log(pmax(total_seen, 1)),
-                   breaks = c(0, log(10), log(100), log(1000), Inf),
-                   labels = c("1-10", "10-100", "100-1k", ">1k"),
-                   include.lowest = TRUE),
-    model_size = factor(model_size, levels = SIZE_LEVELS)
-  )
-
-lim <- range(c(calib_data$log_freq_ratio, calib_data$mean_preference), na.rm = TRUE)
-
-ggplot(calib_data, aes(x = log_freq_ratio, y = mean_preference,
-                       colour = freq_bin)) +
-  geom_abline(slope = 1, intercept = 0,
-              linetype = "dashed", colour = "grey40", linewidth = 0.6) +
-  geom_point(alpha = 0.05, size = 0.5) +
-  geom_smooth(method = "lm", se = FALSE, linewidth = 1,
-              aes(group = freq_bin)) +
-  scale_colour_brewer(palette = "RdYlBu", direction = -1,
-                      name = "Total seen") +
-  scale_x_continuous(name = "log_freq_ratio  (corpus expectation, log-odds)", limits = lim) +
-  scale_y_continuous(name = "mean_preference  (model, log-odds)",             limits = lim) +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "Calibration: model preference vs. RelFreq expectation",
-    subtitle = "Dashed line = perfect copying  .  Above = model more alpha-preferring than expected  .  Coloured by frequency bin"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank(),
-        strip.text = element_text(size = 9))
-```
-
----
-
-# Section B: Systematic Divergence by GenPref Strength
-
-## Plot 19: Signed Deviation by GenPref Quartile Over Training
+## Plot 5: Signed Deviation by GenPref Quartile Over Training
 
 If GenPref pulls model preferences systematically, binomials in the top
 GenPref quartile should show positive signed deviations from frequency
@@ -1927,7 +794,7 @@ ggplot(gp_dev_traj,
        aes(x = tokens / 1e9, y = mean_dev,
            colour = gp_label, fill = gp_label, group = gp_label)) +
   geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.4) +
-  geom_ribbon(aes(ymin = mean_dev - se_dev, ymax = mean_dev + se_dev),
+  geom_ribbon(aes(ymin = mean_dev - 1.96 * se_dev, ymax = mean_dev + 1.96 * se_dev),
               alpha = 0.12, colour = NA) +
   geom_line(linewidth = 0.9) +
   scale_colour_brewer(palette = "RdBu", direction = -1, name = "GenPref quartile") +
@@ -1937,7 +804,7 @@ ggplot(gp_dev_traj,
   facet_grid(model_size ~ corpus, scales = "free_x") +
   labs(
     title    = "Signed deviation from frequency expectation by GenPref quartile over training",
-    subtitle = "If GenPref pulls: Q4 (high) stays positive, Q1 (low) stays negative  .  +/-1 SE ribbon"
+    subtitle = "If GenPref pulls: Q4 (high) stays positive, Q1 (low) stays negative  -  95% CI ribbon"
   ) +
   theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank(),
@@ -1946,152 +813,7 @@ ggplot(gp_dev_traj,
 
 ---
 
-# Section C: GAM Interaction Surface
-
-## Plot 20: GAM te(log_total, tokens)  -  Deviation as a 2D Surface
-
-A tensor-product smooth jointly over overall frequency and training time
-captures non-linear interactions that regression misses. The surface shows
-whether the deviation from frequency expectation varies with both how much
-frequency evidence a binomial has and how far along training is.
-
-```{r plot20-gam-setup, cache=TRUE}
-library(mgcv)
-
-gam_input <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(total_seen), total_seen > 0) %>%
-  mutate(
-    signed_gap  = mean_preference - log_freq_ratio,
-    log_total = log(total_seen),
-    tokens_b    = tokens / 1e9
-  )
-
-set.seed(7)
-gam_grids <- gam_input %>%
-  group_by(corpus, model_size) %>%
-  group_map(function(g, keys) {
-    if (nrow(g) < 200) return(NULL)
-    g_fit <- if (nrow(g) > 100000) slice_sample(g, n = 100000) else g
-    fit <- bam(
-      signed_gap ~ te(log_total, tokens_b, k = c(8, 8)),
-      data     = g_fit,
-      method   = "fREML",
-      discrete = TRUE
-    )
-    grid <- expand.grid(
-      log_total = seq(quantile(g$log_total, 0.02, na.rm = TRUE),
-                        quantile(g$log_total, 0.98, na.rm = TRUE),
-                        length.out = 60),
-      tokens_b    = seq(min(g$tokens_b, na.rm = TRUE),
-                        max(g$tokens_b, na.rm = TRUE),
-                        length.out = 60)
-    )
-    pred <- predict(fit, newdata = grid, se.fit = TRUE)
-    grid %>% mutate(
-      fitted     = pred$fit,
-      se         = pred$se.fit,
-      corpus     = keys$corpus,
-      model_size = keys$model_size
-    )
-  }, .keep = TRUE) %>%
-  bind_rows() %>%
-  mutate(model_size = factor(model_size, levels = SIZE_LEVELS))
-
-cat(sprintf("GAM grids: %d prediction points\n", nrow(gam_grids)))
-```
-
-```{r plot20-gam-surface, fig.width = 14, fig.height = 9}
-zlim <- max(abs(gam_grids$fitted), na.rm = TRUE)
-
-ggplot(gam_grids, aes(x = log_total, y = tokens_b, fill = fitted)) +
-  geom_tile() +
-  geom_contour(aes(z = fitted), colour = "white", linewidth = 0.3,
-               breaks = seq(-2, 2, by = 0.5)) +
-  scale_fill_distiller(palette = "RdBu", direction = -1,
-                       name = "Signed gap\n(log-odds)",
-                       limits = c(-zlim, zlim)) +
-  scale_x_continuous(name   = "Overall frequency  (ln total seen)",
-                     labels = function(x) scales::comma(round(exp(x)))) +
-  scale_y_continuous(name = "Training progress  (billions of tokens)") +
-  facet_grid(model_size ~ corpus) +
-  labs(
-    title    = "GAM surface: signed gap as a function of overall frequency x training time",
-    subtitle = "te(log_total, tokens)  .  Red = model more alpha-preferring than frequency predicts"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "right", panel.grid = element_blank(),
-        strip.text = element_text(size = 9))
-```
-
----
-
-# Section D: Individual Binomial Preference Trajectories
-
-## Plot 21: Sampled Binomials  -  Preference and Frequency Expectation Over Training
-
-Both `mean_preference` and `log_freq_ratio` change as the model trains (more
-frequency evidence accumulates). Plotting both as trajectories for a
-stratified sample shows whether the model converges to or persistently
-diverges from frequency.
-
-```{r plot21-traj-setup, cache=TRUE}
-set.seed(99)
-traj_binoms <- agg_gp %>%
-  filter(!is.na(genpref), !is.na(log_freq_ratio), !is.na(total_seen)) %>%
-  group_by(corpus, binom) %>%
-  filter(tokens == max(tokens)) %>%
-  slice(1) %>%
-  ungroup() %>%
-  mutate(
-    gp_tier   = ntile(genpref, 3),
-    freq_tier = ntile(log(pmax(total_seen, 1)), 3)
-  ) %>%
-  group_by(corpus, gp_tier, freq_tier) %>%
-  slice_sample(n = 3) %>%
-  ungroup() %>%
-  select(corpus, binom, genpref) %>%
-  distinct()
-
-traj_data <- agg_gp %>%
-  inner_join(traj_binoms, by = c("corpus", "binom")) %>%
-  filter(!is.na(log_freq_ratio)) %>%
-  mutate(model_size = factor(model_size, levels = SIZE_LEVELS)) %>%
-  pivot_longer(cols      = c(mean_preference, log_freq_ratio),
-               names_to  = "measure",
-               values_to = "log_odds") %>%
-  mutate(measure = recode(measure,
-                          mean_preference = "Model preference",
-                          log_freq_ratio  = "Corpus expectation"))
-
-cat(sprintf("Trajectory sample: %d unique binomials\n", n_distinct(traj_binoms$binom)))
-```
-
-```{r plot21-trajectories, fig.width = 15, fig.height = 10}
-ggplot(traj_data %>% filter(model_size == last(SIZE_LEVELS)),
-       aes(x      = tokens / 1e9,
-           y      = log_odds,
-           colour = measure,
-           group  = interaction(binom, measure))) +
-  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey70", linewidth = 0.3) +
-  geom_line(linewidth = 0.6, alpha = 0.8) +
-  scale_colour_manual(values = c("Model preference"   = "#1f77b4",
-                                 "Corpus expectation" = "#ff7f0e"),
-                      name = NULL) +
-  scale_x_continuous(name = "Tokens seen (billions)") +
-  scale_y_continuous(name = "Log-odds") +
-  facet_wrap(corpus ~ binom, scales = "free", ncol = 9) +
-  labs(
-    title    = "Individual binomial trajectories: model preference vs. corpus expectation over training",
-    subtitle = "Largest model only  .  Blue = model preference  .  Orange = RelFreq expectation"
-  ) +
-  theme_bw(base_size = 8) +
-  theme(legend.position = "bottom", panel.grid.minor = element_blank(),
-        strip.text = element_text(size = 6))
-```
-
----
-
-# Section E: Mixed-Effects Model and Variance Decomposition
+# Section B: Mixed-Effects Model and Variance Decomposition
 
 How much variance in model preference is explained by relative frequency alone,
 GenPref alone, both together, and a full model with interactions? The
@@ -2133,19 +855,21 @@ fold_assign   <- setNames(
 )
 
 # ── CV function  -  5-fold binomial-grouped holdout ────────────────────────────
-lobo_q2 <- function(formula, data, fit_fn) {
+# Returns per-observation squared errors (one entry per row of data).
+# Each observation belongs to exactly one fold and is predicted exactly once.
+lobo_errors <- function(formula, data, fit_fn) {
   binom_vals <- data$binom
-  lobo_ss    <- 0
+  sq_err     <- numeric(nrow(data))
   for (fold in seq_len(K)) {
-    held     <- names(fold_assign)[fold_assign == fold]
-    in_train <- !binom_vals %in% held
-    fit_k    <- fit_fn(formula, data[in_train, ])
-    pred     <- predict(fit_k,
-                        newdata          = data[!in_train, ],
-                        allow.new.levels = TRUE)
-    lobo_ss  <- lobo_ss + sum((data$mean_preference[!in_train] - pred)^2)
+    held              <- names(fold_assign)[fold_assign == fold]
+    in_train          <- !binom_vals %in% held
+    fit_k             <- fit_fn(formula, data[in_train, ])
+    pred              <- predict(fit_k,
+                                 newdata          = data[!in_train, ],
+                                 allow.new.levels = TRUE)
+    sq_err[!in_train] <- (data$mean_preference[!in_train] - pred)^2
   }
-  1 - lobo_ss / ss_tot
+  sq_err
 }
 
 lmer_fn <- function(frm, dat) lmer(frm, data = dat, REML = FALSE,
@@ -2172,17 +896,27 @@ mixed_specs <- list(
 cat(sprintf("Running %d-fold binomial-grouped CV for %d mixed models...\n",
             K, length(mixed_specs)))
 
-cv_table <- purrr::imap_dfr(mixed_specs, function(frm, name) {
+cv_results <- purrr::imap(mixed_specs, function(frm, name) {
   cat(sprintf("  Mixed: %s\n", name))
-  q2_mix  <- tryCatch(lobo_q2(frm, vd_data, lmer_fn),
-                      error = function(e) { warning(e); NA_real_ })
+  errs    <- tryCatch(lobo_errors(frm, vd_data, lmer_fn),
+                      error = function(e) { warning(e); NULL })
   fit_mix <- tryCatch(lmer_fn(frm, vd_data), error = function(e) NULL)
+  list(
+    errors   = errs,
+    q2       = if (!is.null(errs)) 1 - sum(errs) / ss_tot else NA_real_,
+    aic      = if (!is.null(fit_mix)) round(AIC(fit_mix), 1) else NA_real_,
+    n_params = if (!is.null(fit_mix)) length(fixef(fit_mix)) + 2L else NA_integer_
+  )
+})
 
+cv_errors <- purrr::map(cv_results, "errors")   # named list of per-obs squared error vectors
+
+cv_table <- purrr::imap_dfr(cv_results, function(res, name) {
   tibble(
     Model    = name,
-    LOBO_Q2  = round(q2_mix, 4),
-    AIC      = if (!is.null(fit_mix)) round(AIC(fit_mix), 1) else NA_real_,
-    n_params = if (!is.null(fit_mix)) length(fixef(fit_mix)) + 2L else NA_integer_
+    LOBO_Q2  = round(res$q2, 4),
+    AIC      = res$aic,
+    n_params = res$n_params
   )
 })
 
@@ -2234,13 +968,72 @@ cat("\n=== Random-effects variance decomposition ===\n")
 vc <- as.data.frame(VarCorr(best_fit))
 vc$pct <- round(100 * vc$vcov / sum(vc$vcov), 1)
 print(vc %>% select(grp, var1, vcov, pct))
+
+# ── 4. Significance testing — paired CV t-test on per-observation errors ───────
+# For each adjacent pair in the Q^2 ranking, test whether Model A's squared
+# prediction errors are systematically smaller than Model B's.  Because both
+# models are evaluated on the *same* held-out observations (identical fold
+# assignment), the errors are paired — this is valid for both nested and
+# non-nested model pairs.
+cat("\n=== Significance testing: paired CV t-test (adjacent models by Q^2) ===\n")
+cat("(Paired on per-observation squared prediction errors; two-sided t-test)\n\n")
+
+n_models <- nrow(cv_ranked)
+cv_paired <- purrr::map2_dfr(
+  seq_len(n_models - 1),
+  seq(2, n_models),
+  function(i, j) {
+    nm_a  <- cv_ranked$Model[i]
+    nm_b  <- cv_ranked$Model[j]
+    err_a <- cv_errors[[nm_a]]
+    err_b <- cv_errors[[nm_b]]
+    if (is.null(err_a) || is.null(err_b)) return(NULL)
+    tt <- t.test(err_a, err_b, paired = TRUE)
+    tibble(
+      Model_A  = nm_a,
+      Model_B  = nm_b,
+      delta_Q2 = round(cv_ranked$LOBO_Q2[i] - cv_ranked$LOBO_Q2[j], 4),
+      t_stat   = round(tt$statistic, 3),
+      p_value  = round(tt$p.value, 4),
+      sig      = dplyr::case_when(
+        tt$p.value < 0.001 ~ "***",
+        tt$p.value < 0.01  ~ "**",
+        tt$p.value < 0.05  ~ "*",
+        TRUE               ~ "ns"
+      )
+    )
+  }
+)
+print(cv_paired)
+
+# Determine winners: start from top and keep models until one is
+# significantly worse than the previous (alpha = 0.05)
+winner_models <- cv_ranked$Model[1]  # top model always wins
+for (i in seq_len(nrow(cv_paired))) {
+  if (!is.na(cv_paired$p_value[i]) && cv_paired$p_value[i] < 0.05) break
+  winner_models <- c(winner_models, cv_ranked$Model[i + 1])
+}
+winner_params <- sapply(winner_models, function(nm) cv_ranked$n_params[cv_ranked$Model == nm])
+simplest_winner <- winner_models[which.min(winner_params)]
+
+cat(sprintf("\n=== WINNERS (no significant difference among these) ===\n"))
+cat(paste(" -", winner_models, "\n"), sep = "")
+cat(sprintf("\nSimplest winner: '%s'  (%d fixed-effect parameters)\n",
+            simplest_winner, min(winner_params)))
 ```
 
 ```{r vardecomp-plot, fig.width = 11, fig.height = 7}
 cv_table %>%
-  mutate(Model = factor(Model, levels = rev(Model))) %>%
-  ggplot(aes(x = LOBO_Q2, y = Model)) +
-  geom_col(width = 0.7, fill = "#2ca02c") +
+  arrange(LOBO_Q2) %>%                        # ascending so best lands at top of y-axis
+  mutate(
+    Model    = factor(Model, levels = Model),  # factor order = plot order (bottom = worst)
+    bar_fill = case_when(
+      Model %in% winner_models ~ "#2c7bb6",   # winning models: blue
+      TRUE                     ~ "#cccccc"    # eliminated models: grey
+    )
+  ) %>%
+  ggplot(aes(x = LOBO_Q2, y = Model, fill = bar_fill)) +
+  geom_col(width = 0.7) +
   geom_text(aes(label = sprintf("%.4f", LOBO_Q2)), hjust = -0.1, size = 2.8) +
   geom_vline(xintercept = 0, colour = "grey30", linewidth = 0.5) +
   scale_x_continuous(
@@ -2248,21 +1041,23 @@ cv_table %>%
     expand = expansion(mult = c(0.05, 0.2))
   ) +
   scale_y_discrete(name = NULL) +
+  scale_fill_identity() +
   labs(
     title    = "Out-of-sample predictive accuracy  -  mixed-effects models",
-    subtitle = paste("5-fold binomial-grouped CV  .",
-                     "Holdout unit = entire binomial (all checkpoints)  .",
-                     "Freq = P(alpha) - 0.5  .  GenPref on [-0.5, 0.5]  .",
-                     "All models include (1|binom)")
+    subtitle = paste("5-fold binomial-grouped CV  -",
+                     "Holdout unit = entire binomial (all checkpoints)  -",
+                     "Freq = P(alpha) - 0.5  -  GenPref on [-0.5, 0.5]  -",
+                     "All models include (1|binom)  -",
+                     "Blue = winner (not significantly different from best)  -  Grey = eliminated")
   ) +
-  theme_bw(base_size = 10) +
+  theme_bw(base_size = 11) +
   theme(panel.grid.major.y = element_blank(), panel.grid.minor = element_blank(),
         legend.position = "none", axis.text.y = element_text(size = 8))
 ```
 
 ---
 
-# Section F: What Determines the Direction of the Signed Gap?
+# Section C: What Determines the Direction of the Signed Gap?
 
 When the model diverges from relative frequency, is that divergence explained by
 GenPref, overall frequency, corpus-predicted frequency, or interactions among
@@ -2350,9 +1145,174 @@ gd_coefs <- bind_rows(
   filter(term != "Intercept") %>%
   mutate(
     term = factor(term, levels = TERM_LEVELS_GD, labels = TERM_LABELS_GD),
-    # Mark coefficients whose 95% credible interval excludes zero
     sig  = if_else(lo > 0 | hi < 0, "*", "")
   )
+
+# ── Per-corpus brms models (final checkpoint) ──────────────────────────────────
+CORPORA <- sort(unique(gd_final$corpus))
+
+corpus_slug <- function(corp) tolower(gsub("[^a-z0-9]", "", corp))
+
+gd_fit_corpus <- setNames(lapply(CORPORA, function(corp) {
+  brm(
+    signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+    data   = filter(gd_final, corpus == corp),
+    family = gaussian(),
+    prior  = BRMS_PRIORS,
+    iter   = BRMS_ITER,
+    warmup = BRMS_WARMUP,
+    chains = BRMS_CHAINS,
+    cores  = BRMS_CORES,
+    file   = file.path(MODELS_DIR, paste0("gd_fit_", corpus_slug(corp))),
+    seed   = BRMS_SEED
+  )
+}), CORPORA)
+
+gd_logit_corpus <- setNames(lapply(CORPORA, function(corp) {
+  brm(
+    gap_positive ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+    data   = filter(gd_final, corpus == corp),
+    family = bernoulli(),
+    prior  = BRMS_PRIORS_LOGISTIC,
+    iter   = BRMS_ITER,
+    warmup = BRMS_WARMUP,
+    chains = BRMS_CHAINS,
+    cores  = BRMS_CORES,
+    file   = file.path(MODELS_DIR, paste0("gd_logit_", corpus_slug(corp))),
+    seed   = BRMS_SEED + 1L
+  )
+}), CORPORA)
+
+for (corp in CORPORA) {
+  cat(sprintf("\n=== brms linear (final checkpoint, %s): signed_gap ===\n", corp))
+  print(summary(gd_fit_corpus[[corp]]))
+  cat(sprintf("\n=== brms logistic (final checkpoint, %s): P(gap > 0) ===\n", corp))
+  print(summary(gd_logit_corpus[[corp]]))
+}
+
+gd_coefs_by_corpus <- bind_rows(
+  purrr::imap_dfr(gd_fit_corpus,   function(fit, corp)
+    extract_coefs_brms(fit, "Linear (signed gap)") %>% mutate(corpus = corp)),
+  purrr::imap_dfr(gd_logit_corpus, function(fit, corp)
+    extract_coefs_brms(fit, "Logistic (gap > 0)") %>% mutate(corpus = corp))
+) %>%
+  rename(estimate = Estimate, se = Est.Error, lo = Q2.5, hi = Q97.5) %>%
+  filter(term != "Intercept") %>%
+  mutate(
+    term = factor(term, levels = TERM_LEVELS_GD, labels = TERM_LABELS_GD),
+    sig  = if_else(lo > 0 | hi < 0, "*", "")
+  )
+```
+
+```{r gap-direction-pooled, cache=TRUE}
+# ── lmer: all checkpoints pooled, linear ──────────────────────────────────────
+gd_pooled_fit <- lmer(
+  signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+  data    = gd_data,
+  REML    = FALSE,
+  control = lmerControl(optimizer = "bobyqa")
+)
+cat("=== lmer (all checkpoints pooled): signed_gap ===\n")
+print(summary(gd_pooled_fit))
+
+# ── glmer: all checkpoints pooled, logistic ────────────────────────────────────
+gd_pooled_logit <- glmer(
+  gap_positive ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+  data    = gd_data,
+  family  = binomial(),
+  control = glmerControl(optimizer = "bobyqa")
+)
+cat("\n=== glmer (all checkpoints pooled): P(gap > 0) ===\n")
+print(summary(gd_pooled_logit))
+
+# ── Extract coefficients for plotting ─────────────────────────────────────────
+extract_coefs_lmer <- function(fit, model_label) {
+  cf <- coef(summary(fit))
+  tibble(
+    term     = rownames(cf),
+    estimate = cf[, "Estimate"],
+    se       = cf[, "Std. Error"],
+    lo       = cf[, "Estimate"] - 1.96 * cf[, "Std. Error"],
+    hi       = cf[, "Estimate"] + 1.96 * cf[, "Std. Error"],
+    model    = model_label
+  ) %>%
+    # Normalise interaction names to match TERM_LEVELS_GD regardless of lmer's ordering
+    mutate(term = recode(term,
+      "log_total_c:freq_prob_c" = "freq_prob_c:log_total_c",
+      "log_total_c:genpref_c"   = "genpref_c:log_total_c",
+      "(Intercept)"             = "Intercept"
+    ))
+}
+
+gd_pooled_coefs <- bind_rows(
+  extract_coefs_lmer(gd_pooled_fit,   "Linear (signed gap)"),
+  extract_coefs_lmer(gd_pooled_logit, "Logistic (gap > 0)")
+) %>%
+  filter(term != "Intercept") %>%
+  mutate(
+    term = factor(term, levels = TERM_LEVELS_GD, labels = TERM_LABELS_GD),
+    sig  = if_else(lo > 0 | hi < 0, "*", "")
+  )
+
+# ── Per-corpus lmer / glmer (all checkpoints pooled) ──────────────────────────
+gd_pooled_coefs_by_corpus <- bind_rows(
+  purrr::map_dfr(CORPORA, function(corp) {
+    fit <- lmer(
+      signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+      data    = filter(gd_data, corpus == corp),
+      REML    = FALSE,
+      control = lmerControl(optimizer = "bobyqa")
+    )
+    cat(sprintf("=== lmer pooled (%s): signed_gap ===\n", corp))
+    print(summary(fit))
+    extract_coefs_lmer(fit, "Linear (signed gap)") %>% mutate(corpus = corp)
+  }),
+  purrr::map_dfr(CORPORA, function(corp) {
+    fit <- glmer(
+      gap_positive ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+      data    = filter(gd_data, corpus == corp),
+      family  = binomial(),
+      control = glmerControl(optimizer = "bobyqa")
+    )
+    cat(sprintf("=== glmer pooled (%s): P(gap > 0) ===\n", corp))
+    print(summary(fit))
+    extract_coefs_lmer(fit, "Logistic (gap > 0)") %>% mutate(corpus = corp)
+  })
+) %>%
+  filter(term != "Intercept") %>%
+  mutate(
+    term = factor(term, levels = TERM_LEVELS_GD, labels = TERM_LABELS_GD),
+    sig  = if_else(lo > 0 | hi < 0, "*", "")
+  )
+```
+
+```{r gap-direction-pooled-plot, fig.width = 12, fig.height = 5}
+ggplot(gd_pooled_coefs,
+       aes(x = term, y = estimate,
+           colour = model, group = model)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(ymin = lo, ymax = hi),
+                width = 0.2, position = position_dodge(0.5), linewidth = 0.8) +
+  geom_point(size = 3, position = position_dodge(0.5)) +
+  geom_text(aes(label = sig, y = hi + 0.02),
+            position = position_dodge(0.5), size = 4, vjust = 0) +
+  scale_colour_manual(values = c("Linear (signed gap)" = COL_MODEL,
+                                 "Logistic (gap > 0)"  = COL_CORPUS),
+                      name = NULL) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(name = "Coefficient  (95% CI)") +
+  facet_wrap(~model, scales = "free_y") +
+  labs(
+    title    = "What predicts the signed gap? (all checkpoints pooled)",
+    subtitle = paste0(
+      "Linear outcome: signed_gap  -  Logistic outcome: P(gap > 0)\n",
+      "All predictors centred  -  Random intercept by binomial  -  ",
+      "lmer / glmer  -  Wald 95% CI  -  * = CI excludes zero")
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "none", panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10),
+        axis.text.x = element_text(size = 9))
 ```
 
 ```{r gap-direction-plot, fig.width = 12, fig.height = 5}
@@ -2365,8 +1325,8 @@ ggplot(gd_coefs,
   geom_point(size = 3, position = position_dodge(0.5)) +
   geom_text(aes(label = sig, y = hi + 0.02),
             position = position_dodge(0.5), size = 4, vjust = 0) +
-  scale_colour_manual(values = c("Linear (signed gap)" = "#1f77b4",
-                                 "Logistic (gap > 0)"  = "#ff7f0e"),
+  scale_colour_manual(values = c("Linear (signed gap)" = COL_MODEL,
+                                 "Logistic (gap > 0)"  = COL_CORPUS),
                       name = NULL) +
   scale_x_discrete(name = NULL) +
   scale_y_continuous(name = "Coefficient  (95% credible interval)") +
@@ -2385,9 +1345,68 @@ ggplot(gd_coefs,
         axis.text.x = element_text(size = 9))
 ```
 
+```{r gap-direction-by-corpus-plot, fig.width = 13, fig.height = 7}
+ggplot(gd_coefs_by_corpus,
+       aes(x = term, y = estimate,
+           colour = model, group = model)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(ymin = lo, ymax = hi),
+                width = 0.2, position = position_dodge(0.5), linewidth = 0.8) +
+  geom_point(size = 3, position = position_dodge(0.5)) +
+  geom_text(aes(label = sig, y = hi + 0.02),
+            position = position_dodge(0.5), size = 4, vjust = 0) +
+  scale_colour_manual(values = c("Linear (signed gap)" = COL_MODEL,
+                                 "Logistic (gap > 0)"  = COL_CORPUS),
+                      name = NULL) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(name = "Coefficient  (95% credible interval)") +
+  facet_grid(corpus ~ model, scales = "free_y") +
+  labs(
+    title    = "What predicts the signed gap? By corpus (final checkpoint)",
+    subtitle = paste0(
+      "Linear outcome: signed_gap  -  Logistic outcome: P(gap > 0)\n",
+      "All predictors centred  -  Random intercept by binomial  -  ",
+      "Bayesian (brms)  -  * = 95% CI excludes zero")
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "none", panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10),
+        axis.text.x = element_text(size = 9))
+```
+
+```{r gap-direction-pooled-by-corpus-plot, fig.width = 13, fig.height = 7}
+ggplot(gd_pooled_coefs_by_corpus,
+       aes(x = term, y = estimate,
+           colour = model, group = model)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_errorbar(aes(ymin = lo, ymax = hi),
+                width = 0.2, position = position_dodge(0.5), linewidth = 0.8) +
+  geom_point(size = 3, position = position_dodge(0.5)) +
+  geom_text(aes(label = sig, y = hi + 0.02),
+            position = position_dodge(0.5), size = 4, vjust = 0) +
+  scale_colour_manual(values = c("Linear (signed gap)" = COL_MODEL,
+                                 "Logistic (gap > 0)"  = COL_CORPUS),
+                      name = NULL) +
+  scale_x_discrete(name = NULL) +
+  scale_y_continuous(name = "Coefficient  (95% CI)") +
+  facet_grid(corpus ~ model, scales = "free_y") +
+  labs(
+    title    = "What predicts the signed gap? By corpus (all checkpoints pooled)",
+    subtitle = paste0(
+      "Linear outcome: signed_gap  -  Logistic outcome: P(gap > 0)\n",
+      "All predictors centred  -  Random intercept by binomial  -  ",
+      "lmer / glmer  -  Wald 95% CI  -  * = CI excludes zero")
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "none", panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 10),
+        axis.text.x = element_text(size = 9))
+```
+
 ```{r gap-direction-genpref-plot, fig.width = 11, fig.height = 5}
 # Visualise the GenPref effect directly: mean signed gap binned by GenPref decile
 genpref_bins <- gd_data %>%
+  filter(!is.na(genpref_c)) %>%
   mutate(genpref_decile = ntile(genpref_c, 10)) %>%
   group_by(corpus, genpref_decile) %>%
   summarise(
@@ -2415,139 +1434,10 @@ ggplot(genpref_bins,
   facet_wrap(~corpus) +
   labs(
     title    = "Mean signed gap by GenPref decile",
-    subtitle = "Positive gap = model more alpha-preferring than corpus predicts  -  All checkpoints & model sizes pooled  -  +/-95% CI"
+    subtitle = "Positive gap = model more alpha-preferring than corpus predicts  -  All checkpoints & model sizes pooled  -  95% CI"
   ) +
   theme_bw(base_size = 11) +
   theme(legend.position = "none", panel.grid.minor = element_blank())
-```
-
----
-
-# Section G: Cross-Model-Size Consistency of Deviation
-
-If the deviation from frequency expectation is structural (driven by
-properties of the binomial such as GenPref), the direction and magnitude of
-deviation should be consistent across model sizes.
-
-```{r consistency-setup, cache=TRUE}
-# Long format: one row per corpus x binom x model_size at each model's final checkpoint.
-# Average across models of the same size within a corpus (handles multiple seeds/runs).
-consistency_long <- agg_gp %>%
-  filter(!is.na(log_freq_ratio)) %>%
-  group_by(corpus, model_size, binom) %>%
-  filter(tokens == max(tokens)) %>%
-  summarise(signed_gap = mean(mean_preference - log_freq_ratio, na.rm = TRUE),
-            .groups = "drop") %>%
-  mutate(model_size = factor(model_size, levels = SIZE_LEVELS))
-
-cat(sprintf("Consistency data: %d rows, %d unique binomials, %d model sizes\n",
-            nrow(consistency_long),
-            n_distinct(consistency_long$binom),
-            n_distinct(consistency_long$model_size)))
-```
-
-```{r plot22-consistency, fig.width = 12, fig.height = 5}
-size_pairs <- combn(SIZE_LEVELS, 2, simplify = FALSE)
-
-for (pair in size_pairs) {
-  # Inner join: only binomials present in BOTH sizes (avoids NA from pivot_wider)
-  d <- inner_join(
-    consistency_long %>%
-      filter(model_size == pair[1]) %>%
-      select(corpus, binom, gap_x = signed_gap),
-    consistency_long %>%
-      filter(model_size == pair[2]) %>%
-      select(corpus, binom, gap_y = signed_gap),
-    by = c("corpus", "binom")
-  )
-
-  if (nrow(d) == 0) next
-
-  r_vals <- d %>%
-    group_by(corpus) %>%
-    summarise(r    = round(cor(gap_x, gap_y, use = "complete.obs"), 2),
-              n    = n(),
-              .groups = "drop") %>%
-    mutate(label = paste0("r = ", r, "  (n = ", scales::comma(n), ")"))
-
-  p <- ggplot(d, aes(x = gap_x, y = gap_y)) +
-    geom_point(alpha = 0.06, size = 0.5, colour = "grey40") +
-    geom_abline(slope = 1, intercept = 0,
-                linetype = "dashed", colour = "grey60") +
-    geom_smooth(method = "lm", se = FALSE, colour = "#d62728", linewidth = 0.9) +
-    geom_text(data = r_vals, aes(label = label),
-              x = -Inf, y = Inf, hjust = -0.08, vjust = 1.4,
-              size = 3, inherit.aes = FALSE) +
-    scale_x_continuous(name = paste(pair[1], "deviation (log-odds)")) +
-    scale_y_continuous(name = paste(pair[2], "deviation (log-odds)")) +
-    facet_wrap(~corpus) +
-    labs(title    = paste("Deviation consistency:", pair[1], "vs.", pair[2]),
-         subtitle = "Only binomials present in both model sizes  .  Dashed = perfect agreement  .  Final checkpoint") +
-    theme_bw(base_size = 10) +
-    theme(panel.grid.minor = element_blank(), strip.text = element_text(size = 8))
-
-  print(p)
-}
-```
-
----
-
-# Section H: Outlier Characterization
-
-Which binomials show the largest persistent deviation from relative frequency
-across all checkpoints? These are the clearest cases where the model is not
-simply copying the corpus.
-
-```{r outliers-setup, cache=TRUE}
-outliers <- agg_gp %>%
-  filter(!is.na(log_freq_ratio), !is.na(genpref)) %>%
-  mutate(signed_gap = mean_preference - log_freq_ratio) %>%
-  group_by(corpus, binom) %>%
-  summarise(
-    mean_signed_gap  = mean(signed_gap,    na.rm = TRUE),
-    abs_mean_gap     = abs(mean(signed_gap, na.rm = TRUE)),
-    sd_gap           = sd(signed_gap,      na.rm = TRUE),
-    genpref          = first(na.omit(genpref)),
-    final_total_seen = total_seen[which.max(tokens)],
-    n_checkpoints    = n(),
-    .groups          = "drop"
-  ) %>%
-  group_by(corpus) %>%
-  slice_max(abs_mean_gap, n = 20) %>%
-  ungroup() %>%
-  arrange(corpus, desc(abs_mean_gap))
-
-print(outliers %>% select(corpus, binom, mean_signed_gap, genpref,
-                          final_total_seen, n_checkpoints))
-```
-
-```{r plot23-outliers, fig.width = 13, fig.height = 7}
-outliers_plot <- outliers %>%
-  group_by(corpus) %>%
-  mutate(binom_f = factor(binom, levels = binom[order(mean_signed_gap)])) %>%
-  ungroup()
-
-ggplot(outliers_plot,
-       aes(x = mean_signed_gap, y = binom_f, fill = genpref)) +
-  geom_col(width = 0.7) +
-  geom_vline(xintercept = 0, colour = "grey30", linewidth = 0.5) +
-  scale_fill_distiller(palette = "RdBu", direction = -1,
-                       name = "GenPref", limits = c(-0.5, 0.5)) +
-  scale_x_continuous(
-    name = "Mean signed gap  (preference - log_freq_ratio, log-odds)"
-  ) +
-  scale_y_discrete(name = NULL) +
-  facet_wrap(~corpus, scales = "free_y") +
-  labs(
-    title    = "Top 20 binomials with largest persistent deviation from frequency expectation",
-    subtitle = "Fill = GenPref  .  Right = model more alpha-preferring than corpus predicts  .  Left = less"
-  ) +
-  theme_bw(base_size = 10) +
-  theme(legend.position  = "right",
-        panel.grid.major.y = element_blank(),
-        panel.grid.minor   = element_blank(),
-        strip.text         = element_text(size = 9),
-        axis.text.y        = element_text(size = 7))
 ```
 
 ---
@@ -2558,7 +1448,7 @@ ggplot(outliers_plot,
 prefers the alpha order *more* than relative frequency predicts  -  it is
 over-predicting the alpha order.
 
-**Negative signed gap** means the model is less alpha-biased than the corpus  - 
+**Negative signed gap** means the model is less alpha-biased than the corpus  -
 under-predicting the alpha order.
 
 ```{r overpred-setup, cache=TRUE}
@@ -2651,14 +1541,14 @@ ggplot(overall_summary,
                     ymax = mean_gap + 1.96 * se),
                 width = 0.2, linewidth = 0.8) +
   geom_point(size = 3) +
-  scale_colour_manual(values = c("TRUE" = "#d62728", "FALSE" = "#1f77b4"),
+  scale_colour_manual(values = c("TRUE" = COL_OVER, "FALSE" = COL_MODEL),
                       labels = c("TRUE" = "Over-predicts", "FALSE" = "Under-predicts"),
                       name = NULL) +
   scale_y_continuous(name = "Mean signed gap  (preference - log_freq_ratio)") +
   scale_x_discrete(name = "Model size") +
   facet_wrap(~corpus) +
   labs(title    = "Direction of bias: does the model over- or under-predict the alpha order?",
-       subtitle = "All checkpoints pooled  .  Error bars = 95% CI") +
+       subtitle = "All checkpoints pooled  -  Error bars = 95% CI") +
   theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank())
 ```
@@ -2679,7 +1569,7 @@ ggplot(abs_overall_summary,
   facet_wrap(~corpus) +
   labs(
     title    = "Magnitude of deviation from frequency expectation (absolute gap)",
-    subtitle = "Not affected by cancellation of opposite errors  .  All checkpoints pooled  .  Error bars = 95% CI"
+    subtitle = "Not affected by cancellation of opposite errors  -  All checkpoints pooled  -  Error bars = 95% CI"
   ) +
   theme_bw(base_size = 11) +
   theme(legend.position = "none", panel.grid.minor = element_blank())
@@ -2714,7 +1604,7 @@ ggplot(freq_long,
   facet_grid(metric ~ corpus, scales = "free_y") +
   labs(
     title    = "Signed vs. absolute deviation from frequency expectation by exposure level",
-    subtitle = "All checkpoints pooled  .  Error bars = 95% CI"
+    subtitle = "All checkpoints pooled  -  Error bars = 95% CI"
   ) +
   theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank(),
@@ -2797,7 +1687,7 @@ ggplot(freq_summary,
   facet_wrap(~corpus) +
   labs(
     title    = "Proportion of binomials where model is more alpha-preferring than relative frequency predicts",
-    subtitle = "Dashed line = 50% (no systematic bias)  .  All checkpoints pooled"
+    subtitle = "Dashed line = 50% (no systematic bias)  -  All checkpoints pooled"
   ) +
   theme_bw(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank())
