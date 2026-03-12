@@ -1,0 +1,685 @@
+---
+title: "GenPref × Signed Gap & Preference — Per-Model Analysis"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+## Overview
+
+This script uses raw (prompt-level) data — the 51 per-prompt observations are
+**not** averaged before modelling.  Six trained models are analysed separately
+(3 BabyLM × 3 sizes; 3 C4 × 3 sizes).  Three analyses are run for each model,
+first on the **signed gap** outcome and then on **preference** directly:
+
+- **Signed gap**: `preference − log_freq_ratio` — the deviation of the model's
+  preference from what corpus frequency alone would predict.
+- **Preference**: raw `alpha_logprob − nonalpha_logprob`.
+
+For each outcome, three analyses are run:
+
+1. **Final checkpoint only** – brms at the last checkpoint.
+2. **All checkpoints pooled** – same formula, all checkpoints.
+3. **Checkpoint as continuous predictor** – `tokens` (scaled) included and
+   interacted with every other predictor.
+
+---
+
+## Setup
+
+```{r libraries}
+library(tidyverse)
+library(duckdb)
+library(scales)
+library(patchwork)
+library(brms)
+library(cmdstanr)
+```
+
+```{r brms-config}
+MODELS_DIR <- "models"
+dir.create(MODELS_DIR, showWarnings = FALSE, recursive = TRUE)
+
+N_CORES <- parallel::detectCores(logical = FALSE)
+message(sprintf("Detected %d physical cores", N_CORES))
+
+BRMS_ITER      <- 6000
+BRMS_WARMUP    <- 3000
+BRMS_CHAINS    <- min(N_CORES, 8)
+BRMS_CORES     <- BRMS_CHAINS
+BRMS_SEED      <- 964
+BRMS_BACKEND   <- "cmdstanr"
+BRMS_NORMALIZE <- FALSE
+
+BRMS_PRIORS <- c(
+  prior(normal(0, 1), class = "b"),
+  prior(normal(0, 1), class = "Intercept"),
+  prior(exponential(1), class = "sd"),
+  prior(exponential(1), class = "sigma")
+)
+```
+
+```{r helpers}
+parse_corpus <- function(x) {
+  case_when(
+    grepl("babylm", x, ignore.case = TRUE) ~ "BabyLM",
+    grepl("opt-c4", x, ignore.case = TRUE) ~ "C4",
+    TRUE ~ NA_character_
+  )
+}
+
+parse_size <- function(x) {
+  case_when(
+    grepl("125m",  x, ignore.case = TRUE) ~ "125M",
+    grepl("350m",  x, ignore.case = TRUE) ~ "350M",
+    grepl("1\\.3b", x, ignore.case = TRUE) ~ "1.3B",
+    TRUE ~ NA_character_
+  )
+}
+
+SIZE_LEVELS  <- c("125M", "350M", "1.3B")
+SIZE_COLOURS <- c("125M" = "#1b7837", "350M" = "#762a83", "1.3B" = "#b2182b")
+
+# Normalise brms interaction term names to a canonical order
+normalise_terms <- function(term) {
+  dplyr::recode(term,
+    "tokens_c:genpref_c"      = "genpref_c:tokens_c",
+    "tokens_c:freq_prob_c"    = "freq_prob_c:tokens_c",
+    "tokens_c:log_total_c"    = "log_total_c:tokens_c",
+    "log_total_c:genpref_c"   = "genpref_c:log_total_c",
+    "log_total_c:freq_prob_c" = "freq_prob_c:log_total_c"
+  )
+}
+
+# Extract fixed-effect coefficients from a brms fit into a tidy tibble
+extract_coefs <- function(fit, model_name, term_levels, term_labels) {
+  fe <- as.data.frame(fixef(fit))
+  fe$term <- normalise_terms(rownames(fe))
+  fe %>%
+    as_tibble() %>%
+    rename(estimate = Estimate, se = Est.Error, lo = Q2.5, hi = Q97.5) %>%
+    filter(term != "Intercept") %>%
+    mutate(
+      term       = factor(term, levels = term_levels, labels = term_labels),
+      sig        = if_else(lo > 0 | hi < 0, "*", ""),
+      model_name = model_name,
+      corpus     = parse_corpus(model_name),
+      model_size = factor(parse_size(model_name), levels = SIZE_LEVELS)
+    )
+}
+
+# Standard coefficient dot-and-whisker plot
+coef_plot <- function(coef_df, title, subtitle, ylab = "Coefficient  (95% credible interval)") {
+  ggplot(coef_df, aes(x = term, y = estimate, colour = model_size)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.2, linewidth = 0.8,
+                  position = position_dodge(0.5)) +
+    geom_point(size = 3, position = position_dodge(0.5)) +
+    geom_text(aes(label = sig, y = hi + 0.02),
+              position = position_dodge(0.5), size = 4, vjust = 0) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_discrete(name = NULL) +
+    scale_y_continuous(name = ylab) +
+    facet_grid(corpus ~ ., scales = "free_y") +
+    labs(title = title, subtitle = subtitle) +
+    theme_bw(base_size = 11) +
+    theme(legend.position  = "bottom",
+          panel.grid.minor = element_blank(),
+          axis.text.x      = element_text(size = 9))
+}
+
+# Marginal effect plots for the checkpoint-interacted model
+PRED_SPECS <- list(
+  list(
+    var    = "genpref_c",
+    vals   = c(-0.25, 0, 0.25),
+    labels = c("Low GenPref (−0.25)", "Neutral (0)", "High GenPref (+0.25)"),
+    cols   = c("Low GenPref (−0.25)"  = "#d73027",
+               "Neutral (0)"          = "#999999",
+               "High GenPref (+0.25)" = "#1a9850"),
+    title  = "Effect of GenPref over training"
+  ),
+  list(
+    var    = "freq_prob_c",
+    vals   = c(-0.25, 0, 0.25),
+    labels = c("Low RelFreq (−0.25)", "Neutral (0)", "High RelFreq (+0.25)"),
+    cols   = c("Low RelFreq (−0.25)"  = "#d73027",
+               "Neutral (0)"          = "#999999",
+               "High RelFreq (+0.25)" = "#1a9850"),
+    title  = "Effect of RelFreq over training"
+  ),
+  list(
+    var    = "log_total_c",
+    vals   = c(-1, 0, 1),
+    labels = c("Low overall freq (−1 SD)", "Mean overall freq", "High overall freq (+1 SD)"),
+    cols   = c("Low overall freq (−1 SD)"  = "#d73027",
+               "Mean overall freq"          = "#999999",
+               "High overall freq (+1 SD)"  = "#1a9850"),
+    title  = "Effect of Overall Frequency over training"
+  )
+)
+
+pred_grid_for <- function(predictor, levels_vec, label_vec, fit, model_data_m) {
+  tk_seq <- seq(
+    min(model_data_m$tokens_c, na.rm = TRUE),
+    max(model_data_m$tokens_c, na.rm = TRUE),
+    length.out = 30
+  )
+  grid <- expand.grid(
+    tokens_c    = tk_seq,
+    pred_val    = levels_vec,
+    genpref_c   = 0,
+    freq_prob_c = 0,
+    log_total_c = 0
+  )
+  grid[[predictor]] <- grid$pred_val
+  pred <- fitted(fit, newdata = grid, re_formula = NA, summary = TRUE)
+  grid %>%
+    mutate(
+      estimate  = pred[, "Estimate"],
+      lo        = pred[, "Q2.5"],
+      hi        = pred[, "Q97.5"],
+      pred_f    = factor(pred_val, levels = levels_vec, labels = label_vec),
+      predictor = predictor
+    ) %>%
+    select(tokens_c, pred_f, predictor, estimate, lo, hi)
+}
+
+marginal_plots_for <- function(fits_ckpt, model_data_ck, ylab) {
+  marginal_all <- purrr::map_dfr(MODELS_LIST, function(m) {
+    m_ck  <- filter(model_data_ck, model == m)
+    m_lab <- paste0(parse_corpus(m), " ", parse_size(m))
+    purrr::map_dfr(PRED_SPECS, function(spec) {
+      pred_grid_for(spec$var, spec$vals, spec$labels, fits_ckpt[[m]], m_ck) %>%
+        mutate(model_label = m_lab,
+               corpus      = parse_corpus(m),
+               model_size  = factor(parse_size(m), levels = SIZE_LEVELS))
+    })
+  })
+
+  purrr::walk(PRED_SPECS, function(spec) {
+    df <- filter(marginal_all, predictor == spec$var)
+    p <- ggplot(df, aes(x = tokens_c, y = estimate,
+                        colour = pred_f, fill = pred_f)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      scale_colour_manual(values = spec$cols, name = NULL) +
+      scale_fill_manual(values   = spec$cols, name = NULL) +
+      scale_x_continuous(name = "Checkpoint  (tokens, z-scored within model)") +
+      scale_y_continuous(name = ylab) +
+      facet_wrap(~ model_label, scales = "free_y", ncol = 3) +
+      labs(title    = spec$title,
+           subtitle = "Other predictors held at 0  |  95% posterior credible ribbon  |  population-level") +
+      theme_bw(base_size = 11) +
+      theme(legend.position = "bottom", panel.grid.minor = element_blank())
+    print(p)
+  })
+}
+```
+
+---
+
+## Load Data
+
+```{r load-raw, cache=TRUE}
+csv_path     <- normalizePath("../Data/processed/checkpoint_results_with_exposures.csv",
+                               mustWork = TRUE)
+csv_path_fwd <- gsub("\\\\", "/", csv_path)
+
+con <- dbConnect(duckdb::duckdb())
+dbExecute(con, sprintf(
+  "CREATE VIEW ckpt AS SELECT * FROM read_csv_auto('%s')",
+  csv_path_fwd
+))
+
+message("Loading prompt-level data via DuckDB (no prompt aggregation) ...")
+raw <- dbGetQuery(con, "
+  SELECT
+    model,
+    tokens,
+    binom,
+    preference,
+    ROUND(alpha_seen)                                AS alpha_seen,
+    ROUND(beta_seen)                                 AS beta_seen,
+    ROUND(alpha_seen) + ROUND(beta_seen)             AS total_seen,
+    CASE WHEN alpha_seen > 0 AND beta_seen > 0
+         THEN LN(alpha_seen / beta_seen)
+         ELSE NULL END                               AS log_freq_ratio
+  FROM ckpt
+  ORDER BY model, tokens, binom
+")
+dbDisconnect(con, shutdown = TRUE)
+
+message(sprintf("Loaded %s rows.", format(nrow(raw), big.mark = ",")))
+```
+
+```{r metadata}
+raw <- raw %>%
+  mutate(
+    corpus     = parse_corpus(model),
+    model_size = factor(parse_size(model), levels = SIZE_LEVELS),
+    total_seen = as.numeric(total_seen),
+    log_total  = if_else(total_seen > 0, log(total_seen), NA_real_)
+  )
+
+MODELS_LIST <- sort(unique(raw$model))
+cat(sprintf("Models found: %d\n", length(MODELS_LIST)))
+print(MODELS_LIST)
+```
+
+```{r load-genpref}
+human_path <- normalizePath("../Data/all_human_data.csv", mustWork = TRUE)
+
+GENPREF_FORMULA <- function(Form, Percept, Culture, Power, Intense,
+                             Icon, Freq, Len, Lapse, BStress) {
+  y <- 0.02191943 +
+       0.23925834 * Form    +
+       0.24889543 * Percept +
+       0.41836997 * Culture +
+       0.25967334 * Power   +
+       0.01867604 * Intense +
+       1.30365980 * Icon    +
+       0.08553552 * Freq    +
+       0.15241566 * Len     -
+       0.19381657 * Lapse   +
+       0.36019221 * BStress
+  (1 / (1 + exp(-y))) - 0.5
+}
+
+genpref_raw <- read_csv(human_path, show_col_types = FALSE) %>%
+  rename(BStress = `*BStress`) %>%
+  select(Alpha, Form, Percept, Culture, Power, Intense,
+         Icon, Freq, Len, Lapse, BStress, GenPref) %>%
+  group_by(Alpha) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    GenPref_norm = case_when(
+      is.na(GenPref) ~ NA_real_,
+      GenPref > 0.5  ~ GenPref - 0.5,
+      GenPref < -0.5 ~ GenPref,
+      TRUE           ~ GenPref - 0.5
+    ),
+    genpref = if_else(
+      is.na(GenPref),
+      GENPREF_FORMULA(Form, Percept, Culture, Power, Intense,
+                      Icon, Freq, Len, Lapse, BStress),
+      GenPref_norm
+    ),
+    binom_lower = tolower(Alpha)
+  ) %>%
+  select(binom_lower, genpref)
+```
+
+```{r join-centre}
+model_data <- raw %>%
+  mutate(binom_lower = tolower(binom)) %>%
+  left_join(genpref_raw, by = "binom_lower") %>%
+  filter(!is.na(genpref), !is.na(log_freq_ratio), !is.na(log_total)) %>%
+  mutate(
+    signed_gap  = preference - log_freq_ratio,
+    freq_prob_c = plogis(log_freq_ratio) - 0.5,
+    genpref_c   = genpref - mean(genpref,    na.rm = TRUE),
+    log_total_c = log_total - mean(log_total, na.rm = TRUE)
+  )
+
+cat(sprintf("Rows after join and filtering: %s\n",
+            format(nrow(model_data), big.mark = ",")))
+cat(sprintf("Unique binomials with GenPref: %d\n",
+            n_distinct(model_data$binom)))
+```
+
+```{r ckpt-prep}
+# Shared dataset with tokens scaled within each model (used by analyses 3 and 6)
+model_data_ck <- model_data %>%
+  group_by(model) %>%
+  mutate(tokens_c = as.numeric(scale(tokens))) %>%
+  ungroup()
+```
+
+---
+
+# Part I: Signed Gap Analyses
+
+`signed_gap = preference − log_freq_ratio`
+
+A positive value means the model is *more* alpha-preferring than corpus frequency
+alone predicts; negative means *less*.  Predictors: `genpref_c` (GenPref,
+centred), `freq_prob_c` (P(alpha in corpus) − 0.5), `log_total_c` (log total
+exposures, centred).
+
+---
+
+## Analysis 1: Signed Gap — Final Checkpoint
+
+Formula: `signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom)`
+
+```{r sg-analysis1-fit, cache=TRUE, cache.lazy=FALSE}
+sg_final_data <- setNames(lapply(MODELS_LIST, function(m) {
+  model_data %>%
+    filter(model == m) %>%
+    group_by(binom) %>%
+    filter(tokens == max(tokens)) %>%
+    ungroup()
+}), MODELS_LIST)
+
+sg_fits_final <- setNames(lapply(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  brm(
+    signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+    data    = sg_final_data[[m]],
+    family  = gaussian(),
+    prior   = BRMS_PRIORS,
+    iter    = BRMS_ITER,
+    warmup  = BRMS_WARMUP,
+    chains  = BRMS_CHAINS,
+    cores   = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("sg_final_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE
+  )
+}), MODELS_LIST)
+
+for (m in MODELS_LIST) {
+  cat(sprintf("\n=== Signed gap — final checkpoint: %s ===\n", m))
+  print(summary(sg_fits_final[[m]]))
+}
+```
+
+### Plot 1: Coefficients — Signed Gap, Final Checkpoint
+
+```{r sg-plot1, fig.width=13, fig.height=7}
+TERM_LEVELS <- c("freq_prob_c", "genpref_c", "log_total_c",
+                 "freq_prob_c:log_total_c", "genpref_c:log_total_c")
+TERM_LABELS <- c("RelFreq\n(P(alpha)−0.5)", "GenPref",
+                 "Overall freq\n(ln total)",
+                 "RelFreq ×\nOverall freq", "GenPref ×\nOverall freq")
+
+sg_coefs_final <- purrr::map_dfr(MODELS_LIST, function(m) {
+  extract_coefs(sg_fits_final[[m]], m, TERM_LEVELS, TERM_LABELS)
+})
+
+coef_plot(
+  sg_coefs_final,
+  title    = "Predictors of signed gap — final checkpoint",
+  subtitle = "signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  brms  |  * = CI excludes zero",
+  ylab     = "Coefficient  (95% credible interval)"
+)
+```
+
+---
+
+## Analysis 2: Signed Gap — Checkpoints Pooled
+
+Same formula as Analysis 1 but using **all checkpoints**.
+
+```{r sg-analysis2-fit, cache=TRUE, cache.lazy=FALSE}
+sg_fits_pooled <- setNames(lapply(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  brm(
+    signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+    data    = filter(model_data, model == m),
+    family  = gaussian(),
+    prior   = BRMS_PRIORS,
+    iter    = BRMS_ITER,
+    warmup  = BRMS_WARMUP,
+    chains  = BRMS_CHAINS,
+    cores   = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("sg_pooled_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE
+  )
+}), MODELS_LIST)
+
+for (m in MODELS_LIST) {
+  cat(sprintf("\n=== Signed gap — checkpoints pooled: %s ===\n", m))
+  print(summary(sg_fits_pooled[[m]]))
+}
+```
+
+### Plot 2: Coefficients — Signed Gap, Checkpoints Pooled
+
+```{r sg-plot2, fig.width=13, fig.height=7}
+sg_coefs_pooled <- purrr::map_dfr(MODELS_LIST, function(m) {
+  extract_coefs(sg_fits_pooled[[m]], m, TERM_LEVELS, TERM_LABELS)
+})
+
+coef_plot(
+  sg_coefs_pooled,
+  title    = "Predictors of signed gap — all checkpoints pooled",
+  subtitle = "signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  brms  |  * = CI excludes zero",
+  ylab     = "Coefficient  (95% credible interval)"
+)
+```
+
+---
+
+## Analysis 3: Signed Gap — Checkpoint as Continuous Predictor
+
+`tokens` (z-scored within each model) is interacted with every other predictor,
+letting us ask how each effect evolves over training.
+
+Formula: `signed_gap ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1 | binom)`
+
+```{r sg-analysis3-fit, cache=TRUE, cache.lazy=FALSE}
+TERM_LEVELS_CK <- c(
+  "genpref_c", "freq_prob_c", "log_total_c", "tokens_c",
+  "genpref_c:tokens_c", "freq_prob_c:tokens_c", "log_total_c:tokens_c"
+)
+TERM_LABELS_CK <- c(
+  "GenPref", "RelFreq\n(P(alpha)−0.5)", "Overall freq\n(ln total)",
+  "Checkpoint\n(tokens, z)",
+  "GenPref ×\nCheckpoint", "RelFreq ×\nCheckpoint", "Overall freq ×\nCheckpoint"
+)
+
+sg_fits_ckpt <- setNames(lapply(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  brm(
+    signed_gap ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1 | binom),
+    data    = filter(model_data_ck, model == m),
+    family  = gaussian(),
+    prior   = BRMS_PRIORS,
+    iter    = BRMS_ITER,
+    warmup  = BRMS_WARMUP,
+    chains  = BRMS_CHAINS,
+    cores   = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("sg_ckpt_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE
+  )
+}), MODELS_LIST)
+
+for (m in MODELS_LIST) {
+  cat(sprintf("\n=== Signed gap — checkpoint-interacted: %s ===\n", m))
+  print(summary(sg_fits_ckpt[[m]]))
+}
+```
+
+### Plot 3a: Coefficients — Signed Gap, Checkpoint-Interacted
+
+```{r sg-plot3a, fig.width=14, fig.height=7}
+sg_coefs_ckpt <- purrr::map_dfr(MODELS_LIST, function(m) {
+  extract_coefs(sg_fits_ckpt[[m]], m, TERM_LEVELS_CK, TERM_LABELS_CK)
+})
+
+coef_plot(
+  sg_coefs_ckpt,
+  title    = "Predictors of signed gap — checkpoint as continuous predictor",
+  subtitle = "signed_gap ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1|binom)  |  brms  |  * = CI excludes zero",
+  ylab     = "Coefficient  (95% credible interval)"
+)
+```
+
+### Plot 3b: Marginal Effects Over Training — Signed Gap
+
+```{r sg-plot3b, fig.width=14, fig.height=10}
+marginal_plots_for(sg_fits_ckpt, model_data_ck, ylab = "Predicted signed gap")
+```
+
+---
+
+# Part II: Preference Analyses
+
+`preference = alpha_logprob − nonalpha_logprob`
+
+Same structure as Part I, modelling raw preference rather than the gap relative
+to corpus frequency.
+
+---
+
+## Analysis 4: Preference — Final Checkpoint
+
+Formula: `preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom)`
+
+```{r pref-analysis4-fit, cache=TRUE, cache.lazy=FALSE}
+pref_final_data <- setNames(lapply(MODELS_LIST, function(m) {
+  model_data %>%
+    filter(model == m) %>%
+    group_by(binom) %>%
+    filter(tokens == max(tokens)) %>%
+    ungroup()
+}), MODELS_LIST)
+
+pref_fits_final <- setNames(lapply(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  brm(
+    preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+    data    = pref_final_data[[m]],
+    family  = gaussian(),
+    prior   = BRMS_PRIORS,
+    iter    = BRMS_ITER,
+    warmup  = BRMS_WARMUP,
+    chains  = BRMS_CHAINS,
+    cores   = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("pref_final_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE
+  )
+}), MODELS_LIST)
+
+for (m in MODELS_LIST) {
+  cat(sprintf("\n=== Preference — final checkpoint: %s ===\n", m))
+  print(summary(pref_fits_final[[m]]))
+}
+```
+
+### Plot 4: Coefficients — Preference, Final Checkpoint
+
+```{r pref-plot4, fig.width=13, fig.height=7}
+pref_coefs_final <- purrr::map_dfr(MODELS_LIST, function(m) {
+  extract_coefs(pref_fits_final[[m]], m, TERM_LEVELS, TERM_LABELS)
+})
+
+coef_plot(
+  pref_coefs_final,
+  title    = "Predictors of preference — final checkpoint",
+  subtitle = "preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  brms  |  * = CI excludes zero",
+  ylab     = "Coefficient  (95% credible interval)"
+)
+```
+
+---
+
+## Analysis 5: Preference — Checkpoints Pooled
+
+```{r pref-analysis5-fit, cache=TRUE, cache.lazy=FALSE}
+pref_fits_pooled <- setNames(lapply(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  brm(
+    preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
+    data    = filter(model_data, model == m),
+    family  = gaussian(),
+    prior   = BRMS_PRIORS,
+    iter    = BRMS_ITER,
+    warmup  = BRMS_WARMUP,
+    chains  = BRMS_CHAINS,
+    cores   = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("pref_pooled_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE
+  )
+}), MODELS_LIST)
+
+for (m in MODELS_LIST) {
+  cat(sprintf("\n=== Preference — checkpoints pooled: %s ===\n", m))
+  print(summary(pref_fits_pooled[[m]]))
+}
+```
+
+### Plot 5: Coefficients — Preference, Checkpoints Pooled
+
+```{r pref-plot5, fig.width=13, fig.height=7}
+pref_coefs_pooled <- purrr::map_dfr(MODELS_LIST, function(m) {
+  extract_coefs(pref_fits_pooled[[m]], m, TERM_LEVELS, TERM_LABELS)
+})
+
+coef_plot(
+  pref_coefs_pooled,
+  title    = "Predictors of preference — all checkpoints pooled",
+  subtitle = "preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  brms  |  * = CI excludes zero",
+  ylab     = "Coefficient  (95% credible interval)"
+)
+```
+
+---
+
+## Analysis 6: Preference — Checkpoint as Continuous Predictor
+
+Formula: `preference ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1 | binom)`
+
+```{r pref-analysis6-fit, cache=TRUE, cache.lazy=FALSE}
+pref_fits_ckpt <- setNames(lapply(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  brm(
+    preference ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1 | binom),
+    data    = filter(model_data_ck, model == m),
+    family  = gaussian(),
+    prior   = BRMS_PRIORS,
+    iter    = BRMS_ITER,
+    warmup  = BRMS_WARMUP,
+    chains  = BRMS_CHAINS,
+    cores   = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("pref_ckpt_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE
+  )
+}), MODELS_LIST)
+
+for (m in MODELS_LIST) {
+  cat(sprintf("\n=== Preference — checkpoint-interacted: %s ===\n", m))
+  print(summary(pref_fits_ckpt[[m]]))
+}
+```
+
+### Plot 6a: Coefficients — Preference, Checkpoint-Interacted
+
+```{r pref-plot6a, fig.width=14, fig.height=7}
+pref_coefs_ckpt <- purrr::map_dfr(MODELS_LIST, function(m) {
+  extract_coefs(pref_fits_ckpt[[m]], m, TERM_LEVELS_CK, TERM_LABELS_CK)
+})
+
+coef_plot(
+  pref_coefs_ckpt,
+  title    = "Predictors of preference — checkpoint as continuous predictor",
+  subtitle = "preference ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1|binom)  |  brms  |  * = CI excludes zero",
+  ylab     = "Coefficient  (95% credible interval)"
+)
+```
+
+### Plot 6b: Marginal Effects Over Training — Preference
+
+```{r pref-plot6b, fig.width=14, fig.height=10}
+marginal_plots_for(pref_fits_ckpt, model_data_ck, ylab = "Predicted preference")
+```
