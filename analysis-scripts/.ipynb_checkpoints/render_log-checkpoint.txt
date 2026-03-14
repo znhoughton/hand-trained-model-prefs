@@ -1,8 +1,0 @@
-nohup: ignoring input
-
-
-processing file: genpref_per_model_analysis.Rmd
-1/48                     
-2/48 [setup]             
-3/48                     
-4/48 [libraries]         
