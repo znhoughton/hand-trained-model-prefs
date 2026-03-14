@@ -17,9 +17,16 @@ then on **preference** directly.  Data handling per analysis type:
 
 - **Final checkpoint** (analyses 1 & 4): raw prompt-level rows (51 prompts per
   binom) — dataset is small enough to pass directly to Stan.
-- **Pooled / checkpoint-continuous** (analyses 2, 3, 5, 6): preference averaged
-  over the 51 prompts per (binom, checkpoint) in SQL before modelling, to stay
-  under Stan's 2^31−1 byte serialisation limit.
+- **Per-checkpoint trajectory** (analyses 2 & 5): 20 evenly-spaced checkpoints
+  sampled per model; a separate brms model is fitted at each using only that
+  checkpoint's data.  `log_total_c` is z-scored **within each checkpoint's
+  items**, cleanly capturing between-item frequency variation without conflating
+  high-frequency early items with low-frequency late ones.  Stan recompilation is
+  avoided via `update(recompile = FALSE)` after the first checkpoint; each model
+  is also cached to disk via the `file=` argument.
+- **Checkpoint as continuous predictor** (analyses 3 & 6): preference averaged
+  over the 51 prompts per (binom, checkpoint) in SQL before modelling; `tokens`
+  (z-scored within model) interacted with every predictor.
 
 - **Signed gap**: `preference − log_freq_ratio` — the deviation of the model's
   preference from what corpus frequency alone would predict.
@@ -28,7 +35,8 @@ then on **preference** directly.  Data handling per analysis type:
 For each outcome, three analyses are run:
 
 1. **Final checkpoint only** – brms at the last checkpoint.
-2. **All checkpoints pooled** – same formula, all checkpoints.
+2. **Per-checkpoint trajectory** – brms at 20 sampled checkpoints; coefficients
+   plotted over training progress.
 3. **Checkpoint as continuous predictor** – `tokens` (scaled) included and
    interacted with every other predictor.
 
@@ -192,6 +200,206 @@ PRED_SPECS <- list(
   )
 )
 
+# ---------------------------------------------------------------------------
+# Per-checkpoint trajectory helpers
+# ---------------------------------------------------------------------------
+
+# Return n evenly-spaced checkpoint token values for model m.
+sample_checkpoints <- function(m, n = 20) {
+  con_local <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con_local, shutdown = TRUE))
+  dbExecute(con_local, sprintf(
+    "CREATE VIEW ckpt AS SELECT * FROM read_csv_auto('%s')", CSV_PATH_FWD
+  ))
+  all_ckpts <- dbGetQuery(con_local, sprintf(
+    "SELECT DISTINCT tokens FROM ckpt WHERE model = '%s' ORDER BY tokens",
+    gsub("'", "''", m)
+  ))$tokens
+  idx <- unique(round(seq(1, length(all_ckpts), length.out = min(n, length(all_ckpts)))))
+  all_ckpts[idx]
+}
+
+# Load raw data for ONE checkpoint; z-scores log_total within that checkpoint's
+# items so the coefficient captures between-item frequency variation without
+# conflating it with training stage.
+load_single_checkpoint <- function(m, ck) {
+  m_safe    <- gsub("'", "''", m)
+  con_local <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con_local, shutdown = TRUE))
+  dbExecute(con_local, sprintf(
+    "CREATE VIEW ckpt AS SELECT * FROM read_csv_auto('%s')", CSV_PATH_FWD
+  ))
+  dat <- dbGetQuery(con_local, sprintf("
+    SELECT model, tokens, binom, preference,
+           ROUND(alpha_seen) + ROUND(beta_seen)               AS total_seen,
+           CASE WHEN alpha_seen > 0 AND beta_seen > 0
+                THEN LN(alpha_seen / beta_seen)
+                ELSE NULL END                                 AS log_freq_ratio
+    FROM ckpt
+    WHERE model = '%s' AND tokens = %s
+    ORDER BY binom
+  ", m_safe, ck))
+
+  dat %>%
+    mutate(
+      total_seen  = as.numeric(total_seen),
+      log_total   = if_else(total_seen > 0, log(total_seen), NA_real_),
+      binom_lower = tolower(binom)
+    ) %>%
+    left_join(genpref_raw, by = "binom_lower") %>%
+    filter(!is.na(genpref), !is.na(log_freq_ratio), !is.na(log_total)) %>%
+    mutate(
+      signed_gap  = preference - log_freq_ratio,
+      freq_prob_c = plogis(log_freq_ratio) - 0.5,
+      genpref_c   = genpref - MEAN_GENPREF,
+      log_total_c = as.numeric(scale(log_total))  # z-scored within this checkpoint's items
+    )
+}
+
+N_TRAJ_CHECKPOINTS <- 20
+
+# Fit brms at each of n evenly-spaced checkpoints.
+#
+# Recompilation avoidance strategy:
+#   - The first checkpoint is fitted with brm(), which compiles the Stan model
+#     and caches it via cmdstanr (keyed by a hash of the Stan code).
+#   - All subsequent checkpoints call update(fit_template, newdata = ...,
+#     recompile = FALSE), which reuses the compiled executable — only new data
+#     is passed to Stan, no compilation step.
+#   - Each checkpoint model is also saved to its own .rds file (file= argument).
+#     On re-runs of the notebook, brms loads from file and neither update() nor
+#     brm() is called at all, so the function becomes near-instant.
+#
+# Returns: list(coefs = tibble, stats = tibble)
+#   coefs — tidy coefficients per checkpoint (for trajectory_plot)
+#   stats — raw log_total summary statistics per checkpoint (for stats_plot)
+run_trajectory_brms <- function(m, formula, prefix, term_levels, term_labels) {
+  slug  <- tolower(gsub("[^a-z0-9]", "_", m))
+  ckpts <- sample_checkpoints(m, N_TRAJ_CHECKPOINTS)
+  message(sprintf("[%s] Trajectory over %d checkpoints (brms) ...", m, length(ckpts)))
+
+  fit_template <- NULL
+  all_coefs    <- vector("list", length(ckpts))
+  all_stats    <- vector("list", length(ckpts))
+
+  for (i in seq_along(ckpts)) {
+    ck        <- ckpts[i]
+    file_path <- file.path(MODELS_DIR, sprintf("%s%s_ck%02d", prefix, slug, i))
+    dat       <- load_single_checkpoint(m, ck)
+
+    if (nrow(dat) < 20) next
+
+    # Collect raw (pre-z-score) log_total stats for this checkpoint
+    all_stats[[i]] <- tibble(
+      model_name     = m,
+      tokens         = ck,
+      corpus         = parse_corpus(m),
+      model_size     = factor(parse_size(m), levels = SIZE_LEVELS),
+      n_items        = nrow(dat),
+      log_total_mean = mean(dat$log_total, na.rm = TRUE),
+      log_total_sd   = sd(dat$log_total,   na.rm = TRUE),
+      log_total_min  = min(dat$log_total,  na.rm = TRUE),
+      log_total_max  = max(dat$log_total,  na.rm = TRUE)
+    )
+
+    fit <- if (!is.null(fit_template) && !file.exists(paste0(file_path, ".rds"))) {
+      # Reuse compiled Stan executable; no recompilation
+      update(
+        fit_template, newdata = dat, recompile = FALSE,
+        iter    = BRMS_ITER,   warmup  = BRMS_WARMUP,
+        chains  = BRMS_CHAINS, cores   = BRMS_CORES,
+        file    = file_path,   seed    = BRMS_SEED,
+        silent  = BRMS_SILENT
+      )
+    } else {
+      brm(
+        formula,
+        data      = dat,        family    = gaussian(),
+        prior     = BRMS_PRIORS,
+        iter      = BRMS_ITER,   warmup    = BRMS_WARMUP,
+        chains    = BRMS_CHAINS, cores     = BRMS_CORES,
+        file      = file_path,   seed      = BRMS_SEED,
+        backend   = BRMS_BACKEND, normalize = BRMS_NORMALIZE,
+        silent    = BRMS_SILENT
+      )
+    }
+
+    if (is.null(fit_template)) fit_template <- fit
+
+    all_coefs[[i]] <- extract_coefs(fit, m, term_levels, term_labels) %>%
+      mutate(tokens = ck)
+
+    rm(fit); gc()
+  }
+
+  list(
+    coefs = bind_rows(all_coefs),
+    stats = bind_rows(all_stats)
+  )
+}
+
+# Plot raw log_total statistics and item count over training checkpoints.
+# Communicates how exposure levels and coverage evolve over training,
+# justifying the per-checkpoint z-scoring of log_total.
+stats_plot <- function(stats_df, title) {
+  p_exp <- ggplot(stats_df,
+                  aes(x = tokens / 1e6, colour = model_size, fill = model_size,
+                      group = model_name)) +
+    geom_ribbon(aes(ymin = log_total_mean - log_total_sd,
+                    ymax = log_total_mean + log_total_sd),
+                alpha = 0.15, colour = NA) +
+    geom_line(aes(y = log_total_mean), linewidth = 0.8) +
+    geom_point(aes(y = log_total_mean), size = 2) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Mean log(total_seen)  [raw, before z-scoring]") +
+    facet_wrap(~ corpus, scales = "free_x") +
+    labs(title    = title,
+         subtitle = "Mean ± 1 SD of raw log(total_seen) across item pairs — justifies per-checkpoint z-scoring") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+  p_n <- ggplot(stats_df,
+                aes(x = tokens / 1e6, y = n_items,
+                    colour = model_size, group = model_name)) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("N item pairs with total_seen > 0") +
+    facet_wrap(~ corpus, scales = "free_x") +
+    labs(subtitle = "Item coverage per checkpoint") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+  print(p_exp / p_n)
+}
+
+# Plot coefficients as a function of training tokens, faceted by term and corpus.
+trajectory_plot <- function(traj_df, title, subtitle, ylab) {
+  ggplot(traj_df, aes(x = tokens / 1e6, y = estimate,
+                      colour = model_size, fill = model_size,
+                      group = model_name)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous(name = "Training tokens (millions)") +
+    scale_y_continuous(name = ylab) +
+    facet_grid(corpus ~ term, scales = "free_y") +
+    labs(title = title, subtitle = subtitle) +
+    theme_bw(base_size = 11) +
+    theme(legend.position  = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.text       = element_text(size = 8),
+          axis.text.x      = element_text(size = 9))
+}
+
+# ---------------------------------------------------------------------------
+
 # tokens_c is z-scored within model so ±2 covers the vast majority of the range
 pred_grid_for <- function(predictor, levels_vec, label_vec, fit) {
   tk_seq <- seq(-2, 2, length.out = 30)
@@ -265,9 +473,9 @@ marginal_plots_for <- function(file_prefix, ylab) {
 
 ## Load Data
 
-The DuckDB connection is used only to fetch `MODELS_LIST` and the global
-centring constants, then closed.  Each call to `load_model_data()` opens its
-own short-lived connection so the function is safe to call from furrr workers.
+The DuckDB connection is used only to fetch `MODELS_LIST`, then closed.
+Each call to `load_model_data()` opens its own short-lived connection so the
+function is safe to call from furrr workers.
 
 ```{r open-db}
 csv_path     <- normalizePath("../Data/processed/checkpoint_results_with_exposures.csv",
@@ -425,7 +633,7 @@ message(sprintf("furrr plan: %s with %d workers", class(plan())[1], N_PARALLEL_M
 A positive value means the model is *more* alpha-preferring than corpus frequency
 alone predicts; negative means *less*.  Predictors: `genpref_c` (GenPref,
 centred), `freq_prob_c` (P(alpha in corpus) − 0.5), `log_total_c` (log total
-exposures, centred).
+exposures, z-scored within each model's data).
 
 ---
 
@@ -475,46 +683,46 @@ coef_plot(
 
 ---
 
-## Analysis 2: Signed Gap — Checkpoints Pooled
+## Analysis 2: Signed Gap — Per-Checkpoint Trajectory (20 sampled checkpoints)
 
-Same formula as Analysis 1 but using **all checkpoints**.
+A separate brms model is fitted at each of 20 evenly-spaced checkpoints using
+only data from that checkpoint.  `log_total_c` is z-scored **within each
+checkpoint's items**, capturing between-item frequency variation at that training
+stage without conflating it with training progress.
+
+Stan recompilation is avoided after the first checkpoint via
+`update(recompile = FALSE)`.  Each checkpoint model is cached to disk; re-running
+this chunk is near-instant once all files exist.
+
+Formula (per checkpoint): `signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom)`
 
 ```{r sg-analysis2-fit}
-sg_coefs_pooled <- future_map_dfr(MODELS_LIST, function(m) {
-  slug   <- tolower(gsub("[^a-z0-9]", "_", m))
-  message(sprintf("[%s] Fitting signed gap — pooled checkpoints ...", m))
-
-  m_data <- load_model_data(m, aggregate_prompts = TRUE)
-
-  fit <- brm(
+sg_traj_results <- map(MODELS_LIST, function(m) {
+  run_trajectory_brms(
+    m,
     signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
-    data      = m_data,
-    family    = gaussian(),
-    prior     = BRMS_PRIORS,
-    iter      = BRMS_ITER,
-    warmup    = BRMS_WARMUP,
-    chains    = BRMS_CHAINS,
-    cores     = BRMS_CORES,
-    file      = file.path(MODELS_DIR, paste0("sg_pooled_", slug)),
-    seed      = BRMS_SEED,
-    backend   = BRMS_BACKEND,
-    normalize = BRMS_NORMALIZE,
-    silent    = BRMS_SILENT
+    prefix      = "sg_traj_",
+    term_levels = TERM_LEVELS,
+    term_labels = TERM_LABELS
   )
-
-  coefs <- extract_coefs(fit, m, TERM_LEVELS, TERM_LABELS)
-  rm(fit, m_data); gc()
-  coefs
-}, .options = furrr_options(seed = TRUE))
+})
+sg_traj_coefs <- map_dfr(sg_traj_results, "coefs")
+sg_traj_stats <- map_dfr(sg_traj_results, "stats")
 ```
 
-### Plot 2: Coefficients — Signed Gap, Checkpoints Pooled
+### Plot 2a: Predictor Statistics Over Training — Signed Gap
 
-```{r sg-plot2, fig.width=13, fig.height=7}
-coef_plot(
-  sg_coefs_pooled,
-  title    = "Predictors of signed gap — all checkpoints pooled",
-  subtitle = "signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  brms  |  * = CI excludes zero",
+```{r sg-plot2a, fig.width=13, fig.height=8}
+stats_plot(sg_traj_stats, "Item predictor statistics over training — signed gap models")
+```
+
+### Plot 2b: Coefficients Over Training — Signed Gap
+
+```{r sg-plot2b, fig.width=16, fig.height=7}
+trajectory_plot(
+  sg_traj_coefs,
+  title    = "Signed gap predictors over training — 20 sampled checkpoints",
+  subtitle = "brms at each checkpoint  |  log_total_c z-scored within checkpoint  |  ribbon = 95% CI  |  * = CI excludes zero",
   ylab     = "Coefficient  (95% credible interval)"
 )
 ```
@@ -631,44 +839,39 @@ coef_plot(
 
 ---
 
-## Analysis 5: Preference — Checkpoints Pooled
+## Analysis 5: Preference — Per-Checkpoint Trajectory (20 sampled checkpoints)
+
+Same approach as Analysis 2, applied to raw preference.
+
+Formula (per checkpoint): `preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom)`
 
 ```{r pref-analysis5-fit}
-pref_coefs_pooled <- future_map_dfr(MODELS_LIST, function(m) {
-  slug   <- tolower(gsub("[^a-z0-9]", "_", m))
-  message(sprintf("[%s] Fitting preference — pooled checkpoints ...", m))
-
-  m_data <- load_model_data(m, aggregate_prompts = TRUE)
-
-  fit <- brm(
+pref_traj_results <- map(MODELS_LIST, function(m) {
+  run_trajectory_brms(
+    m,
     preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
-    data      = m_data,
-    family    = gaussian(),
-    prior     = BRMS_PRIORS,
-    iter      = BRMS_ITER,
-    warmup    = BRMS_WARMUP,
-    chains    = BRMS_CHAINS,
-    cores     = BRMS_CORES,
-    file      = file.path(MODELS_DIR, paste0("pref_pooled_", slug)),
-    seed      = BRMS_SEED,
-    backend   = BRMS_BACKEND,
-    normalize = BRMS_NORMALIZE,
-    silent    = BRMS_SILENT
+    prefix      = "pref_traj_",
+    term_levels = TERM_LEVELS,
+    term_labels = TERM_LABELS
   )
-
-  coefs <- extract_coefs(fit, m, TERM_LEVELS, TERM_LABELS)
-  rm(fit, m_data); gc()
-  coefs
-}, .options = furrr_options(seed = TRUE))
+})
+pref_traj_coefs <- map_dfr(pref_traj_results, "coefs")
+pref_traj_stats <- map_dfr(pref_traj_results, "stats")
 ```
 
-### Plot 5: Coefficients — Preference, Checkpoints Pooled
+### Plot 5a: Predictor Statistics Over Training — Preference
 
-```{r pref-plot5, fig.width=13, fig.height=7}
-coef_plot(
-  pref_coefs_pooled,
-  title    = "Predictors of preference — all checkpoints pooled",
-  subtitle = "preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  brms  |  * = CI excludes zero",
+```{r pref-plot5a, fig.width=13, fig.height=8}
+stats_plot(pref_traj_stats, "Item predictor statistics over training — preference models")
+```
+
+### Plot 5b: Coefficients Over Training — Preference
+
+```{r pref-plot5b, fig.width=16, fig.height=7}
+trajectory_plot(
+  pref_traj_coefs,
+  title    = "Preference predictors over training — 20 sampled checkpoints",
+  subtitle = "brms at each checkpoint  |  log_total_c z-scored within checkpoint  |  ribbon = 95% CI  |  * = CI excludes zero",
   ylab     = "Coefficient  (95% credible interval)"
 )
 ```
