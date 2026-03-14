@@ -1,7 +1,12 @@
 misc_analyses.ipynb
 opt-training.ipynb
 
-# Ignore brms model cache directories
+# brms compilation caches (regenerable, platform-specific)
 brms_cache/
 model_cache/
-models/
+
+# cmdstanr compilation artefacts inside models/ (regenerable)
+models/*.hpp
+models/*.o
+models/*.d
+models/stan_model*/

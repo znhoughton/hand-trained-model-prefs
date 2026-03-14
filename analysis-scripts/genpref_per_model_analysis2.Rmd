@@ -15,6 +15,11 @@ This document loads pre-fitted brms models from disk and renders all coefficient
 plots and marginal effect plots. No models are refit and no data is loaded from
 DuckDB. All six analyses (3 signed-gap × 3 preference) are covered.
 
+Analyses 2 & 5 use the **per-checkpoint trajectory** approach: 20 evenly-spaced
+checkpoints per model, each fit as a separate brms model with `log_total_c`
+z-scored within that checkpoint's items. Files are named
+`sg_traj_{slug}_ck{01-20}.rds` / `pref_traj_{slug}_ck{01-20}.rds`.
+
 ---
 
 ```{r libraries}
@@ -50,6 +55,8 @@ TERM_LABELS_CK <- c(
 
 SIZE_LEVELS  <- c("125M", "350M", "1.3B")
 SIZE_COLOURS <- c("125M" = "#1b7837", "350M" = "#762a83", "1.3B" = "#b2182b")
+
+N_TRAJ_CHECKPOINTS <- 20   # must match the value used when fitting
 
 PRED_SPECS <- list(
   list(
@@ -200,16 +207,147 @@ pred_summary <- function(fit, slug) {
 }
 
 # ── Discover saved models from the models/ directory ─────────────────────────
-# Each fit was saved as  <prefix><slug>.rds  where prefix is one of:
-#   sg_final_, sg_pooled_, sg_ckpt_, pref_final_, pref_pooled_, pref_ckpt_
-# The slug is  tolower(gsub("[^a-z0-9]", "_", model_name)).
-# parse_corpus() / parse_size() are designed to match slug patterns directly.
+# Each single-model fit: <prefix><slug>.rds
+#   e.g. sg_final_babylm_125m.rds
+# Each trajectory fit:   <traj_prefix><slug>_ck<nn>.rds
+#   e.g. sg_traj_babylm_125m_ck01.rds … sg_traj_babylm_125m_ck20.rds
 list_fits <- function(prefix) {
   pat   <- paste0("^", prefix, ".+\\.rds$")
   paths <- list.files(MODELS_DIR, pattern = pat, full.names = TRUE)
   if (length(paths) == 0)
     warning(sprintf("No .rds files found for prefix '%s' in '%s'", prefix, MODELS_DIR))
   paths
+}
+
+# ── Trajectory plot ───────────────────────────────────────────────────────────
+trajectory_plot <- function(traj_df, title, subtitle,
+                            ylab = "Coefficient  (95% credible interval)") {
+  if (nrow(traj_df) == 0) {
+    message("No trajectory data — skipping: ", title)
+    return(invisible(NULL))
+  }
+  ggplot(traj_df, aes(x = tokens / 1e6, y = estimate,
+                      colour = model_size, fill = model_size,
+                      group = model_name)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous(name = "Training tokens (millions)") +
+    scale_y_continuous(name = ylab) +
+    facet_grid(corpus ~ term, scales = "free_y") +
+    labs(title = title, subtitle = subtitle) +
+    theme_bw(base_size = 11) +
+    theme(legend.position  = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.text       = element_text(size = 8),
+          axis.text.x      = element_text(size = 9))
+}
+
+# ── Stats plot (predictor distributions over checkpoints) ────────────────────
+stats_plot <- function(stats_df, title) {
+  if (nrow(stats_df) == 0 || all(is.na(stats_df$log_total_mean))) {
+    message("No stats data (log_total not stored in fit$data) — skipping: ", title)
+    return(invisible(NULL))
+  }
+  p_exp <- ggplot(stats_df,
+                  aes(x = tokens / 1e6, colour = model_size, fill = model_size,
+                      group = model_name)) +
+    geom_ribbon(aes(ymin = log_total_mean - log_total_sd,
+                    ymax = log_total_mean + log_total_sd),
+                alpha = 0.15, colour = NA) +
+    geom_line(aes(y = log_total_mean), linewidth = 0.8) +
+    geom_point(aes(y = log_total_mean), size = 2) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Mean log(total_seen)  [raw, before z-scoring]") +
+    facet_wrap(~ corpus, scales = "free_x") +
+    labs(title    = title,
+         subtitle = "Mean ± 1 SD of raw log(total_seen) — justifies per-checkpoint z-scoring") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+  p_n <- ggplot(stats_df,
+                aes(x = tokens / 1e6, y = n_items,
+                    colour = model_size, group = model_name)) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("N item pairs with total_seen > 0") +
+    facet_wrap(~ corpus, scales = "free_x") +
+    labs(subtitle = "Item coverage per checkpoint") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+
+  print(p_exp / p_n)
+}
+
+# ── Load all checkpoint fits for one trajectory prefix ───────────────────────
+# Reads sg_traj_*_ck**.rds (or pref_traj_*) files one by one, extracts
+# coefficients (with the checkpoint token count) and raw predictor statistics.
+# Returns list(coefs = tibble, stats = tibble).
+load_traj_results <- function(traj_prefix, term_levels, term_labels) {
+  paths <- list_fits(traj_prefix)
+  if (length(paths) == 0) return(list(coefs = tibble(), stats = tibble()))
+
+  all_coefs <- vector("list", length(paths))
+  all_stats <- vector("list", length(paths))
+
+  for (i in seq_along(paths)) {
+    path  <- paths[i]
+    fname <- sub("\\.rds$", "", basename(path))
+    # Strip prefix → e.g. "babylm_125m_ck01"; then strip "_ck##" → slug
+    fname_no_prefix <- sub(paste0("^", traj_prefix), "", fname)
+    slug            <- sub("_ck[0-9]+$", "", fname_no_prefix)
+    message("Loading: ", basename(path))
+
+    fit <- readRDS(path)
+
+    # Token count is stored in fit$data$tokens (a column from the SQL query)
+    ck_tokens <- if ("tokens" %in% names(fit$data)) {
+      unique(fit$data$tokens)[1]
+    } else {
+      warning(sprintf("'tokens' column not in fit$data for %s", basename(path)))
+      NA_real_
+    }
+
+    all_coefs[[i]] <- extract_coefs(fit, slug, term_levels, term_labels) %>%
+      mutate(tokens = ck_tokens)
+
+    # Raw log_total stats (pre-z-score); present if brms retained the column
+    if ("log_total" %in% names(fit$data)) {
+      lt <- fit$data$log_total
+      all_stats[[i]] <- tibble(
+        model_name     = slug,
+        tokens         = ck_tokens,
+        corpus         = parse_corpus(slug),
+        model_size     = factor(parse_size(slug), levels = SIZE_LEVELS),
+        n_items        = nrow(fit$data),
+        log_total_mean = mean(lt, na.rm = TRUE),
+        log_total_sd   = sd(lt,   na.rm = TRUE),
+        log_total_min  = min(lt,  na.rm = TRUE),
+        log_total_max  = max(lt,  na.rm = TRUE)
+      )
+    } else {
+      # Fallback: report n_items only; stats_plot() will skip the exposure panel
+      all_stats[[i]] <- tibble(
+        model_name     = slug,    tokens     = ck_tokens,
+        corpus         = parse_corpus(slug),
+        model_size     = factor(parse_size(slug), levels = SIZE_LEVELS),
+        n_items        = nrow(fit$data),
+        log_total_mean = NA_real_, log_total_sd = NA_real_,
+        log_total_min  = NA_real_, log_total_max = NA_real_
+      )
+    }
+
+    rm(fit); gc()
+  }
+
+  list(coefs = bind_rows(all_coefs), stats = bind_rows(all_stats))
 }
 ```
 
@@ -228,21 +366,32 @@ cat(paste(" ", all_rds, collapse = "\n"), "\n")
 ```
 
 ```{r discover-models}
-# We discover what's available rather than hard-coding model names.
-# All six prefixes:
+# Single-model fits (one .rds per model):
 PREFIXES <- c(
   sg_final   = "sg_final_",
-  sg_pooled  = "sg_pooled_",
   sg_ckpt    = "sg_ckpt_",
   pref_final = "pref_final_",
-  pref_pooled= "pref_pooled_",
   pref_ckpt  = "pref_ckpt_"
 )
 
-available <- map(PREFIXES, list_fits)
+# Trajectory fits (20 .rds per model, named <prefix><slug>_ck<nn>.rds):
+TRAJ_PREFIXES <- c(
+  sg_traj   = "sg_traj_",
+  pref_traj = "pref_traj_"
+)
+
+available      <- map(PREFIXES,      list_fits)
+available_traj <- map(TRAJ_PREFIXES, list_fits)
+
+cat("=== Single-model fits ===\n")
 walk2(names(available), available, ~ {
   cat(sprintf("%-12s : %d file(s)\n", .x, length(.y)))
   walk(.y, ~ cat("  ", basename(.x), "\n"))
+})
+
+cat("\n=== Trajectory fits ===\n")
+walk2(names(available_traj), available_traj, ~ {
+  cat(sprintf("%-12s : %d file(s)\n", .x, length(.y)))
 })
 ```
 
@@ -278,27 +427,25 @@ coef_plot(
 
 ---
 
-## Analysis 2: Signed Gap — Checkpoints Pooled
+## Analysis 2: Signed Gap — Per-Checkpoint Trajectory
 
-```{r sg-pooled-coefs, fig.width=13, fig.height=7}
-sg_results_pooled <- map(available$sg_pooled, function(path) {
-  slug <- sub("\\.rds$", "", sub("^sg_pooled_", "", basename(path)))
-  message("Loading: ", basename(path))
-  fit  <- readRDS(path)
-  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
-               summ  = pred_summary(fit, slug))
-  rm(fit); gc()
-  res
-})
-sg_coefs_pooled <- map_dfr(sg_results_pooled, "coefs")
+20 evenly-spaced checkpoints per model; `log_total_c` z-scored within each
+checkpoint's items.  Files: `sg_traj_{slug}_ck{01-20}.rds`.
 
-cat("=== Predictor ranges ===\n")
-print(map_dfr(sg_results_pooled, "summ"), n = Inf)
+### Plot 2a: Predictor Statistics Over Training
 
-coef_plot(
-  sg_coefs_pooled,
-  title    = "Predictors of signed gap — all checkpoints pooled",
-  subtitle = "signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  * = CI excludes zero"
+```{r sg-traj-stats, fig.width=13, fig.height=8}
+sg_traj <- load_traj_results("sg_traj_", TERM_LEVELS, TERM_LABELS)
+stats_plot(sg_traj$stats, "Item predictor statistics over training — signed gap models")
+```
+
+### Plot 2b: Coefficients Over Training
+
+```{r sg-traj-coefs, fig.width=16, fig.height=7}
+trajectory_plot(
+  sg_traj$coefs,
+  title    = "Signed gap predictors over training — 20 sampled checkpoints",
+  subtitle = "brms at each checkpoint  |  log_total_c z-scored within checkpoint  |  ribbon = 95% CI  |  * = CI excludes zero"
 )
 ```
 
@@ -413,27 +560,25 @@ coef_plot(
 
 ---
 
-## Analysis 5: Preference — Checkpoints Pooled
+## Analysis 5: Preference — Per-Checkpoint Trajectory
 
-```{r pref-pooled-coefs, fig.width=13, fig.height=7}
-pref_results_pooled <- map(available$pref_pooled, function(path) {
-  slug <- sub("\\.rds$", "", sub("^pref_pooled_", "", basename(path)))
-  message("Loading: ", basename(path))
-  fit  <- readRDS(path)
-  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
-               summ  = pred_summary(fit, slug))
-  rm(fit); gc()
-  res
-})
-pref_coefs_pooled <- map_dfr(pref_results_pooled, "coefs")
+Same approach as Analysis 2, applied to raw preference.
+Files: `pref_traj_{slug}_ck{01-20}.rds`.
 
-cat("=== Predictor ranges ===\n")
-print(map_dfr(pref_results_pooled, "summ"), n = Inf)
+### Plot 5a: Predictor Statistics Over Training
 
-coef_plot(
-  pref_coefs_pooled,
-  title    = "Predictors of preference — all checkpoints pooled",
-  subtitle = "preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  * = CI excludes zero"
+```{r pref-traj-stats, fig.width=13, fig.height=8}
+pref_traj <- load_traj_results("pref_traj_", TERM_LEVELS, TERM_LABELS)
+stats_plot(pref_traj$stats, "Item predictor statistics over training — preference models")
+```
+
+### Plot 5b: Coefficients Over Training
+
+```{r pref-traj-coefs, fig.width=16, fig.height=7}
+trajectory_plot(
+  pref_traj$coefs,
+  title    = "Preference predictors over training — 20 sampled checkpoints",
+  subtitle = "brms at each checkpoint  |  log_total_c z-scored within checkpoint  |  ribbon = 95% CI  |  * = CI excludes zero"
 )
 ```
 
