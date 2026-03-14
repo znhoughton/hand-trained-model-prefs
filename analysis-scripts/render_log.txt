@@ -1,0 +1,30 @@
+nohup: ignoring input
+
+
+processing file: genpref_per_model_analysis.Rmd
+1/44                     
+2/44 [setup]             
+3/44                     
+4/44 [libraries]         
+5/44                     
+6/44 [brms-config]       
+7/44                     
+8/44 [helpers]           
+9/44                     
+10/44 [open-db]           
+11/44                     
+12/44 [load-genpref]      
+13/44                     
+14/44 [load-model-data-fn]
+15/44                     
+16/44 [setup-parallel]    
+17/44                     
+18/44 [sg-analysis1-fit]  
+19/44                     
+20/44 [sg-plot1]          
+21/44                     
+22/44 [sg-analysis2-fit]  
+23/44                     
+24/44 [sg-plot2]          
+25/44                     
+26/44 [sg-analysis3-fit]  
