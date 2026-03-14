@@ -260,50 +260,41 @@ N_TRAJ_CHECKPOINTS <- 20
 
 # Fit brms at each of n evenly-spaced checkpoints.
 #
-# Recompilation avoidance strategy:
-#   - The first checkpoint is fitted with brm(), which compiles the Stan model
-#     and caches it via cmdstanr (keyed by a hash of the Stan code).
-#   - All subsequent checkpoints call update(fit_template, newdata = ...,
-#     recompile = FALSE), which reuses the compiled executable — only new data
-#     is passed to Stan, no compilation step.
-#   - Each checkpoint model is also saved to its own .rds file (file= argument).
-#     On re-runs of the notebook, brms loads from file and neither update() nor
-#     brm() is called at all, so the function becomes near-instant.
+# The first checkpoint is fitted (or loaded from file cache) with brm(), which
+# compiles the Stan model once.  All remaining checkpoints call
+# update(fit_template, recompile = FALSE), reusing the compiled executable.
+# fit_template just needs to share the same formula/family/priors — it does not
+# need to be the previous checkpoint.
 #
 # Returns: list(coefs = tibble, stats = tibble)
-#   coefs — tidy coefficients per checkpoint (for trajectory_plot)
-#   stats — raw log_total summary statistics per checkpoint (for stats_plot)
 run_trajectory_brms <- function(m, formula, prefix, term_levels, term_labels) {
   slug  <- tolower(gsub("[^a-z0-9]", "_", m))
   ckpts <- sample_checkpoints(m, N_TRAJ_CHECKPOINTS)
   message(sprintf("[%s] Trajectory over %d checkpoints (brms) ...", m, length(ckpts)))
 
-  fit_template <- NULL
-  all_coefs    <- vector("list", length(ckpts))
-  all_stats    <- vector("list", length(ckpts))
+  # Fit/load checkpoint 1 — compiles Stan (or returns cached fit instantly)
+  dat_ck1      <- load_single_checkpoint(m, ckpts[1])
+  fit_template <- brm(
+    formula,
+    data      = dat_ck1,        family    = gaussian(),
+    prior     = BRMS_PRIORS,
+    iter      = BRMS_ITER,      warmup    = BRMS_WARMUP,
+    chains    = BRMS_CHAINS,    cores     = BRMS_CORES,
+    file      = file.path(MODELS_DIR, sprintf("%s%s_ck01", prefix, slug)),
+    seed      = BRMS_SEED,      backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE, silent    = BRMS_SILENT
+  )
 
-  for (i in seq_along(ckpts)) {
-    ck        <- ckpts[i]
+  # Map over all checkpoints: ck01 returns fit_template directly; rest use update()
+  results <- map2(ckpts, seq_along(ckpts), function(ck, i) {
+    dat       <- if (i == 1) dat_ck1 else load_single_checkpoint(m, ck)
     file_path <- file.path(MODELS_DIR, sprintf("%s%s_ck%02d", prefix, slug, i))
-    dat       <- load_single_checkpoint(m, ck)
 
-    if (nrow(dat) < 20) next
+    if (nrow(dat) < 20) return(NULL)
 
-    # Collect raw (pre-z-score) log_total stats for this checkpoint
-    all_stats[[i]] <- tibble(
-      model_name     = m,
-      tokens         = ck,
-      corpus         = parse_corpus(m),
-      model_size     = factor(parse_size(m), levels = SIZE_LEVELS),
-      n_items        = nrow(dat),
-      log_total_mean = mean(dat$log_total, na.rm = TRUE),
-      log_total_sd   = sd(dat$log_total,   na.rm = TRUE),
-      log_total_min  = min(dat$log_total,  na.rm = TRUE),
-      log_total_max  = max(dat$log_total,  na.rm = TRUE)
-    )
-
-    fit <- if (!is.null(fit_template) && !file.exists(paste0(file_path, ".rds"))) {
-      # Reuse compiled Stan executable; no recompilation
+    fit <- if (i == 1) {
+      fit_template
+    } else {
       update(
         fit_template, newdata = dat, recompile = FALSE,
         iter    = BRMS_ITER,   warmup  = BRMS_WARMUP,
@@ -311,30 +302,30 @@ run_trajectory_brms <- function(m, formula, prefix, term_levels, term_labels) {
         file    = file_path,   seed    = BRMS_SEED,
         silent  = BRMS_SILENT
       )
-    } else {
-      brm(
-        formula,
-        data      = dat,        family    = gaussian(),
-        prior     = BRMS_PRIORS,
-        iter      = BRMS_ITER,   warmup    = BRMS_WARMUP,
-        chains    = BRMS_CHAINS, cores     = BRMS_CORES,
-        file      = file_path,   seed      = BRMS_SEED,
-        backend   = BRMS_BACKEND, normalize = BRMS_NORMALIZE,
-        silent    = BRMS_SILENT
-      )
     }
 
-    if (is.null(fit_template)) fit_template <- fit
-
-    all_coefs[[i]] <- extract_coefs(fit, m, term_levels, term_labels) %>%
-      mutate(tokens = ck)
-
-    rm(fit); gc()
-  }
+    row <- list(
+      coefs = extract_coefs(fit, m, term_levels, term_labels) %>% mutate(tokens = ck),
+      stats = tibble(
+        model_name     = m,
+        tokens         = ck,
+        corpus         = parse_corpus(m),
+        model_size     = factor(parse_size(m), levels = SIZE_LEVELS),
+        n_items        = nrow(dat),
+        log_total_mean = mean(dat$log_total, na.rm = TRUE),
+        log_total_sd   = sd(dat$log_total,   na.rm = TRUE),
+        log_total_min  = min(dat$log_total,  na.rm = TRUE),
+        log_total_max  = max(dat$log_total,  na.rm = TRUE)
+      )
+    )
+    if (i > 1) { rm(fit); gc() }
+    row
+  }) %>%
+    compact()
 
   list(
-    coefs = bind_rows(all_coefs),
-    stats = bind_rows(all_stats)
+    coefs = map_dfr(results, "coefs"),
+    stats = map_dfr(results, "stats")
   )
 }
 
@@ -690,14 +681,16 @@ only data from that checkpoint.  `log_total_c` is z-scored **within each
 checkpoint's items**, capturing between-item frequency variation at that training
 stage without conflating it with training progress.
 
-Stan recompilation is avoided after the first checkpoint via
-`update(recompile = FALSE)`.  Each checkpoint model is cached to disk; re-running
+Stan recompilation is avoided via `update(recompile = FALSE)` after the first
+checkpoint.  Each checkpoint model is also cached to disk via `file=`; re-running
 this chunk is near-instant once all files exist.
 
 Formula (per checkpoint): `signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom)`
 
 ```{r sg-analysis2-fit}
-sg_traj_results <- map(MODELS_LIST, function(m) {
+# Parallelises across models (N_PARALLEL_MODELS workers); within each model
+# checkpoints are fitted sequentially so update() can reuse fit_template.
+sg_traj_results <- future_map(MODELS_LIST, function(m) {
   run_trajectory_brms(
     m,
     signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
@@ -705,7 +698,7 @@ sg_traj_results <- map(MODELS_LIST, function(m) {
     term_levels = TERM_LEVELS,
     term_labels = TERM_LABELS
   )
-})
+}, .options = furrr_options(seed = TRUE))
 sg_traj_coefs <- map_dfr(sg_traj_results, "coefs")
 sg_traj_stats <- map_dfr(sg_traj_results, "stats")
 ```
@@ -846,7 +839,7 @@ Same approach as Analysis 2, applied to raw preference.
 Formula (per checkpoint): `preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom)`
 
 ```{r pref-analysis5-fit}
-pref_traj_results <- map(MODELS_LIST, function(m) {
+pref_traj_results <- future_map(MODELS_LIST, function(m) {
   run_trajectory_brms(
     m,
     preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
@@ -854,7 +847,7 @@ pref_traj_results <- map(MODELS_LIST, function(m) {
     term_levels = TERM_LEVELS,
     term_labels = TERM_LABELS
   )
-})
+}, .options = furrr_options(seed = TRUE))
 pref_traj_coefs <- map_dfr(pref_traj_results, "coefs")
 pref_traj_stats <- map_dfr(pref_traj_results, "stats")
 ```
