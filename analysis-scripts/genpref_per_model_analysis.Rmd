@@ -333,6 +333,10 @@ run_trajectory_brms <- function(m, formula, prefix, term_levels, term_labels) {
 # Communicates how exposure levels and coverage evolve over training,
 # justifying the per-checkpoint z-scoring of log_total.
 stats_plot <- function(stats_df, title) {
+  if (nrow(stats_df) == 0) {
+    message("No stats data available — skipping: ", title)
+    return(invisible(NULL))
+  }
   p_exp <- ggplot(stats_df,
                   aes(x = tokens / 1e6, colour = model_size, fill = model_size,
                       group = model_name)) +
@@ -369,6 +373,10 @@ stats_plot <- function(stats_df, title) {
 
 # Plot coefficients as a function of training tokens, faceted by term and corpus.
 trajectory_plot <- function(traj_df, title, subtitle, ylab) {
+  if (nrow(traj_df) == 0) {
+    message("No trajectory data available — skipping: ", title)
+    return(invisible(NULL))
+  }
   ggplot(traj_df, aes(x = tokens / 1e6, y = estimate,
                       colour = model_size, fill = model_size,
                       group = model_name)) +
