@@ -62,7 +62,7 @@ dir.create(MODELS_DIR, showWarnings = FALSE, recursive = TRUE)
 
 N_CORES           <- parallel::detectCores(logical = FALSE)
 USABLE_CORES      <- floor(N_CORES * 3 / 4)
-N_PARALLEL_MODELS <- 2   # models fitted simultaneously via furrr
+N_PARALLEL_MODELS <- 3   # models fitted simultaneously via furrr
 
 BRMS_CHAINS    <- min(floor(USABLE_CORES / N_PARALLEL_MODELS), 8)
 BRMS_CORES     <- BRMS_CHAINS
