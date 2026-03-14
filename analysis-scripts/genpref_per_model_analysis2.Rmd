@@ -1,0 +1,516 @@
+---
+title: "GenPref × Signed Gap & Preference — Results Only (No Refitting)"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+## Overview
+
+This document loads pre-fitted brms models from disk and renders all coefficient
+plots and marginal effect plots. No models are refit and no data is loaded from
+DuckDB. All six analyses (3 signed-gap × 3 preference) are covered.
+
+---
+
+```{r libraries}
+library(tidyverse)
+library(brms)
+library(patchwork)
+```
+
+```{r config}
+# Adjust this if your models/ folder is not relative to this .Rmd file.
+# Common alternatives:
+#   MODELS_DIR <- "models"          # same directory as this .Rmd
+#   MODELS_DIR <- "../models"       # one level up
+#   MODELS_DIR <- "/absolute/path/to/models"
+MODELS_DIR <- "models"
+
+# ── Term levels/labels ────────────────────────────────────────────────────────
+TERM_LEVELS <- c("freq_prob_c", "genpref_c", "log_total_c",
+                 "freq_prob_c:log_total_c", "genpref_c:log_total_c")
+TERM_LABELS <- c("RelFreq\n(P(alpha)−0.5)", "GenPref",
+                 "Overall freq\n(ln total)",
+                 "RelFreq ×\nOverall freq", "GenPref ×\nOverall freq")
+
+TERM_LEVELS_CK <- c(
+  "genpref_c", "freq_prob_c", "log_total_c", "tokens_c",
+  "genpref_c:tokens_c", "freq_prob_c:tokens_c", "log_total_c:tokens_c"
+)
+TERM_LABELS_CK <- c(
+  "GenPref", "RelFreq\n(P(alpha)−0.5)", "Overall freq\n(ln total)",
+  "Checkpoint\n(tokens, z)",
+  "GenPref ×\nCheckpoint", "RelFreq ×\nCheckpoint", "Overall freq ×\nCheckpoint"
+)
+
+SIZE_LEVELS  <- c("125M", "350M", "1.3B")
+SIZE_COLOURS <- c("125M" = "#1b7837", "350M" = "#762a83", "1.3B" = "#b2182b")
+
+PRED_SPECS <- list(
+  list(
+    var    = "genpref_c",
+    vals   = c(-0.25, 0, 0.25),
+    labels = c("Low GenPref (−0.25)", "Neutral (0)", "High GenPref (+0.25)"),
+    cols   = c("Low GenPref (−0.25)"  = "#d73027",
+               "Neutral (0)"          = "#999999",
+               "High GenPref (+0.25)" = "#1a9850"),
+    title  = "Effect of GenPref over training"
+  ),
+  list(
+    var    = "freq_prob_c",
+    vals   = c(-0.25, 0, 0.25),
+    labels = c("Low RelFreq (−0.25)", "Neutral (0)", "High RelFreq (+0.25)"),
+    cols   = c("Low RelFreq (−0.25)"  = "#d73027",
+               "Neutral (0)"          = "#999999",
+               "High RelFreq (+0.25)" = "#1a9850"),
+    title  = "Effect of RelFreq over training"
+  ),
+  list(
+    var    = "log_total_c",
+    vals   = c(-1, 0, 1),
+    labels = c("Low overall freq (−1 SD)", "Mean overall freq", "High overall freq (+1 SD)"),
+    cols   = c("Low overall freq (−1 SD)"  = "#d73027",
+               "Mean overall freq"          = "#999999",
+               "High overall freq (+1 SD)"  = "#1a9850"),
+    title  = "Effect of Overall Frequency over training"
+  )
+)
+```
+
+```{r helpers}
+parse_corpus <- function(x) {
+  case_when(
+    grepl("babylm",  x, ignore.case = TRUE) ~ "BabyLM",
+    grepl("opt.c4",  x, ignore.case = TRUE) ~ "C4",   # . matches - or _ (slug or original)
+    TRUE ~ NA_character_
+  )
+}
+
+parse_size <- function(x) {
+  case_when(
+    grepl("125m",    x, ignore.case = TRUE) ~ "125M",
+    grepl("350m",    x, ignore.case = TRUE) ~ "350M",
+    grepl("1[._]3b", x, ignore.case = TRUE) ~ "1.3B",  # matches 1.3b or 1_3b (slug)
+    TRUE ~ NA_character_
+  )
+}
+
+normalise_terms <- function(term) {
+  dplyr::recode(term,
+    "tokens_c:genpref_c"      = "genpref_c:tokens_c",
+    "tokens_c:freq_prob_c"    = "freq_prob_c:tokens_c",
+    "tokens_c:log_total_c"    = "log_total_c:tokens_c",
+    "log_total_c:genpref_c"   = "genpref_c:log_total_c",
+    "log_total_c:freq_prob_c" = "freq_prob_c:log_total_c"
+  )
+}
+
+extract_coefs <- function(fit, model_name, term_levels, term_labels) {
+  fe <- as.data.frame(fixef(fit))
+  fe$term <- normalise_terms(rownames(fe))
+  fe %>%
+    as_tibble() %>%
+    rename(estimate = Estimate, se = Est.Error, lo = Q2.5, hi = Q97.5) %>%
+    filter(term != "Intercept") %>%
+    mutate(
+      term       = factor(term, levels = term_levels, labels = term_labels),
+      sig        = if_else(lo > 0 | hi < 0, "*", ""),
+      model_name = model_name,
+      corpus     = parse_corpus(model_name),
+      model_size = factor(parse_size(model_name), levels = SIZE_LEVELS)
+    )
+}
+
+coef_plot <- function(coef_df, title, subtitle,
+                      ylab = "Coefficient  (95% credible interval)") {
+  if (nrow(coef_df) == 0) {
+    message("No data available for: ", title, " — skipping plot.")
+    return(invisible(NULL))
+  }
+  ggplot(coef_df, aes(x = term, y = estimate, colour = model_size)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_errorbar(aes(ymin = lo, ymax = hi),
+                  width = 0.2, linewidth = 0.8,
+                  position = position_dodge(0.5)) +
+    geom_point(size = 3, position = position_dodge(0.5)) +
+    geom_text(aes(label = sig, y = hi + 0.02),
+              position = position_dodge(0.5), size = 4, vjust = 0) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_discrete(name = NULL) +
+    scale_y_continuous(name = ylab) +
+    facet_grid(corpus ~ ., scales = "free_y") +
+    labs(title = title, subtitle = subtitle) +
+    theme_bw(base_size = 11) +
+    theme(legend.position  = "bottom",
+          panel.grid.minor = element_blank(),
+          axis.text.x      = element_text(size = 9))
+}
+
+# ── Marginal predictions from a single loaded fit ────────────────────────────
+# Uses fitted(..., re_formula = NA) so no group-level draws are needed,
+# keeping memory and compute low.
+pred_grid_for <- function(predictor, levels_vec, label_vec, fit) {
+  tk_seq <- seq(-2, 2, length.out = 30)
+  grid <- expand.grid(
+    tokens_c    = tk_seq,
+    pred_val    = levels_vec,
+    genpref_c   = 0,
+    freq_prob_c = 0,
+    log_total_c = 0
+  )
+  grid[[predictor]] <- grid$pred_val
+  pred <- fitted(fit, newdata = grid, re_formula = NA, summary = TRUE)
+  grid %>%
+    mutate(
+      estimate = pred[, "Estimate"],
+      lo       = pred[, "Q2.5"],
+      hi       = pred[, "Q97.5"],
+      pred_f   = factor(pred_val, levels = levels_vec, labels = label_vec)
+    ) %>%
+    select(tokens_c, pred_f, estimate, lo, hi)
+}
+
+# ── Predictor summary from a loaded fit ───────────────────────────────────────
+pred_summary <- function(fit, slug) {
+  d    <- fit$data
+  vars <- intersect(c("genpref_c", "freq_prob_c", "log_total_c", "tokens_c"), names(d))
+  var_labels <- c(
+    genpref_c   = "GenPref",
+    freq_prob_c = "RelFreq (P(alpha)−0.5)",
+    log_total_c = "Overall freq (ln total)",
+    tokens_c    = "Checkpoint (tokens, z)"
+  )
+  purrr::map_dfr(vars, function(v) {
+    x <- d[[v]]
+    tibble(
+      model    = slug,
+      variable = var_labels[v],
+      n        = sum(!is.na(x)),
+      min      = round(min(x,    na.rm = TRUE), 3),
+      median   = round(median(x, na.rm = TRUE), 3),
+      mean     = round(mean(x,   na.rm = TRUE), 3),
+      max      = round(max(x,    na.rm = TRUE), 3)
+    )
+  })
+}
+
+# ── Discover saved models from the models/ directory ─────────────────────────
+# Each fit was saved as  <prefix><slug>.rds  where prefix is one of:
+#   sg_final_, sg_pooled_, sg_ckpt_, pref_final_, pref_pooled_, pref_ckpt_
+# The slug is  tolower(gsub("[^a-z0-9]", "_", model_name)).
+# parse_corpus() / parse_size() are designed to match slug patterns directly.
+list_fits <- function(prefix) {
+  pat   <- paste0("^", prefix, ".+\\.rds$")
+  paths <- list.files(MODELS_DIR, pattern = pat, full.names = TRUE)
+  if (length(paths) == 0)
+    warning(sprintf("No .rds files found for prefix '%s' in '%s'", prefix, MODELS_DIR))
+  paths
+}
+```
+
+---
+
+## Discover fitted models
+
+```{r path-diagnostic}
+cat("Working directory:", getwd(), "\n")
+cat("MODELS_DIR resolves to:", normalizePath(MODELS_DIR, mustWork = FALSE), "\n")
+cat("Directory exists:", dir.exists(MODELS_DIR), "\n\n")
+
+all_rds <- list.files(MODELS_DIR, pattern = "\\.rds$", full.names = FALSE)
+cat(sprintf("%d .rds file(s) found in models dir:\n", length(all_rds)))
+cat(paste(" ", all_rds, collapse = "\n"), "\n")
+```
+
+```{r discover-models}
+# We discover what's available rather than hard-coding model names.
+# All six prefixes:
+PREFIXES <- c(
+  sg_final   = "sg_final_",
+  sg_pooled  = "sg_pooled_",
+  sg_ckpt    = "sg_ckpt_",
+  pref_final = "pref_final_",
+  pref_pooled= "pref_pooled_",
+  pref_ckpt  = "pref_ckpt_"
+)
+
+available <- map(PREFIXES, list_fits)
+walk2(names(available), available, ~ {
+  cat(sprintf("%-12s : %d file(s)\n", .x, length(.y)))
+  walk(.y, ~ cat("  ", basename(.x), "\n"))
+})
+```
+
+---
+
+# Part I — Signed Gap
+
+---
+
+## Analysis 1: Signed Gap — Final Checkpoint
+
+```{r sg-final-coefs, fig.width=13, fig.height=7}
+sg_results_final <- map(available$sg_final, function(path) {
+  slug <- sub("\\.rds$", "", sub("^sg_final_", "", basename(path)))
+  message("Loading: ", basename(path))
+  fit  <- readRDS(path)
+  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
+               summ  = pred_summary(fit, slug))
+  rm(fit); gc()
+  res
+})
+sg_coefs_final <- map_dfr(sg_results_final, "coefs")
+
+cat("=== Predictor ranges ===\n")
+print(map_dfr(sg_results_final, "summ"), n = Inf)
+
+coef_plot(
+  sg_coefs_final,
+  title    = "Predictors of signed gap — final checkpoint",
+  subtitle = "signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  * = CI excludes zero"
+)
+```
+
+---
+
+## Analysis 2: Signed Gap — Checkpoints Pooled
+
+```{r sg-pooled-coefs, fig.width=13, fig.height=7}
+sg_results_pooled <- map(available$sg_pooled, function(path) {
+  slug <- sub("\\.rds$", "", sub("^sg_pooled_", "", basename(path)))
+  message("Loading: ", basename(path))
+  fit  <- readRDS(path)
+  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
+               summ  = pred_summary(fit, slug))
+  rm(fit); gc()
+  res
+})
+sg_coefs_pooled <- map_dfr(sg_results_pooled, "coefs")
+
+cat("=== Predictor ranges ===\n")
+print(map_dfr(sg_results_pooled, "summ"), n = Inf)
+
+coef_plot(
+  sg_coefs_pooled,
+  title    = "Predictors of signed gap — all checkpoints pooled",
+  subtitle = "signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  * = CI excludes zero"
+)
+```
+
+---
+
+## Analysis 3: Signed Gap — Checkpoint-Interacted
+
+### Plot 3a: Coefficients
+
+```{r sg-ckpt-coefs, fig.width=14, fig.height=7}
+sg_results_ckpt <- map(available$sg_ckpt, function(path) {
+  slug <- sub("\\.rds$", "", sub("^sg_ckpt_", "", basename(path)))
+  message("Loading: ", basename(path))
+  fit  <- readRDS(path)
+  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS_CK, TERM_LABELS_CK),
+               summ  = pred_summary(fit, slug))
+  rm(fit); gc()
+  res
+})
+sg_coefs_ckpt <- map_dfr(sg_results_ckpt, "coefs")
+
+cat("=== Predictor ranges ===\n")
+print(map_dfr(sg_results_ckpt, "summ"), n = Inf)
+
+coef_plot(
+  sg_coefs_ckpt,
+  title    = "Predictors of signed gap — checkpoint as continuous predictor",
+  subtitle = "signed_gap ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1|binom)  |  * = CI excludes zero"
+)
+```
+
+### Plot 3b: Marginal Effects Over Training
+
+```{r sg-ckpt-marginal, fig.width=14, fig.height=10}
+# Load each ckpt fit once and compute all three marginal grids, then plot.
+sg_marginal_all <- tibble()
+
+for (path in available$sg_ckpt) {
+  slug   <- sub("\\.rds$", "", sub("^sg_ckpt_", "", basename(path)))
+  message("Marginals: ", basename(path))
+  fit    <- readRDS(path)
+
+  for (spec in PRED_SPECS) {
+    sg_marginal_all <- bind_rows(
+      sg_marginal_all,
+      pred_grid_for(spec$var, spec$vals, spec$labels, fit) %>%
+        mutate(
+          predictor   = spec$var,
+          model_label = slug,
+          corpus      = parse_corpus(slug),
+          model_size  = factor(parse_size(slug), levels = SIZE_LEVELS)
+        )
+    )
+  }
+  rm(fit); gc()
+}
+
+if (nrow(sg_marginal_all) == 0) {
+  message("No sg_ckpt marginal data available — skipping plots.")
+} else {
+  for (spec in PRED_SPECS) {
+    df <- filter(sg_marginal_all, predictor == spec$var)
+    if (nrow(df) == 0) { message("No marginal data for: ", spec$title); next }
+    p  <- ggplot(df, aes(x = tokens_c, y = estimate,
+                         colour = pred_f, fill = pred_f)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      scale_colour_manual(values = spec$cols, name = NULL) +
+      scale_fill_manual(values   = spec$cols, name = NULL) +
+      scale_x_continuous(name = "Checkpoint  (tokens, z-scored within model)") +
+      scale_y_continuous(name = "Predicted signed gap") +
+      facet_wrap(~ model_label, scales = "free_y", ncol = 3) +
+      labs(title    = spec$title,
+           subtitle = "Other predictors held at 0  |  95% posterior credible ribbon  |  population-level") +
+      theme_bw(base_size = 11) +
+      theme(legend.position = "bottom", panel.grid.minor = element_blank())
+    print(p)
+  }
+}
+```
+
+---
+
+# Part II — Preference
+
+---
+
+## Analysis 4: Preference — Final Checkpoint
+
+```{r pref-final-coefs, fig.width=13, fig.height=7}
+pref_results_final <- map(available$pref_final, function(path) {
+  slug <- sub("\\.rds$", "", sub("^pref_final_", "", basename(path)))
+  message("Loading: ", basename(path))
+  fit  <- readRDS(path)
+  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
+               summ  = pred_summary(fit, slug))
+  rm(fit); gc()
+  res
+})
+pref_coefs_final <- map_dfr(pref_results_final, "coefs")
+
+cat("=== Predictor ranges ===\n")
+print(map_dfr(pref_results_final, "summ"), n = Inf)
+
+coef_plot(
+  pref_coefs_final,
+  title    = "Predictors of preference — final checkpoint",
+  subtitle = "preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  * = CI excludes zero"
+)
+```
+
+---
+
+## Analysis 5: Preference — Checkpoints Pooled
+
+```{r pref-pooled-coefs, fig.width=13, fig.height=7}
+pref_results_pooled <- map(available$pref_pooled, function(path) {
+  slug <- sub("\\.rds$", "", sub("^pref_pooled_", "", basename(path)))
+  message("Loading: ", basename(path))
+  fit  <- readRDS(path)
+  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
+               summ  = pred_summary(fit, slug))
+  rm(fit); gc()
+  res
+})
+pref_coefs_pooled <- map_dfr(pref_results_pooled, "coefs")
+
+cat("=== Predictor ranges ===\n")
+print(map_dfr(pref_results_pooled, "summ"), n = Inf)
+
+coef_plot(
+  pref_coefs_pooled,
+  title    = "Predictors of preference — all checkpoints pooled",
+  subtitle = "preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  * = CI excludes zero"
+)
+```
+
+---
+
+## Analysis 6: Preference — Checkpoint-Interacted
+
+### Plot 6a: Coefficients
+
+```{r pref-ckpt-coefs, fig.width=14, fig.height=7}
+pref_results_ckpt <- map(available$pref_ckpt, function(path) {
+  slug <- sub("\\.rds$", "", sub("^pref_ckpt_", "", basename(path)))
+  message("Loading: ", basename(path))
+  fit  <- readRDS(path)
+  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS_CK, TERM_LABELS_CK),
+               summ  = pred_summary(fit, slug))
+  rm(fit); gc()
+  res
+})
+pref_coefs_ckpt <- map_dfr(pref_results_ckpt, "coefs")
+
+cat("=== Predictor ranges ===\n")
+print(map_dfr(pref_results_ckpt, "summ"), n = Inf)
+
+coef_plot(
+  pref_coefs_ckpt,
+  title    = "Predictors of preference — checkpoint as continuous predictor",
+  subtitle = "preference ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1|binom)  |  * = CI excludes zero"
+)
+```
+
+### Plot 6b: Marginal Effects Over Training
+
+```{r pref-ckpt-marginal, fig.width=14, fig.height=10}
+pref_marginal_all <- tibble()
+
+for (path in available$pref_ckpt) {
+  slug   <- sub("\\.rds$", "", sub("^pref_ckpt_", "", basename(path)))
+  message("Marginals: ", basename(path))
+  fit    <- readRDS(path)
+
+  for (spec in PRED_SPECS) {
+    pref_marginal_all <- bind_rows(
+      pref_marginal_all,
+      pred_grid_for(spec$var, spec$vals, spec$labels, fit) %>%
+        mutate(
+          predictor   = spec$var,
+          model_label = slug,
+          corpus      = parse_corpus(slug),
+          model_size  = factor(parse_size(slug), levels = SIZE_LEVELS)
+        )
+    )
+  }
+  rm(fit); gc()
+}
+
+if (nrow(pref_marginal_all) == 0) {
+  message("No pref_ckpt marginal data available — skipping plots.")
+} else {
+  for (spec in PRED_SPECS) {
+    df <- filter(pref_marginal_all, predictor == spec$var)
+    if (nrow(df) == 0) { message("No marginal data for: ", spec$title); next }
+    p  <- ggplot(df, aes(x = tokens_c, y = estimate,
+                         colour = pred_f, fill = pred_f)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
+      geom_line(linewidth = 0.9) +
+      scale_colour_manual(values = spec$cols, name = NULL) +
+      scale_fill_manual(values   = spec$cols, name = NULL) +
+      scale_x_continuous(name = "Checkpoint  (tokens, z-scored within model)") +
+      scale_y_continuous(name = "Predicted preference") +
+      facet_wrap(~ model_label, scales = "free_y", ncol = 3) +
+      labs(title    = spec$title,
+           subtitle = "Other predictors held at 0  |  95% posterior credible ribbon  |  population-level") +
+      theme_bw(base_size = 11) +
+      theme(legend.position = "bottom", panel.grid.minor = element_blank())
+    print(p)
+  }
+}
+```

@@ -284,13 +284,8 @@ MODELS_LIST <- sort(dbGetQuery(con, "SELECT DISTINCT model FROM ckpt")$model)
 cat(sprintf("Models found: %d\n", length(MODELS_LIST)))
 print(MODELS_LIST)
 
-# Global centring constant — fast aggregation, no full load into R
-MEAN_LOG_TOTAL <- dbGetQuery(con, "
-  SELECT AVG(LN(ROUND(alpha_seen) + ROUND(beta_seen))) AS m
-  FROM ckpt
-  WHERE alpha_seen > 0 AND beta_seen > 0
-")$m
-message(sprintf("Global mean log_total: %.4f", MEAN_LOG_TOTAL))
+# log_total_c is now z-scored within each model's data (see load_model_data),
+# so no global constant is needed here.
 
 dbDisconnect(con, shutdown = TRUE)
 rm(con)
@@ -407,8 +402,8 @@ load_model_data <- function(m, final_only = FALSE, scale_tokens = FALSE,
     mutate(
       signed_gap  = preference - log_freq_ratio,
       freq_prob_c = plogis(log_freq_ratio) - 0.5,
-      genpref_c   = genpref   - MEAN_GENPREF,
-      log_total_c = log_total - MEAN_LOG_TOTAL,
+      genpref_c   = genpref - MEAN_GENPREF,
+      log_total_c = as.numeric(scale(log_total)),   # z-scored within this model's data
       tokens_c    = if (scale_tokens) as.numeric(scale(tokens)) else NA_real_
     )
 }

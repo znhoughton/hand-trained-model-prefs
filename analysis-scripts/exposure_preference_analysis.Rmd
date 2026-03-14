@@ -522,7 +522,7 @@ reg_coefs <- reg_data %>%
     if (is.na(sd_lfr) || sd_lfr == 0 ||
         is.na(sd_gp)  || sd_gp  == 0 ||
         is.na(sd_lt)  || sd_lt  == 0) return(NULL)
-    g2 <- g %>% mutate(log_total_c = log_total - mean(log_total, na.rm = TRUE))
+    g2 <- g %>% mutate(log_total_c = as.numeric(scale(log_total)))
     fit <- lm(mean_preference ~ log_freq_ratio * log_total_c +
                 genpref * log_total_c,
               data = g2)
@@ -587,7 +587,7 @@ reg_pooled <- reg_data %>%
     if (is.na(sd_lfr) || sd_lfr == 0 ||
         is.na(sd_gp)  || sd_gp  == 0 ||
         is.na(sd_lt)  || sd_lt  == 0) return(NULL)
-    g2 <- g %>% mutate(log_total_c = log_total - mean(log_total, na.rm = TRUE))
+    g2 <- g %>% mutate(log_total_c = as.numeric(scale(log_total)))
     fit <- lmer(mean_preference ~ log_freq_ratio * log_total_c +
                   genpref * log_total_c + (1 | binom),
                 data    = g2,
@@ -832,7 +832,7 @@ vd_data <- vd_raw %>%
   mutate(
     freq_prob_c = plogis(log_freq_ratio) - 0.5,
     genpref_c   = genpref - mean(genpref, na.rm = TRUE),
-    log_total_c = log_total - mean(log_total, na.rm = TRUE)
+    log_total_c = as.numeric(scale(log_total))
   )
 
 cat(sprintf("Predictors centred: genpref mean = %.4f  (range: [%.4f, %.4f])\n",
@@ -1091,7 +1091,7 @@ cat(sprintf("Final-checkpoint subset: %d observations, %d unique binomials\n",
 # ── Bayesian linear mixed model: signed gap ~ predictors + (1|binom) ──────────
 # freq_prob_c  = P(alpha in corpus) - 0.5  (what corpus predicts, centred)
 # genpref_c    = GenPref - mean            (linguistic preference, centred)
-# log_total_c  = log(total_seen) - mean    (overall exposure, centred)
+# log_total_c  = scale(log(total_seen))    (overall exposure, z-scored)
 gd_fit <- brm(
   signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1 | binom),
   data   = gd_final,
