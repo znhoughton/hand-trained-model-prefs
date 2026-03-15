@@ -24,3 +24,9 @@ processing file: genpref_per_model_analysis.Rmd
 20/48 [sg-plot1]          
 21/48                     
 22/48 [sg-analysis2-fit]  
+23/48                     
+24/48 [sg-plot2a]         
+25/48                     
+26/48 [sg-plot2b]         
+27/48                     
+28/48 [sg-analysis3-fit]  
