@@ -58,6 +58,14 @@ SIZE_COLOURS <- c("125M" = "#1b7837", "350M" = "#762a83", "1.3B" = "#b2182b")
 
 N_TRAJ_CHECKPOINTS <- 20   # must match the value used when fitting
 
+# Path to the checkpoint CSV — used only to recover per-checkpoint token counts
+# for trajectory plot x-axes.  Set to NULL to disable (x-axis will be NA).
+CSV_PATH <- tryCatch(
+  normalizePath("../Data/processed/checkpoint_results_with_exposures.csv",
+                mustWork = TRUE),
+  error = function(e) NULL
+)
+
 PRED_SPECS <- list(
   list(
     var    = "genpref_c",
@@ -87,6 +95,41 @@ PRED_SPECS <- list(
     title  = "Effect of Overall Frequency over training"
   )
 )
+```
+
+```{r build-traj-meta, message=TRUE}
+# Build a lookup table: slug × ck_idx → actual token count.
+# brms only stores formula variables in fit$data, so 'tokens' is absent from the
+# per-checkpoint .rds files.  We recover token counts by replaying the same
+# sample_checkpoints() logic used during fitting — a fast, read-only DuckDB query.
+if (!is.null(CSV_PATH)) {
+  library(duckdb)
+  CSV_PATH_FWD <- gsub("\\\\", "/", CSV_PATH)
+  con_meta <- dbConnect(duckdb::duckdb())
+  dbExecute(con_meta, sprintf(
+    "CREATE VIEW ckpt AS SELECT * FROM read_csv_auto('%s')", CSV_PATH_FWD
+  ))
+  models_meta <- sort(dbGetQuery(con_meta,
+    "SELECT DISTINCT model FROM ckpt")$model)
+
+  TRAJ_META <- bind_rows(lapply(models_meta, function(m) {
+    slug      <- tolower(gsub("[^a-z0-9]", "_", m))
+    all_ckpts <- dbGetQuery(con_meta, sprintf(
+      "SELECT DISTINCT tokens FROM ckpt WHERE model = '%s' ORDER BY tokens",
+      gsub("'", "''", m)
+    ))$tokens
+    n   <- min(N_TRAJ_CHECKPOINTS, length(all_ckpts))
+    idx <- unique(round(seq(1, length(all_ckpts), length.out = n)))
+    tibble(slug = slug, ck_idx = seq_along(idx), tokens = all_ckpts[idx])
+  }))
+
+  dbDisconnect(con_meta, shutdown = TRUE); rm(con_meta, CSV_PATH_FWD, models_meta)
+  message(sprintf("TRAJ_META: %d models, %d checkpoint rows total",
+                  n_distinct(TRAJ_META$slug), nrow(TRAJ_META)))
+} else {
+  TRAJ_META <- NULL
+  warning("CSV not found — trajectory x-axis will be NA (set CSV_PATH in the config chunk)")
+}
 ```
 
 ```{r helpers}
@@ -248,27 +291,15 @@ trajectory_plot <- function(traj_df, title, subtitle,
 
 # ── Stats plot (predictor distributions over checkpoints) ────────────────────
 stats_plot <- function(stats_df, title) {
-  if (nrow(stats_df) == 0 || all(is.na(stats_df$log_total_mean))) {
-    message("No stats data (log_total not stored in fit$data) — skipping: ", title)
+  if (nrow(stats_df) == 0) {
+    message("No stats data available — skipping: ", title)
     return(invisible(NULL))
   }
-  p_exp <- ggplot(stats_df,
-                  aes(x = tokens / 1e6, colour = model_size, fill = model_size,
-                      group = model_name)) +
-    geom_ribbon(aes(ymin = log_total_mean - log_total_sd,
-                    ymax = log_total_mean + log_total_sd),
-                alpha = 0.15, colour = NA) +
-    geom_line(aes(y = log_total_mean), linewidth = 0.8) +
-    geom_point(aes(y = log_total_mean), size = 2) +
-    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
-    scale_x_continuous("Training tokens (millions)") +
-    scale_y_continuous("Mean log(total_seen)  [raw, before z-scoring]") +
-    facet_wrap(~ corpus, scales = "free_x") +
-    labs(title    = title,
-         subtitle = "Mean ± 1 SD of raw log(total_seen) — justifies per-checkpoint z-scoring") +
-    theme_bw(base_size = 11) +
-    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+  if (all(is.na(stats_df$tokens))) {
+    message("All token counts are NA (TRAJ_META not built) — skipping: ", title)
+    return(invisible(NULL))
+  }
+  has_log_total <- !all(is.na(stats_df$log_total_mean))
 
   p_n <- ggplot(stats_df,
                 aes(x = tokens / 1e6, y = n_items,
@@ -277,18 +308,159 @@ stats_plot <- function(stats_df, title) {
     geom_point(size = 2) +
     scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
     scale_x_continuous("Training tokens (millions)") +
-    scale_y_continuous("N item pairs with total_seen > 0") +
+    scale_y_continuous("N item pairs with data") +
     facet_wrap(~ corpus, scales = "free_x") +
-    labs(subtitle = "Item coverage per checkpoint") +
+    labs(title = title, subtitle = "Item coverage per checkpoint") +
     theme_bw(base_size = 11) +
     theme(legend.position = "bottom", panel.grid.minor = element_blank())
 
-  print(p_exp / p_n)
+  if (has_log_total) {
+    p_exp <- ggplot(stats_df,
+                    aes(x = tokens / 1e6, colour = model_size, fill = model_size,
+                        group = model_name)) +
+      geom_ribbon(aes(ymin = log_total_mean - log_total_sd,
+                      ymax = log_total_mean + log_total_sd),
+                  alpha = 0.15, colour = NA) +
+      geom_line(aes(y = log_total_mean), linewidth = 0.8) +
+      geom_point(aes(y = log_total_mean), size = 2) +
+      scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+      scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+      scale_x_continuous("Training tokens (millions)") +
+      scale_y_continuous("Mean log(total_seen)  [raw, before z-scoring]") +
+      facet_wrap(~ corpus, scales = "free_x") +
+      labs(subtitle = "Mean ± 1 SD of raw log(total_seen) — justifies per-checkpoint z-scoring") +
+      theme_bw(base_size = 11) +
+      theme(legend.position = "bottom", panel.grid.minor = element_blank())
+    print(p_exp / p_n)
+  } else {
+    print(p_n)
+  }
+}
+
+# ── GenPref significance timeline ────────────────────────────────────────────
+# Supplementary strip chart: one coloured square per model × sampled checkpoint.
+#   Blue  = 95% CI entirely above 0 (reliably positive)
+#   Red   = 95% CI entirely below 0 (reliably negative)
+#   Grey  = CI spans 0 (n.s.)
+# Square size also encodes |estimate| so you can see effect-size trends.
+# Use directly after trajectory_plot() — same traj_df input.
+genpref_sig_timeline <- function(traj_df, title = NULL,
+                                 focus_term = "GenPref") {
+  if (nrow(traj_df) == 0) return(invisible(NULL))
+
+  df <- traj_df %>%
+    filter(as.character(term) == focus_term)
+
+  if (nrow(df) == 0) {
+    message("Term '", focus_term, "' not found in trajectory data — skipping sig timeline.")
+    return(invisible(NULL))
+  }
+  if (all(is.na(df$tokens))) {
+    message("All token counts NA — skipping sig timeline.")
+    return(invisible(NULL))
+  }
+
+  df <- df %>%
+    mutate(
+      # P(beta > 0): normal approximation from posterior mean and SD
+      # (posterior is nearly Gaussian for brms fixef; exact draws not needed)
+      p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+      pct_label = sprintf("%.0f%%", p_gt0 * 100)
+    )
+
+  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    # CI bar in model-size colour (consistent with other plots)
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = model_size),
+                   linewidth = 0.7, alpha = 0.55) +
+    # Point filled by P(β > 0): blue = posterior mostly positive,
+    #                            red  = posterior mostly negative,
+    #                            grey = uncertain (~50%)
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.2, colour = "grey25", stroke = 0.35) +
+    # Percentage label nudged above each point
+    geom_text(aes(label = pct_label, y = hi),
+              size = 2.1, vjust = -0.5, colour = "grey25") +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_gradient2(
+      low      = "#b2182b", mid = "grey93", high = "#2166ac",
+      midpoint = 0.5, limits = c(0, 1),
+      name     = "P(\u03b2 > 0)",
+      labels   = scales::percent_format(accuracy = 1)
+    ) +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous(paste(focus_term, "coefficient (95% CI)")) +
+    # One panel per model: corpus rows × size columns
+    facet_grid(corpus ~ model_size, scales = "free_y") +
+    labs(
+      title    = title %||% paste(focus_term, "\u2014 coefficient & P(\u03b2 > 0) over training"),
+      subtitle = paste0(
+        "Point fill = % posterior with \u03b2 > 0  |  ",
+        "blue > 50% (positive), red < 50% (negative), grey \u2248 50% (uncertain)  |  ",
+        "bar = 95% CI"
+      )
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank(),
+      strip.text       = element_text(size = 9)
+    )
+}
+
+# ── Raw signed_gap descriptive summaries from trajectory fits ─────────────────
+# Extracts fit$data to compute mean signed_gap and mean |signed_gap| per
+# checkpoint. Returns a single tibble with one row per model × checkpoint.
+load_traj_gap_summary <- function(traj_prefix) {
+  paths <- list_fits(traj_prefix)
+  if (length(paths) == 0) return(tibble())
+
+  all_rows <- vector("list", length(paths))
+
+  for (i in seq_along(paths)) {
+    path  <- paths[i]
+    fname <- sub("\\.rds$", "", basename(path))
+    fname_no_prefix <- sub(paste0("^", traj_prefix), "", fname)
+    slug   <- sub("_ck[0-9]+$", "", fname_no_prefix)
+    ck_idx <- as.integer(sub("^.*_ck([0-9]+)$", "\\1", fname_no_prefix))
+
+    ck_tokens <- if (!is.null(TRAJ_META)) {
+      row <- filter(TRAJ_META, .data$slug == !!slug, .data$ck_idx == !!ck_idx)
+      if (nrow(row) == 1) row$tokens else NA_real_
+    } else NA_real_
+
+    message("Descriptive load: ", basename(path))
+    fit <- readRDS(path)
+    d   <- fit$data
+    rm(fit); gc()
+
+    n    <- nrow(d)
+    m    <- mean(d$signed_gap,        na.rm = TRUE)
+    m_ab <- mean(abs(d$signed_gap),   na.rm = TRUE)
+    s    <- sd(d$signed_gap,          na.rm = TRUE)
+    s_ab <- sd(abs(d$signed_gap),     na.rm = TRUE)
+
+    all_rows[[i]] <- tibble(
+      slug = slug, ck_idx = ck_idx, tokens = ck_tokens,
+      corpus     = parse_corpus(slug),
+      model_size = factor(parse_size(slug), levels = SIZE_LEVELS),
+      n      = n,
+      mean   = m,    se   = s    / sqrt(n),
+      mean_abs = m_ab, se_abs = s_ab / sqrt(n)
+    ) %>%
+      mutate(lo95     = mean     - 1.96 * se,
+             hi95     = mean     + 1.96 * se,
+             lo95_abs = mean_abs - 1.96 * se_abs,
+             hi95_abs = mean_abs + 1.96 * se_abs)
+  }
+
+  bind_rows(all_rows)
 }
 
 # ── Load all checkpoint fits for one trajectory prefix ───────────────────────
-# Reads sg_traj_*_ck**.rds (or pref_traj_*) files one by one, extracts
-# coefficients (with the checkpoint token count) and raw predictor statistics.
+# brms only stores formula variables in fit$data, so 'tokens' is not present
+# in the per-checkpoint .rds files.  Token counts are recovered from TRAJ_META
+# (built once from DuckDB in the setup chunk below).
 # Returns list(coefs = tibble, stats = tibble).
 load_traj_results <- function(traj_prefix, term_levels, term_labels) {
   paths <- list_fits(traj_prefix)
@@ -303,46 +475,33 @@ load_traj_results <- function(traj_prefix, term_levels, term_labels) {
     # Strip prefix → e.g. "babylm_125m_ck01"; then strip "_ck##" → slug
     fname_no_prefix <- sub(paste0("^", traj_prefix), "", fname)
     slug            <- sub("_ck[0-9]+$", "", fname_no_prefix)
+    ck_idx          <- as.integer(sub("^.*_ck([0-9]+)$", "\\1", fname_no_prefix))
     message("Loading: ", basename(path))
 
-    fit <- readRDS(path)
-
-    # Token count is stored in fit$data$tokens (a column from the SQL query)
-    ck_tokens <- if ("tokens" %in% names(fit$data)) {
-      unique(fit$data$tokens)[1]
+    # Look up the actual token count from the pre-built metadata table
+    ck_tokens <- if (!is.null(TRAJ_META)) {
+      row <- filter(TRAJ_META, .data$slug == !!slug, .data$ck_idx == !!ck_idx)
+      if (nrow(row) == 1) row$tokens else NA_real_
     } else {
-      warning(sprintf("'tokens' column not in fit$data for %s", basename(path)))
       NA_real_
     }
+
+    fit <- readRDS(path)
 
     all_coefs[[i]] <- extract_coefs(fit, slug, term_levels, term_labels) %>%
       mutate(tokens = ck_tokens)
 
-    # Raw log_total stats (pre-z-score); present if brms retained the column
-    if ("log_total" %in% names(fit$data)) {
-      lt <- fit$data$log_total
-      all_stats[[i]] <- tibble(
-        model_name     = slug,
-        tokens         = ck_tokens,
-        corpus         = parse_corpus(slug),
-        model_size     = factor(parse_size(slug), levels = SIZE_LEVELS),
-        n_items        = nrow(fit$data),
-        log_total_mean = mean(lt, na.rm = TRUE),
-        log_total_sd   = sd(lt,   na.rm = TRUE),
-        log_total_min  = min(lt,  na.rm = TRUE),
-        log_total_max  = max(lt,  na.rm = TRUE)
-      )
-    } else {
-      # Fallback: report n_items only; stats_plot() will skip the exposure panel
-      all_stats[[i]] <- tibble(
-        model_name     = slug,    tokens     = ck_tokens,
-        corpus         = parse_corpus(slug),
-        model_size     = factor(parse_size(slug), levels = SIZE_LEVELS),
-        n_items        = nrow(fit$data),
-        log_total_mean = NA_real_, log_total_sd = NA_real_,
-        log_total_min  = NA_real_, log_total_max = NA_real_
-      )
-    }
+    all_stats[[i]] <- tibble(
+      model_name = slug,
+      tokens     = ck_tokens,
+      corpus     = parse_corpus(slug),
+      model_size = factor(parse_size(slug), levels = SIZE_LEVELS),
+      n_items    = nrow(fit$data),
+      # log_total (raw, pre-z-score) is not stored in fit$data; stats_plot()
+      # will skip the exposure panel when these are NA.
+      log_total_mean = NA_real_, log_total_sd  = NA_real_,
+      log_total_min  = NA_real_, log_total_max = NA_real_
+    )
 
     rm(fit); gc()
   }
@@ -397,6 +556,79 @@ walk2(names(available_traj), available_traj, ~ {
 
 ---
 
+# Descriptive: Signed Gap Over Training
+
+Raw outcome variable (signed gap) aggregated across items at each sampled
+checkpoint. No regression — pure descriptive summary. Uses the same
+`sg_traj_` files as Analysis 2.
+
+```{r desc-gap-load, message=TRUE}
+sg_gap_summary <- load_traj_gap_summary("sg_traj_")
+```
+
+## Plot D1: Mean Signed Gap
+
+Average signed gap across all items at each checkpoint. Shows whether
+models develop a directional bias (toward alpha or beta) over training and
+whether that bias is stable, grows, or reverses.
+
+```{r desc-gap-mean, fig.width=12, fig.height=5}
+if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
+  ggplot(sg_gap_summary,
+         aes(x = tokens / 1e6, y = mean,
+             colour = model_size, fill = model_size, group = slug)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_ribbon(aes(ymin = lo95, ymax = hi95), alpha = 0.15, colour = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Mean signed gap  (95% CI of mean)") +
+    facet_grid(corpus ~ ., scales = "free_x") +
+    labs(
+      title    = "Mean signed gap over training — all items pooled",
+      subtitle = "Positive = model rates alpha higher on average; negative = rates beta higher  |  ribbon = 95% CI of mean"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+} else {
+  message("No data for mean signed gap plot.")
+}
+```
+
+## Plot D2: Mean Absolute Signed Gap
+
+Average of |signed gap| at each checkpoint. Shows whether models become
+more decisive (larger gaps) or more uncertain (gaps shrinking toward zero)
+as training progresses, regardless of direction.
+
+```{r desc-gap-abs, fig.width=12, fig.height=5}
+if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
+  ggplot(sg_gap_summary,
+         aes(x = tokens / 1e6, y = mean_abs,
+             colour = model_size, fill = model_size, group = slug)) +
+    geom_ribbon(aes(ymin = lo95_abs, ymax = hi95_abs), alpha = 0.15, colour = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Mean |signed gap|  (95% CI of mean)") +
+    facet_grid(corpus ~ ., scales = "free_x") +
+    labs(
+      title    = "Mean absolute signed gap over training — all items pooled",
+      subtitle = "Higher = model makes larger rating differences between alpha and beta  |  ribbon = 95% CI of mean"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+} else {
+  message("No data for absolute signed gap plot.")
+}
+```
+
+---
+
 # Part I — Signed Gap
 
 ---
@@ -446,6 +678,15 @@ trajectory_plot(
   sg_traj$coefs,
   title    = "Signed gap predictors over training — 20 sampled checkpoints",
   subtitle = "brms at each checkpoint  |  log_total_c z-scored within checkpoint  |  ribbon = 95% CI  |  * = CI excludes zero"
+)
+```
+
+### Plot 2c: GenPref Significance Over Training
+
+```{r sg-traj-sig, fig.width=12, fig.height=3.5}
+genpref_sig_timeline(
+  sg_traj$coefs,
+  title = "GenPref significance over training — signed gap models"
 )
 ```
 
@@ -579,6 +820,15 @@ trajectory_plot(
   pref_traj$coefs,
   title    = "Preference predictors over training — 20 sampled checkpoints",
   subtitle = "brms at each checkpoint  |  log_total_c z-scored within checkpoint  |  ribbon = 95% CI  |  * = CI excludes zero"
+)
+```
+
+### Plot 5c: GenPref Significance Over Training
+
+```{r pref-traj-sig, fig.width=12, fig.height=3.5}
+genpref_sig_timeline(
+  pref_traj$coefs,
+  title = "GenPref significance over training — preference models"
 )
 ```
 

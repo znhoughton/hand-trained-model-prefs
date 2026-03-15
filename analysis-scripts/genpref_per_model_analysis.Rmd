@@ -631,7 +631,7 @@ message(sprintf("furrr plan: %s with %d workers", class(plan())[1], N_PARALLEL_M
 
 A positive value means the model is *more* alpha-preferring than corpus frequency
 alone predicts; negative means *less*.  Predictors: `genpref_c` (GenPref,
-centred), `freq_prob_c` (P(alpha in corpus) − 0.5), `log_total_c` (log total
+centered), `freq_prob_c` (P(alpha in corpus) − 0.5), `log_total_c` (log total
 exposures, z-scored within each model's data).
 
 ---
