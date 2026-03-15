@@ -36,3 +36,7 @@ processing file: genpref_per_model_analysis.Rmd
 32/48 [sg-plot3b]         
 33/48                     
 34/48 [pref-analysis4-fit]
+35/48                     
+36/48 [pref-plot4]        
+37/48                     
+38/48 [pref-analysis5-fit]
