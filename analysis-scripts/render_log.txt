@@ -40,3 +40,9 @@ processing file: genpref_per_model_analysis.Rmd
 36/48 [pref-plot4]        
 37/48                     
 38/48 [pref-analysis5-fit]
+39/48                     
+40/48 [pref-plot5a]       
+41/48                     
+42/48 [pref-plot5b]       
+43/48                     
+44/48 [pref-analysis6-fit]
