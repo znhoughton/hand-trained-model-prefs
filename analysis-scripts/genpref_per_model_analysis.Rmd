@@ -121,6 +121,13 @@ parse_size <- function(x) {
   )
 }
 
+TERM_LEVELS_ABSGAP <- c("tokens_c", "log_total_c", "log_total_c:tokens_c")
+TERM_LABELS_ABSGAP <- c(
+  "Checkpoint\n(tokens, z)",
+  "Overall freq\n(ln total, z within ckpt)",
+  "Checkpoint ×\nOverall freq"
+)
+
 SIZE_LEVELS  <- c("125M", "350M", "1.3B")
 SIZE_COLOURS <- c("125M" = "#1b7837", "350M" = "#762a83", "1.3B" = "#b2182b")
 
@@ -421,6 +428,47 @@ pred_grid_for <- function(predictor, levels_vec, label_vec, fit) {
     select(tokens_c, pred_f, estimate, lo, hi)
 }
 
+# ---------------------------------------------------------------------------
+# Absolute signed gap data loader
+# Aggregates over prompts; z-scores log_total WITHIN each checkpoint so that
+# between-item frequency variation is separated from training-stage variation.
+# ---------------------------------------------------------------------------
+load_absgap_data <- function(m) {
+  m_safe    <- gsub("'", "''", m)
+  con_local <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con_local, shutdown = TRUE))
+  dbExecute(con_local, sprintf(
+    "CREATE VIEW ckpt AS SELECT * FROM read_csv_auto('%s')", CSV_PATH_FWD
+  ))
+
+  dat <- dbGetQuery(con_local, sprintf("
+    SELECT
+      model, tokens, binom,
+      AVG(preference)                                    AS preference,
+      AVG(ROUND(alpha_seen) + ROUND(beta_seen))          AS total_seen,
+      AVG(CASE WHEN alpha_seen > 0 AND beta_seen > 0
+               THEN LN(alpha_seen / beta_seen)
+               ELSE NULL END)                            AS log_freq_ratio
+    FROM ckpt
+    WHERE model = '%s'
+    GROUP BY model, tokens, binom
+    ORDER BY tokens, binom
+  ", m_safe))
+
+  dat %>%
+    mutate(
+      total_seen = as.numeric(total_seen),
+      log_total  = if_else(total_seen > 0, log(total_seen), NA_real_)
+    ) %>%
+    filter(!is.na(log_freq_ratio), !is.na(log_total)) %>%
+    mutate(abs_signed_gap = abs(preference - log_freq_ratio)) %>%
+    group_by(tokens) %>%
+    mutate(log_total_c = as.numeric(scale(log_total))) %>%
+    ungroup() %>%
+    mutate(tokens_c = as.numeric(scale(tokens)))
+}
+
+# ---------------------------------------------------------------------------
 # Reloads each fit from its cached .rds one at a time — sequential, low memory
 marginal_plots_for <- function(file_prefix, ylab) {
   marginal_all <- tibble()
@@ -927,4 +975,43 @@ coef_plot(
 
 ```{r pref-plot6b, fig.width=14, fig.height=10}
 marginal_plots_for("pref_ckpt_", ylab = "Predicted preference")
+```
+
+---
+
+# Part III: Absolute Signed Gap — Training Stage × Item Frequency
+
+The previous analyses treat signed gap and raw preference as outcomes, asking which item-level predictors (GenPref, relative frequency, overall frequency) explain variation. This analysis instead models the *magnitude* of the signed gap — how far the model's preference deviates from the corpus frequency baseline, regardless of direction — as a function of training stage and item-level frequency exposure.
+
+The outcome is `abs_signed_gap = |preference − log_freq_ratio|`. The predictors are `tokens_c` (training progress, z-scored within model) and `log_total_c` (total times either form was seen in the corpus at that checkpoint, z-scored *within* checkpoint). Z-scoring `log_total_c` within each checkpoint rather than globally separates between-item variation — some binomials simply appear more in the corpus — from training-stage variation, since total exposure grows monotonically with training. This makes the two predictors approximately orthogonal, allowing the interaction to be interpreted cleanly: it asks whether the relationship between item-level frequency and gap magnitude changes over the course of training.
+
+Formula: `abs_signed_gap ~ tokens_c * log_total_c + (1 | binom)`
+
+```{r absgap-fit}
+absgap_coefs_ckpt <- future_map_dfr(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  message(sprintf("[%s] Fitting |signed gap| ~ tokens_c * log_total_c ...", m))
+
+  m_data <- load_absgap_data(m)
+
+  fit <- brm(
+    abs_signed_gap ~ tokens_c * log_total_c + (1 | binom),
+    data      = m_data,
+    family    = gaussian(),
+    prior     = BRMS_PRIORS,
+    iter      = BRMS_ITER,
+    warmup    = BRMS_WARMUP,
+    chains    = BRMS_CHAINS,
+    cores     = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("absgap_ckpt_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE,
+    silent    = BRMS_SILENT
+  )
+
+  coefs <- extract_coefs(fit, m, TERM_LEVELS_ABSGAP, TERM_LABELS_ABSGAP)
+  rm(fit, m_data); gc()
+  coefs
+}, .options = furrr_options(seed = TRUE))
 ```
