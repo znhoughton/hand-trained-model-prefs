@@ -258,7 +258,7 @@ load_single_checkpoint <- function(m, ck) {
     mutate(
       signed_gap  = preference - log_freq_ratio,
       freq_prob_c = plogis(log_freq_ratio) - 0.5,
-      genpref_c   = genpref - MEAN_GENPREF,
+      genpref_c   = genpref - 0.5,
       log_total_c = as.numeric(scale(log_total))  # z-scored within this checkpoint's items
     )
 }
@@ -562,7 +562,7 @@ GENPREF_FORMULA <- function(Form, Percept, Culture, Power, Intense,
        0.15241566 * Len     -
        0.19381657 * Lapse   +
        0.36019221 * BStress
-  (1 / (1 + exp(-y))) - 0.5
+  1 / (1 + exp(-y))
 }
 
 genpref_raw <- read_csv(human_path, show_col_types = FALSE) %>%
@@ -573,12 +573,7 @@ genpref_raw <- read_csv(human_path, show_col_types = FALSE) %>%
   slice(1) %>%
   ungroup() %>%
   mutate(
-    GenPref_norm = case_when(
-      is.na(GenPref) ~ NA_real_,
-      GenPref > 0.5  ~ GenPref - 0.5,
-      GenPref < -0.5 ~ GenPref,
-      TRUE           ~ GenPref - 0.5
-    ),
+    GenPref_norm = if_else(is.na(GenPref), NA_real_, GenPref),
     genpref = if_else(
       is.na(GenPref),
       GENPREF_FORMULA(Form, Percept, Culture, Power, Intense,
@@ -589,8 +584,7 @@ genpref_raw <- read_csv(human_path, show_col_types = FALSE) %>%
   ) %>%
   select(binom_lower, genpref)
 
-MEAN_GENPREF <- 0.5  # genpref runs 0–1; subtract 0.5 to center at the neutral midpoint
-message(sprintf("Centering genpref at: %.4f", MEAN_GENPREF))
+
 ```
 
 ```{r load-model-data-fn}
@@ -657,7 +651,7 @@ load_model_data <- function(m, final_only = FALSE, scale_tokens = FALSE,
     mutate(
       signed_gap  = preference - log_freq_ratio,
       freq_prob_c = plogis(log_freq_ratio) - 0.5,
-      genpref_c   = genpref - MEAN_GENPREF,
+      genpref_c   = genpref - 0.5,
       log_total_c = as.numeric(scale(log_total)),   # z-scored within this model's data
       tokens_c    = if (scale_tokens) as.numeric(scale(tokens)) else NA_real_
     )
