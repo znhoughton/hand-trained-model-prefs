@@ -589,8 +589,8 @@ genpref_raw <- read_csv(human_path, show_col_types = FALSE) %>%
   ) %>%
   select(binom_lower, genpref)
 
-MEAN_GENPREF <- mean(genpref_raw$genpref, na.rm = TRUE)
-message(sprintf("Global mean genpref: %.4f", MEAN_GENPREF))
+MEAN_GENPREF <- 0.5  # genpref runs 0–1; subtract 0.5 to center at the neutral midpoint
+message(sprintf("Centering genpref at: %.4f", MEAN_GENPREF))
 ```
 
 ```{r load-model-data-fn}

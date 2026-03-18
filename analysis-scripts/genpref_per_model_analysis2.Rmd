@@ -31,12 +31,12 @@ The predictors used in all regression models are:
 
 ```r
 freq_prob_c <- plogis(log_freq_ratio) - 0.5          # P(alpha in corpus) - 0.5; range ~ (-0.5, 0.5)
-genpref_c   <- genpref - mean(genpref)                # GenPref score, centered at sample mean
+genpref_c   <- genpref - 0.5                           # GenPref score, centered at neutral midpoint; range ~ (-0.5, 0.5)
 log_total_c <- scale(log(alpha_seen + beta_seen))     # log total exposures, z-scored (scope varies)
 tokens_c    <- scale(tokens)                          # training token count, z-scored within model
 ```
 
-`freq_prob_c` transforms `log_freq_ratio` to a probability scale via the logistic function and centers it at 0, so that 0 represents equal corpus frequency for alpha and beta, and ±0.5 represent the extremes. `genpref_c` is the human generic preference score (from a separate behavioural experiment), centered at the sample mean so that the intercept represents an item with average generic preference. Both `freq_prob_c` and `log_total_c` are checkpoint-specific: they are derived from `alpha_seen` and `beta_seen`, which accumulate over training.
+`freq_prob_c` transforms `log_freq_ratio` to a probability scale via the logistic function and centers it at 0, so that 0 represents equal corpus frequency for alpha and beta, and ±0.5 represent the extremes. `genpref_c` is the human generic preference score (from a separate behavioural experiment), centered at 0.5 (the neutral midpoint of the 0–1 scale) so that 0 represents no generic preference, and ±0.5 represent the extremes. This mirrors the centering of `freq_prob_c`. Both `freq_prob_c` and `log_total_c` are checkpoint-specific: they are derived from `alpha_seen` and `beta_seen`, which accumulate over training.
 
 **Z-scoring scope for `log_total_c`** varies across analyses and materially affects interpretation. Because total corpus exposure grows monotonically with training, z-scoring `log_total_c` globally would confound two distinct sources of variation: *between-item* differences (some binomials simply appear more in the corpus) and *between-checkpoint* differences (later checkpoints have seen more tokens overall). The analyses handle this as follows:
 
@@ -135,7 +135,7 @@ PRED_SPECS <- list(
 )
 ```
 
-```{r build-traj-meta, message=TRUE}
+```{r build-traj-meta, message=FALSE}
 # Build a lookup table: slug × ck_idx → actual token count.
 # brms only stores formula variables in fit$data, so 'tokens' is absent from the
 # per-checkpoint .rds files.  We recover token counts by replaying the same
@@ -560,7 +560,7 @@ load_traj_results <- function(traj_prefix, term_levels, term_labels) {
 
 ## Discover fitted models
 
-```{r path-diagnostic}
+```{r path-diagnostic, include=FALSE}
 cat("Working directory:", getwd(), "\n")
 cat("MODELS_DIR resolves to:", normalizePath(MODELS_DIR, mustWork = FALSE), "\n")
 cat("Directory exists:", dir.exists(MODELS_DIR), "\n\n")
@@ -589,16 +589,10 @@ TRAJ_PREFIXES <- c(
 available      <- map(PREFIXES,      list_fits)
 available_traj <- map(TRAJ_PREFIXES, list_fits)
 
-cat("=== Single-model fits ===\n")
-walk2(names(available), available, ~ {
-  cat(sprintf("%-12s : %d file(s)\n", .x, length(.y)))
-  walk(.y, ~ cat("  ", basename(.x), "\n"))
-})
-
-cat("\n=== Trajectory fits ===\n")
-walk2(names(available_traj), available_traj, ~ {
-  cat(sprintf("%-12s : %d file(s)\n", .x, length(.y)))
-})
+walk2(names(available), available,
+      ~ message(sprintf("%-12s : %d fit(s)", .x, length(.y))))
+walk2(names(available_traj), available_traj,
+      ~ message(sprintf("%-12s : %d fit(s)", .x, length(.y))))
 ```
 
 ---
@@ -614,7 +608,7 @@ preference     <- signed_gap + log_freq_ratio   # signed_gap = preference - log_
 
 Three summaries are plotted. **Mean signed gap** (D1) shows whether models have a systematic directional bias — over- or under-favoring alpha relative to corpus frequency on average. A mean of zero would indicate that, averaged across items, preferences match corpus statistics exactly; non-zero values indicate a systematic offset in one direction. **Mean absolute signed gap** (D2) discards direction and tracks only the size of deviations, asking whether models become more or less extreme over training. **Preference–frequency correlation** (D3) computes the Pearson correlation between `preference` and `log_freq_ratio` across items at each checkpoint, measuring how well the model's preference *ordering* across items tracks the corpus frequency ratio — without penalising for overall scale differences.
 
-```{r desc-gap-load, message=TRUE}
+```{r desc-gap-load, message=FALSE}
 sg_gap_summary <- load_traj_gap_summary("sg_traj_")
 ```
 
@@ -706,6 +700,80 @@ if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
 
 ---
 
+# Part III — Absolute Signed Gap
+
+**Motivation**: Plots D2 and D3 reveal an apparent paradox — the mean absolute signed gap grows over training (models' preferences become more extreme relative to the frequency baseline), while the preference–frequency correlation also improves (models better track the relative ordering of corpus frequencies across items). These two facts are compatible: a model can correctly rank items by frequency while scaling its preferences more aggressively than the frequency ratio warrants. This analysis tests both phenomena jointly in a regression framework.
+
+**Data**: all available checkpoints for each model, with preference averaged over the 51 prompts per (binomial, checkpoint). **Outcome**:
+
+```r
+abs_signed_gap <- abs(preference - log_freq_ratio)
+```
+
+**Predictors** and their transformations:
+
+```r
+tokens_c    <- scale(tokens)                          # z-scored within model's full token range
+log_total_c <- scale(log(alpha_seen + beta_seen))     # z-scored WITHIN each checkpoint's items
+```
+
+`tokens_c` captures training stage. `log_total_c` is z-scored *within each checkpoint* (same approach as Analyses 2 and 5) to keep the two predictors approximately orthogonal: because total corpus exposure grows monotonically with training, global z-scoring would confound between-item and between-checkpoint variation. Within-checkpoint z-scoring ensures `log_total_c` reflects only between-item differences in exposure at each training stage. The model is:
+
+$$\text{abs\_signed\_gap} \sim \text{tokens\_c} \times \text{log\_total\_c} + (1 \mid \text{binom})$$
+
+The interaction tests whether the effect of item-level exposure on gap magnitude changes linearly over the course of training (e.g., whether high-frequency items show disproportionately growing gaps). The main effect of `tokens_c` captures the overall growth (or shrinkage) of gap magnitude with training; the main effect of `log_total_c` captures whether more-exposed items show larger or smaller gaps at any given training stage.
+
+---
+
+## Plot P1: Coefficients
+
+Fixed-effect posterior means and 95% credible intervals for `tokens_c`, `log_total_c`, and their interaction, one fit per model-slug. Asterisks mark intervals excluding zero.
+
+```{r absgap-coefs, fig.width=13, fig.height=6, message=FALSE}
+absgap_results <- map(available$absgap_ckpt, function(path) {
+  slug <- sub("\\.rds$", "", sub("^absgap_ckpt_", "", basename(path)))
+  message("Loading: ", basename(path))
+  fit  <- readRDS(path)
+  coefs <- extract_coefs(fit, slug, TERM_LEVELS_ABSGAP, TERM_LABELS_ABSGAP)
+  rm(fit); gc()
+  coefs
+})
+absgap_coefs <- bind_rows(absgap_results)
+
+if (nrow(absgap_coefs) == 0) {
+  message("No absgap_ckpt fits found — run genpref_per_model_analysis.Rmd Part III first.")
+} else {
+  coef_plot(
+    absgap_coefs,
+    title    = "Predictors of |signed gap| — training stage x item frequency",
+    subtitle = "abs_signed_gap ~ tokens_c * log_total_c + (1|binom)  |  * = CI excludes zero"
+  )
+}
+```
+
+---
+
+## Table P1: Coefficient Summary
+
+Posterior means, standard errors, and 95% credible intervals for all fixed effects across models.
+
+```{r absgap-table}
+if (nrow(absgap_coefs) > 0) {
+  absgap_coefs %>%
+    mutate(term = gsub("\n", " ", as.character(term))) %>%
+    select(corpus, model_size, term, estimate, se, lo, hi) %>%
+    rename(
+      Corpus = corpus, Size = model_size, Term = term,
+      Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi
+    ) %>%
+    arrange(Corpus, Size, Term) %>%
+    knitr::kable(digits = 3,
+                 caption = "Posterior fixed effects: abs_signed_gap ~ tokens_c * log_total_c + (1|binom). Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds.")
+}
+```
+
+---
+
 # Part I — Signed Gap
 
 The signed gap (`signed_gap = preference - log_freq_ratio`) is the primary outcome. By subtracting the corpus frequency log-ratio from the model's log-probability preference, it isolates the portion of the model's preference that cannot be explained by how often each form appears in the training data. A positive coefficient for any predictor means that predictor is associated with the model preferring alpha *more than corpus frequency alone predicts*; a negative coefficient means less than predicted. This is the cleanest test of whether something beyond frequency — including generic human preferences — shapes the model's internal representations.
@@ -714,32 +782,42 @@ The signed gap (`signed_gap = preference - log_freq_ratio`) is the primary outco
 
 ## Analysis 1: Signed Gap — Final Checkpoint
 
-**Data**: all prompt-level rows at the model's final training checkpoint (51 prompts per binomial item, ~36,000 rows per model). **Outcome**: `signed_gap = preference - log_freq_ratio`. **Predictors**: `genpref_c` (GenPref centered at sample mean), `freq_prob_c` (= `plogis(log_freq_ratio) - 0.5`, bounded to ~(-0.5, 0.5)), `log_total_c` (= `scale(log(alpha_seen + beta_seen))`, z-scored across the final checkpoint's items). The model is:
+**Data**: all prompt-level rows at the model's final training checkpoint (51 prompts per binomial item, ~36,000 rows per model). **Outcome**: `signed_gap = preference - log_freq_ratio`. **Predictors**: `genpref_c` (= `genpref - 0.5`; range ~(-0.5, 0.5)), `freq_prob_c` (= `plogis(log_freq_ratio) - 0.5`, bounded to ~(-0.5, 0.5)), `log_total_c` (= `scale(log(alpha_seen + beta_seen))`, z-scored across the final checkpoint's items). The model is:
 
 $$\text{signed\_gap} \sim \text{genpref\_c} \times \text{log\_total\_c} + \text{freq\_prob\_c} \times \text{log\_total\_c} + (1 \mid \text{binom})$$
 
 The two-way interactions with `log_total_c` allow the effects of GenPref and relative frequency to vary with how much total exposure the model has had to each item pair. This is motivated by the expectation that frequency-driven effects may be stronger for items seen more often, and that sensitivity to human preferences may develop gradually through exposure. Because data comes from only the final checkpoint, `log_total_c` captures only between-item variation in total corpus frequency (i.e., some binomials just appear more often). Asterisks mark credible intervals that exclude zero.
 
-```{r sg-final-coefs, fig.width=13, fig.height=7}
-sg_results_final <- map(available$sg_final, function(path) {
+```{r sg-final-coefs, fig.width=13, fig.height=7, message=FALSE}
+sg_results_final <- map_dfr(available$sg_final, function(path) {
   slug <- sub("\\.rds$", "", sub("^sg_final_", "", basename(path)))
-  message("Loading: ", basename(path))
   fit  <- readRDS(path)
-  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
-               summ  = pred_summary(fit, slug))
+  coefs <- extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS)
   rm(fit); gc()
-  res
+  coefs
 })
-sg_coefs_final <- map_dfr(sg_results_final, "coefs")
-
-cat("=== Predictor ranges ===\n")
-print(map_dfr(sg_results_final, "summ"), n = Inf)
+sg_coefs_final <- sg_results_final
 
 coef_plot(
   sg_coefs_final,
   title    = "Predictors of signed gap — final checkpoint",
   subtitle = "signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  * = CI excludes zero"
 )
+```
+
+```{r sg-final-table}
+if (nrow(sg_coefs_final) > 0) {
+  sg_coefs_final %>%
+    mutate(term = gsub("\n", " ", as.character(term))) %>%
+    select(corpus, model_size, term, estimate, se, lo, hi) %>%
+    rename(
+      Corpus = corpus, Size = model_size, Term = term,
+      Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi
+    ) %>%
+    arrange(Corpus, Size, Term) %>%
+    knitr::kable(digits = 3,
+                 caption = "Posterior fixed effects: signed_gap ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom). Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds.")
+}
 ```
 
 ---
@@ -790,24 +868,17 @@ $$\text{signed\_gap} \sim (\text{genpref\_c} + \text{freq\_prob\_c} + \text{log\
 
 **Z-scoring note**: in this analysis, `log_total_c = scale(log(alpha_seen + beta_seen))` is z-scored *across all checkpoints pooled within a model*, not within each checkpoint. This differs from Analysis 2. As a result, `log_total_c` here carries both between-item variation (some binomials appear more in the corpus) and some between-checkpoint variation (items seen in later checkpoints will tend to have higher total exposure). The `tokens_c` predictor is included to account for the training-stage component, but the two predictors are not fully orthogonal in this analysis. The interactions with `tokens_c` estimate whether each predictor's effect changes *linearly* with training stage — the key tradeoff relative to Analysis 2, which makes no linearity assumption but cannot directly estimate or test the training-stage interaction.
 
-The marginal effects in Plot 3b show predicted signed gap as a function of `tokens_c` for low (−0.25), neutral (0), and high (+0.25) values of each predictor, with other predictors held at 0.
-
 ### Plot 3a: Coefficients
 
-```{r sg-ckpt-coefs, fig.width=14, fig.height=7}
-sg_results_ckpt <- map(available$sg_ckpt, function(path) {
+```{r sg-ckpt-coefs, fig.width=14, fig.height=7, message=FALSE}
+sg_results_ckpt <- map_dfr(available$sg_ckpt, function(path) {
   slug <- sub("\\.rds$", "", sub("^sg_ckpt_", "", basename(path)))
-  message("Loading: ", basename(path))
   fit  <- readRDS(path)
-  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS_CK, TERM_LABELS_CK),
-               summ  = pred_summary(fit, slug))
+  coefs <- extract_coefs(fit, slug, TERM_LEVELS_CK, TERM_LABELS_CK)
   rm(fit); gc()
-  res
+  coefs
 })
-sg_coefs_ckpt <- map_dfr(sg_results_ckpt, "coefs")
-
-cat("=== Predictor ranges ===\n")
-print(map_dfr(sg_results_ckpt, "summ"), n = Inf)
+sg_coefs_ckpt <- sg_results_ckpt
 
 coef_plot(
   sg_coefs_ckpt,
@@ -816,54 +887,16 @@ coef_plot(
 )
 ```
 
-### Plot 3b: Marginal Effects Over Training
-
-```{r sg-ckpt-marginal, fig.width=14, fig.height=10}
-# Load each ckpt fit once and compute all three marginal grids, then plot.
-sg_marginal_all <- tibble()
-
-for (path in available$sg_ckpt) {
-  slug   <- sub("\\.rds$", "", sub("^sg_ckpt_", "", basename(path)))
-  message("Marginals: ", basename(path))
-  fit    <- readRDS(path)
-
-  for (spec in PRED_SPECS) {
-    sg_marginal_all <- bind_rows(
-      sg_marginal_all,
-      pred_grid_for(spec$var, spec$vals, spec$labels, fit) %>%
-        mutate(
-          predictor   = spec$var,
-          model_label = slug,
-          corpus      = parse_corpus(slug),
-          model_size  = factor(parse_size(slug), levels = SIZE_LEVELS)
-        )
-    )
-  }
-  rm(fit); gc()
-}
-
-if (nrow(sg_marginal_all) == 0) {
-  message("No sg_ckpt marginal data available — skipping plots.")
-} else {
-  for (spec in PRED_SPECS) {
-    df <- filter(sg_marginal_all, predictor == spec$var)
-    if (nrow(df) == 0) { message("No marginal data for: ", spec$title); next }
-    p  <- ggplot(df, aes(x = tokens_c, y = estimate,
-                         colour = pred_f, fill = pred_f)) +
-      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-      geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
-      geom_line(linewidth = 0.9) +
-      scale_colour_manual(values = spec$cols, name = NULL) +
-      scale_fill_manual(values   = spec$cols, name = NULL) +
-      scale_x_continuous(name = "Checkpoint  (tokens, z-scored within model)") +
-      scale_y_continuous(name = "Predicted signed gap") +
-      facet_wrap(~ model_label, scales = "free_y", ncol = 3) +
-      labs(title    = spec$title,
-           subtitle = "Other predictors held at 0  |  95% posterior credible ribbon  |  population-level") +
-      theme_bw(base_size = 11) +
-      theme(legend.position = "bottom", panel.grid.minor = element_blank())
-    print(p)
-  }
+```{r sg-ckpt-table}
+if (nrow(sg_coefs_ckpt) > 0) {
+  sg_coefs_ckpt %>%
+    mutate(term = gsub("\n", " ", as.character(term))) %>%
+    select(corpus, model_size, term, estimate, se, lo, hi) %>%
+    rename(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi) %>%
+    arrange(Corpus, Size, Term) %>%
+    knitr::kable(digits = 3,
+                 caption = "Posterior fixed effects: signed_gap ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1|binom).")
 }
 ```
 
@@ -879,24 +912,21 @@ The two outcome measures are therefore complementary. If GenPref predicts signed
 
 ## Analysis 4: Preference — Final Checkpoint
 
-**Data and transformations**: identical to Analysis 1 (final checkpoint, prompt-level rows, `log_total_c` z-scored within the final checkpoint's items). **Outcome**: raw `preference = alpha_logprob - nonalpha_logprob`.
+**Data**: all prompt-level rows at the model's final training checkpoint (51 prompts per binomial item, ~36,000 rows per model). **Outcome**: raw `preference = alpha_logprob - nonalpha_logprob`, the model's log-probability difference between the alpha and non-alpha form of each binomial pair. **Predictors**: `genpref_c` (= `genpref - 0.5`; range ~(-0.5, 0.5)), `freq_prob_c` (= `plogis(log_freq_ratio) - 0.5`), `log_total_c` (= `scale(log(alpha_seen + beta_seen))`, z-scored within the final checkpoint's items). The model is:
 
 $$\text{preference} \sim \text{genpref\_c} \times \text{log\_total\_c} + \text{freq\_prob\_c} \times \text{log\_total\_c} + (1 \mid \text{binom})$$
 
-```{r pref-final-coefs, fig.width=13, fig.height=7}
-pref_results_final <- map(available$pref_final, function(path) {
-  slug <- sub("\\.rds$", "", sub("^pref_final_", "", basename(path)))
-  message("Loading: ", basename(path))
-  fit  <- readRDS(path)
-  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS),
-               summ  = pred_summary(fit, slug))
-  rm(fit); gc()
-  res
-})
-pref_coefs_final <- map_dfr(pref_results_final, "coefs")
+This is structurally identical to Analysis 1, but the outcome is raw preference rather than signed gap. Corpus frequency is not subtracted from the outcome; instead, `freq_prob_c` enters as a predictor, controlling for relative frequency statistically. The `genpref_c` coefficient therefore reflects GenPref's contribution to preference *holding relative corpus frequency constant*, rather than its effect on the frequency-corrected residual. A positive `genpref_c` coefficient here could arise either because human generic preferences genuinely shape model representations, or because GenPref and corpus frequency are correlated (words humans prefer generically may also appear more often). Comparing this result to Analysis 1 — where frequency is subtracted from the outcome — helps distinguish those possibilities: if the GenPref effect is attenuated in Analysis 1 relative to Analysis 4, it suggests that part of the Analysis 4 effect is mediated by corpus frequency.
 
-cat("=== Predictor ranges ===\n")
-print(map_dfr(pref_results_final, "summ"), n = Inf)
+```{r pref-final-coefs, fig.width=13, fig.height=7, message=FALSE}
+pref_results_final <- map_dfr(available$pref_final, function(path) {
+  slug <- sub("\\.rds$", "", sub("^pref_final_", "", basename(path)))
+  fit  <- readRDS(path)
+  coefs <- extract_coefs(fit, slug, TERM_LEVELS, TERM_LABELS)
+  rm(fit); gc()
+  coefs
+})
+pref_coefs_final <- pref_results_final
 
 coef_plot(
   pref_coefs_final,
@@ -905,11 +935,28 @@ coef_plot(
 )
 ```
 
+```{r pref-final-table}
+if (nrow(pref_coefs_final) > 0) {
+  pref_coefs_final %>%
+    mutate(term = gsub("\n", " ", as.character(term))) %>%
+    select(corpus, model_size, term, estimate, se, lo, hi) %>%
+    rename(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi) %>%
+    arrange(Corpus, Size, Term) %>%
+    knitr::kable(digits = 3,
+                 caption = "Posterior fixed effects: preference ~ genpref_c * log_total_c + freq_prob_c * log_total_c + (1|binom).")
+}
+```
+
 ---
 
 ## Analysis 5: Preference — Per-Checkpoint Trajectory
 
-**Data and transformations**: identical to Analysis 2 (20 sampled checkpoints, prompt-level rows, `log_total_c` z-scored within each checkpoint's items). **Outcome**: raw `preference`. Formula and z-scoring rationale are the same as Analysis 2. One interpretive difference: because `signed_gap` has already subtracted the frequency signal from the outcome, the `freq_prob_c` coefficient in Analysis 2 reflects *residual* frequency sensitivity beyond the baseline correction. In the preference models, `freq_prob_c` absorbs the direct frequency effect as well, so its coefficient will typically be larger and the GenPref coefficient will reflect GenPref's contribution *after* statistically controlling for corpus frequency rather than after removing it from the outcome.
+**Data**: 20 evenly-spaced checkpoints sampled by index across each model's full checkpoint sequence, modelled separately using prompt-level data (51 prompts per binomial). **Outcome**: raw `preference = alpha_logprob - nonalpha_logprob`. **Predictors**: `genpref_c`, `freq_prob_c`, `log_total_c` (z-scored *within each checkpoint's items*). Model formula fit independently at each checkpoint:
+
+$$\text{preference} \sim \text{genpref\_c} \times \text{log\_total\_c} + \text{freq\_prob\_c} \times \text{log\_total\_c} + (1 \mid \text{binom})$$
+
+The z-scoring rationale is the same as Analysis 2: within-checkpoint z-scoring of `log_total_c` keeps between-item and between-checkpoint variation separate, so each coefficient reflects a within-checkpoint effect. The key interpretive difference from Analysis 2: because `signed_gap` has already subtracted the corpus frequency signal from the outcome, the `freq_prob_c` coefficient in Analysis 2 reflects only *residual* frequency sensitivity beyond that correction. Here, `freq_prob_c` absorbs the direct frequency effect as well — so its coefficient will typically be larger — and the GenPref coefficient reflects GenPref's contribution to raw preference *after statistically controlling for* corpus frequency, rather than after removing it from the outcome.
 
 ### Plot 5a: Predictor Statistics Over Training
 
@@ -941,28 +988,25 @@ genpref_sig_timeline(
 
 ## Analysis 6: Preference — Checkpoint-Interacted
 
-**Data and transformations**: identical to Analysis 3 (all checkpoints, prompt-averaged, `log_total_c` z-scored across checkpoints within model, `tokens_c` z-scored within model). **Outcome**: raw `preference`. The model is:
+**Data**: all available checkpoints for each model, with preference averaged over the 51 prompts per (binomial, checkpoint). **Outcome**: raw `preference = alpha_logprob - nonalpha_logprob`. **Predictors**: `genpref_c`, `freq_prob_c`, `log_total_c`, and `tokens_c` (= `scale(tokens)`, z-scored within each model's full token range). The model is:
 
 $$\text{preference} \sim (\text{genpref\_c} + \text{freq\_prob\_c} + \text{log\_total\_c}) \times \text{tokens\_c} + (1 \mid \text{binom})$$
 
-The same z-scoring caveat as Analysis 3 applies: `log_total_c` carries some between-checkpoint variation, partially accounted for by `tokens_c`. The marginal effects in Plot 6b show predicted preference as a function of `tokens_c` for low, neutral, and high values of each predictor.
+This is the counterpart of Analysis 3, but for raw preference rather than signed gap. The interactions with `tokens_c` test whether each predictor's effect on raw preference changes linearly with training stage.
+
+**Z-scoring note**: `log_total_c` is z-scored *across all checkpoints pooled within a model* (same approach as Analysis 3, different from Analysis 5). It therefore carries both between-item and some between-checkpoint variation; `tokens_c` is included to partial out the training-stage component, but the two predictors are not fully orthogonal. Comparing the `genpref_c:tokens_c` interaction between Analyses 3 and 6 indicates whether any training-stage change in GenPref sensitivity is specific to the frequency-corrected signal, or is present in the raw preference as well.
 
 ### Plot 6a: Coefficients
 
-```{r pref-ckpt-coefs, fig.width=14, fig.height=7}
-pref_results_ckpt <- map(available$pref_ckpt, function(path) {
+```{r pref-ckpt-coefs, fig.width=14, fig.height=7, message=FALSE}
+pref_results_ckpt <- map_dfr(available$pref_ckpt, function(path) {
   slug <- sub("\\.rds$", "", sub("^pref_ckpt_", "", basename(path)))
-  message("Loading: ", basename(path))
   fit  <- readRDS(path)
-  res  <- list(coefs = extract_coefs(fit, slug, TERM_LEVELS_CK, TERM_LABELS_CK),
-               summ  = pred_summary(fit, slug))
+  coefs <- extract_coefs(fit, slug, TERM_LEVELS_CK, TERM_LABELS_CK)
   rm(fit); gc()
-  res
+  coefs
 })
-pref_coefs_ckpt <- map_dfr(pref_results_ckpt, "coefs")
-
-cat("=== Predictor ranges ===\n")
-print(map_dfr(pref_results_ckpt, "summ"), n = Inf)
+pref_coefs_ckpt <- pref_results_ckpt
 
 coef_plot(
   pref_coefs_ckpt,
@@ -971,235 +1015,15 @@ coef_plot(
 )
 ```
 
-### Plot 6b: Marginal Effects Over Training
-
-```{r pref-ckpt-marginal, fig.width=14, fig.height=10}
-pref_marginal_all <- tibble()
-
-for (path in available$pref_ckpt) {
-  slug   <- sub("\\.rds$", "", sub("^pref_ckpt_", "", basename(path)))
-  message("Marginals: ", basename(path))
-  fit    <- readRDS(path)
-
-  for (spec in PRED_SPECS) {
-    pref_marginal_all <- bind_rows(
-      pref_marginal_all,
-      pred_grid_for(spec$var, spec$vals, spec$labels, fit) %>%
-        mutate(
-          predictor   = spec$var,
-          model_label = slug,
-          corpus      = parse_corpus(slug),
-          model_size  = factor(parse_size(slug), levels = SIZE_LEVELS)
-        )
-    )
-  }
-  rm(fit); gc()
-}
-
-if (nrow(pref_marginal_all) == 0) {
-  message("No pref_ckpt marginal data available — skipping plots.")
-} else {
-  for (spec in PRED_SPECS) {
-    df <- filter(pref_marginal_all, predictor == spec$var)
-    if (nrow(df) == 0) { message("No marginal data for: ", spec$title); next }
-    p  <- ggplot(df, aes(x = tokens_c, y = estimate,
-                         colour = pred_f, fill = pred_f)) +
-      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-      geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
-      geom_line(linewidth = 0.9) +
-      scale_colour_manual(values = spec$cols, name = NULL) +
-      scale_fill_manual(values   = spec$cols, name = NULL) +
-      scale_x_continuous(name = "Checkpoint  (tokens, z-scored within model)") +
-      scale_y_continuous(name = "Predicted preference") +
-      facet_wrap(~ model_label, scales = "free_y", ncol = 3) +
-      labs(title    = spec$title,
-           subtitle = "Other predictors held at 0  |  95% posterior credible ribbon  |  population-level") +
-      theme_bw(base_size = 11) +
-      theme(legend.position = "bottom", panel.grid.minor = element_blank())
-    print(p)
-  }
-}
-```
-
----
-
-# Part III — Absolute Signed Gap
-
-**Motivation**: Plots D2 and D3 reveal an apparent paradox — the mean absolute signed gap grows over training (models' preferences become more extreme relative to the frequency baseline), while the preference–frequency correlation also improves (models better track the relative ordering of corpus frequencies across items). These two facts are compatible: a model can correctly rank items by frequency while scaling its preferences more aggressively than the frequency ratio warrants. This analysis tests both phenomena jointly in a regression framework.
-
-**Data**: all available checkpoints for each model, with preference averaged over the 51 prompts per (binomial, checkpoint). **Outcome**:
-
-```r
-abs_signed_gap <- abs(preference - log_freq_ratio)
-```
-
-**Predictors** and their transformations:
-
-```r
-tokens_c    <- scale(tokens)                          # z-scored within model's full token range
-log_total_c <- scale(log(alpha_seen + beta_seen))     # z-scored WITHIN each checkpoint's items
-```
-
-`tokens_c` captures training stage. `log_total_c` is z-scored *within each checkpoint* (same approach as Analyses 2 and 5) to keep the two predictors approximately orthogonal: because total corpus exposure grows monotonically with training, global z-scoring would confound between-item and between-checkpoint variation. Within-checkpoint z-scoring ensures `log_total_c` reflects only between-item differences in exposure at each training stage. The model is:
-
-$$\text{abs\_signed\_gap} \sim \text{tokens\_c} \times \text{log\_total\_c} + (1 \mid \text{binom})$$
-
-The interaction tests whether the effect of item-level exposure on gap magnitude changes linearly over the course of training (e.g., whether high-frequency items show disproportionately growing gaps). The main effect of `tokens_c` captures the overall growth (or shrinkage) of gap magnitude with training; the main effect of `log_total_c` captures whether more-exposed items show larger or smaller gaps at any given training stage.
-
----
-
-## Plot P1: Coefficients
-
-Fixed-effect posterior means and 95% credible intervals for `tokens_c`, `log_total_c`, and their interaction, one fit per model-slug. Asterisks mark intervals excluding zero.
-
-```{r absgap-coefs, fig.width=13, fig.height=6}
-absgap_results <- map(available$absgap_ckpt, function(path) {
-  slug <- sub("\\.rds$", "", sub("^absgap_ckpt_", "", basename(path)))
-  message("Loading: ", basename(path))
-  fit  <- readRDS(path)
-  coefs <- extract_coefs(fit, slug, TERM_LEVELS_ABSGAP, TERM_LABELS_ABSGAP)
-  rm(fit); gc()
-  coefs
-})
-absgap_coefs <- bind_rows(absgap_results)
-
-if (nrow(absgap_coefs) == 0) {
-  message("No absgap_ckpt fits found — run genpref_per_model_analysis.Rmd Part III first.")
-} else {
-  coef_plot(
-    absgap_coefs,
-    title    = "Predictors of |signed gap| — training stage x item frequency",
-    subtitle = "abs_signed_gap ~ tokens_c * log_total_c + (1|binom)  |  * = CI excludes zero"
-  )
-}
-```
-
----
-
-## Table P1: Coefficient Summary
-
-Posterior means, standard errors, and 95% credible intervals for all fixed effects across models.
-
-```{r absgap-table}
-if (nrow(absgap_coefs) > 0) {
-  absgap_coefs %>%
-    mutate(
-      CI = sprintf("[%.3f, %.3f]", lo, hi),
-      `P(b>0)` = sprintf("%.0f%%", pnorm(0, mean = estimate, sd = se,
-                                          lower.tail = FALSE) * 100)
-    ) %>%
-    select(corpus, model_size, term, estimate, se, CI, sig, `P(b>0)`) %>%
-    rename(
-      Corpus = corpus, Size = model_size, Term = term,
-      Estimate = estimate, SE = se, `95% CI` = CI, Sig = sig
-    ) %>%
+```{r pref-ckpt-table}
+if (nrow(pref_coefs_ckpt) > 0) {
+  pref_coefs_ckpt %>%
+    mutate(term = gsub("\n", " ", as.character(term))) %>%
+    select(corpus, model_size, term, estimate, se, lo, hi) %>%
+    rename(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi) %>%
     arrange(Corpus, Size, Term) %>%
-    knitr::kable(digits = 3, caption = "Fixed effects: abs_signed_gap ~ tokens_c * log_total_c + (1|binom)")
-}
-```
-
----
-
-## Plot P2: Marginal Effects
-
-Two panels. **Top**: predicted `|signed gap|` as a function of `tokens_c` (training stage, z-scored within model), with separate lines for `log_total_c` at −1 SD, 0, and +1 SD (i.e., low-, mean-, and high-exposure items within a checkpoint). **Bottom**: predicted `|signed gap|` as a function of `log_total_c`, with separate lines for `tokens_c` at −1 SD, 0, and +1 SD (early, mid, and late training). All predictions are population-level (random effects set to zero); ribbons are 95% posterior credible intervals. Diverging lines across panels indicate a non-zero interaction.
-
-```{r absgap-marginals, fig.width=14, fig.height=9}
-EXPOSURE_LEVELS <- c("Low exposure (-1 SD)", "Mean exposure", "High exposure (+1 SD)")
-EXPOSURE_COLS   <- c(
-  "Low exposure (-1 SD)"  = "#d73027",
-  "Mean exposure"         = "#999999",
-  "High exposure (+1 SD)" = "#1a9850"
-)
-
-STAGE_LEVELS <- c("Early training (-1 SD)", "Mid training (0)", "Late training (+1 SD)")
-STAGE_COLS   <- c(
-  "Early training (-1 SD)" = "#d73027",
-  "Mid training (0)"       = "#999999",
-  "Late training (+1 SD)"  = "#1a9850"
-)
-
-absgap_marg_tk <- tibble()
-absgap_marg_lt <- tibble()
-
-if (length(available$absgap_ckpt) > 0) {
-  for (path in available$absgap_ckpt) {
-    slug <- sub("\\.rds$", "", sub("^absgap_ckpt_", "", basename(path)))
-    message("Marginals: ", basename(path))
-    fit <- readRDS(path)
-
-    tk_seq <- seq(-2, 2, length.out = 30)
-    lt_seq <- seq(-2, 2, length.out = 30)
-
-    for (lt_val in c(-1, 0, 1)) {
-      lt_lab <- EXPOSURE_LEVELS[lt_val + 2]
-      grid   <- tibble(tokens_c = tk_seq, log_total_c = lt_val)
-      pred   <- fitted(fit, newdata = grid, re_formula = NA, summary = TRUE)
-      absgap_marg_tk <- bind_rows(absgap_marg_tk, grid %>% mutate(
-        estimate    = pred[, "Estimate"],
-        lo          = pred[, "Q2.5"],
-        hi          = pred[, "Q97.5"],
-        group_f     = factor(lt_lab, levels = EXPOSURE_LEVELS),
-        model_label = slug,
-        corpus      = parse_corpus(slug),
-        model_size  = factor(parse_size(slug), levels = SIZE_LEVELS)
-      ))
-    }
-
-    for (tk_val in c(-1, 0, 1)) {
-      tk_lab <- STAGE_LEVELS[tk_val + 2]
-      grid   <- tibble(tokens_c = tk_val, log_total_c = lt_seq)
-      pred   <- fitted(fit, newdata = grid, re_formula = NA, summary = TRUE)
-      absgap_marg_lt <- bind_rows(absgap_marg_lt, grid %>% mutate(
-        estimate    = pred[, "Estimate"],
-        lo          = pred[, "Q2.5"],
-        hi          = pred[, "Q97.5"],
-        group_f     = factor(tk_lab, levels = STAGE_LEVELS),
-        model_label = slug,
-        corpus      = parse_corpus(slug),
-        model_size  = factor(parse_size(slug), levels = SIZE_LEVELS)
-      ))
-    }
-
-    rm(fit); gc()
-  }
-}
-
-if (nrow(absgap_marg_tk) > 0) {
-  p1 <- ggplot(absgap_marg_tk,
-               aes(x = tokens_c, y = estimate,
-                   colour = group_f, fill = group_f,
-                   group = interaction(model_label, group_f))) +
-    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
-    geom_line(linewidth = 0.9) +
-    scale_colour_manual(values = EXPOSURE_COLS, name = "Overall freq level") +
-    scale_fill_manual(values   = EXPOSURE_COLS, name = "Overall freq level") +
-    scale_x_continuous("Checkpoint  (tokens, z-scored within model)") +
-    scale_y_continuous("|signed gap|  (predicted)") +
-    facet_grid(corpus ~ model_size, scales = "free_y") +
-    labs(title    = "Effect of training stage on |signed gap| by exposure level",
-         subtitle = "log_total_c held at low/mean/high  |  95% posterior credible ribbon") +
-    theme_bw(base_size = 11) +
-    theme(legend.position = "bottom", panel.grid.minor = element_blank())
-
-  p2 <- ggplot(absgap_marg_lt,
-               aes(x = log_total_c, y = estimate,
-                   colour = group_f, fill = group_f,
-                   group = interaction(model_label, group_f))) +
-    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
-    geom_line(linewidth = 0.9) +
-    scale_colour_manual(values = STAGE_COLS, name = "Training stage") +
-    scale_fill_manual(values   = STAGE_COLS, name = "Training stage") +
-    scale_x_continuous("Overall freq  (log total, z-scored within checkpoint)") +
-    scale_y_continuous("|signed gap|  (predicted)") +
-    facet_grid(corpus ~ model_size, scales = "free_y") +
-    labs(title    = "Effect of item frequency on |signed gap| by training stage",
-         subtitle = "tokens_c held at early/mid/late  |  95% posterior credible ribbon") +
-    theme_bw(base_size = 11) +
-    theme(legend.position = "bottom", panel.grid.minor = element_blank())
-
-  print(p1 / p2)
-} else {
-  message("No absgap marginal data — skipping.")
+    knitr::kable(digits = 3,
+                 caption = "Posterior fixed effects: preference ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1|binom).")
 }
 ```
