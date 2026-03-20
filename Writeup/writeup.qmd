@@ -56,11 +56,15 @@ data.frame(
   kable(align = c("l", "r", "r", "r", "r"))
 ```
 
-To verify training quality, we calculated the perplexity (exponentiated cross-entropy loss) at the final checkpoint for each model (@tbl-perplexity; @fig-loss-curves). All models began near random --- initial perplexity $\approx$ 8,000--13,000, consistent with the theoretical ceiling of $e^{\ln 8192} = 8{,}192$ for a uniform distribution over our vocabulary --- and converged substantially, with final perplexity ranging from 5.2 to 34.2. The 1.3B model achieves the lowest perplexity in both corpora; within each corpus, the 125M model outperforms the 350M, consistent with the larger model being relatively data-hungry at this training budget. This is reflected in convergence of the loss over training (@fig-loss-curves).
+To verify training quality, we report two complementary metrics: training loss over the course of training (@fig-loss-curves) and held-out validation perplexity at the final checkpoint (@tbl-perplexity). These capture different things. Training loss reflects how well the model fits the data it has already seen; perplexity is the exponentiated cross-entropy loss computed on a held-out validation set (the first 5% of the BabyLM corpus for BabyLM models; the official C4 validation split for C4 models), and therefore reflects generalization.
+
+Training loss converged smoothly for all six models (@fig-loss-curves), starting near the theoretical random baseline ($\ln 8192 \approx 9.01$, equivalent to a perplexity of 8,192) and decreasing consistently throughout training. The 1.3B model achieves the lowest final training loss in both corpora, as expected from scaling.
+
+The held-out validation perplexity tells a more nuanced story (@tbl-perplexity). For the C4 corpus, the 1.3B model achieves the lowest final perplexity (27.9), consistent with scaling. For BabyLM, however, the 1.3B model's validation perplexity (2,557) is far higher than the 350M model's (290), even though its training loss is lower. This pattern is consistent with some degree of overfitting: the BabyLM corpus contains only \$\approx\$150M tokens, a modest training budget for a 1.3B parameter model, and the large model appears to be fitting the training data more closely without generalizing as well. Importantly, the 1.3B BabyLM model is not completely failing to learn: its final perplexity (2,557) remains well below the theoretical random ceiling (8,192), but the gap relative to the 350M model suggests that the additional capacity is not being used efficiently given the available data. We return to the implications of this for our main analyses in the Results.
 
 ```{r}
 #| label: tbl-perplexity
-#| tbl-cap: "Training perplexity at initialization and final checkpoint for all six models. Perplexity = $e^{\\text{loss}}$; values are measured on the training set. Initial perplexity reflects random initialization; all models converge well below this baseline."
+#| tbl-cap: "Perplexity at initialization and final checkpoint for all six models. Perplexity = $e^{\\text{loss}}$; initial perplexity is derived from the first logged training step; final perplexity is measured on a held-out validation set (first 5\\% of BabyLM training split for BabyLM models; official C4 validation split for C4 models). The BabyLM 1.3B model's elevated final perplexity relative to 350M reflects overfitting pressure on a small corpus."
 #| echo: false
 #| message: false
 #| warning: false
@@ -102,8 +106,348 @@ ggplot(df, aes(x = tokens_seen / 1e9, y = loss, color = params)) +
   geom_line(linewidth = 0.7, alpha = 0.85) +
   facet_wrap(~corpus, scales = "free_x") +
   geom_hline(yintercept = log(8192), linetype = "dashed", color = "gray50", linewidth = 0.4) +
-  scale_color_manual(values = c("125M" = "#2166ac", "350M" = "#74add1", "1.3B" = "#d6604d")) +
+  scale_color_manual(values = c("125M" = "#F0B323", "350M" = "#007030", "1.3B" = "#154733"),
+                     name = "Model size") +
   labs(x = "Tokens seen (B)", y = "Cross-entropy loss", color = "Params") +
   theme_classic(base_size = 10) +
   theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
 ```
+
+# Binomial Ordering Preferences
+
+In this section we present three complementary analyses examining how our models represent binomial ordering preferences over the course of training. The first analysis examines raw **preference** (how strongly each model favors the alpha-ordered form of a binomial). The second examines the **signed gap** (the extent to which models' preferences deviate from what corpus frequency alone would predict). The third examines **deviation from corpus predictions** as a function of training, examining how the ordering preferences of models deviates from its training distribution as a function of learning.
+
+```{r results-setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+
+RESULTS_DIR  <- "../Data/processed/results"
+SIZE_LEVELS  <- c("125M", "350M", "1.3B")
+# University of Oregon: Oregon Green (#154733), secondary green (#007030), UO Gold (#F0B323)
+SIZE_COLOURS <- c("125M" = "#F0B323", "350M" = "#007030", "1.3B" = "#154733")
+
+TERM_LABELS <- c("RelFreq\n(P(alpha)\u22120.5)", "GenPref",
+                 "Overall freq\n(ln total)",
+                 "RelFreq \u00d7\nOverall freq", "GenPref \u00d7\nOverall freq")
+TERM_LABELS_CK <- c(
+  "GenPref", "RelFreq\n(P(alpha)\u22120.5)", "Overall freq\n(ln total)",
+  "Checkpoint\n(tokens, z)",
+  "GenPref \u00d7\nCheckpoint", "RelFreq \u00d7\nCheckpoint",
+  "Overall freq \u00d7\nCheckpoint"
+)
+TERM_LABELS_ABSGAP <- c(
+  "Checkpoint\n(tokens, z)",
+  "Overall freq\n(ln total, z within ckpt)",
+  "Checkpoint \u00d7\nOverall freq"
+)
+
+# ── Load pre-computed tables ──────────────────────────────────────────────────
+load_coef_csv <- function(fname, term_labels) {
+  path <- file.path(RESULTS_DIR, fname)
+  if (!file.exists(path)) {
+    warning(sprintf("%s not found — run prepare_results.R first", fname))
+    return(tibble())
+  }
+  read_csv(path, show_col_types = FALSE) |>
+    mutate(
+      term       = factor(term, levels = term_labels),
+      model_size = factor(model_size, levels = SIZE_LEVELS)
+    )
+}
+
+pref_coefs_final <- load_coef_csv("pref_final_coefs.csv", TERM_LABELS)
+pref_traj_coefs  <- load_coef_csv("pref_traj_coefs.csv",  TERM_LABELS)
+pref_coefs_ckpt  <- load_coef_csv("pref_ckpt_coefs.csv",  TERM_LABELS_CK)
+sg_coefs_final   <- load_coef_csv("sg_final_coefs.csv",   TERM_LABELS)
+sg_traj_coefs    <- load_coef_csv("sg_traj_coefs.csv",    TERM_LABELS)
+sg_coefs_ckpt    <- load_coef_csv("sg_ckpt_coefs.csv",    TERM_LABELS_CK)
+absgap_coefs     <- load_coef_csv("absgap_coefs.csv",     TERM_LABELS_ABSGAP)
+
+sg_gap_path <- file.path(RESULTS_DIR, "sg_gap_summary.csv")
+sg_gap_summary <- if (file.exists(sg_gap_path)) {
+  read_csv(sg_gap_path, show_col_types = FALSE) |>
+    mutate(model_size = factor(model_size, levels = SIZE_LEVELS))
+} else {
+  warning("sg_gap_summary.csv not found — run prepare_results.R first")
+  tibble()
+}
+
+# ── Plotting functions ────────────────────────────────────────────────────────
+coef_plot <- function(coef_df,
+                      ylab = "Coefficient  (95% credible interval)") {
+  if (nrow(coef_df) == 0) return(invisible(NULL))
+  ggplot(coef_df, aes(x = term, y = estimate, colour = model_size)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.2, linewidth = 0.8,
+                  position = position_dodge(0.5)) +
+    geom_point(size = 3, position = position_dodge(0.5)) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_discrete(name = "Predictor") +
+    scale_y_continuous(name = ylab) +
+    facet_grid(corpus ~ ., scales = "free_y") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          axis.text.x = element_text(size = 9))
+}
+genpref_sig_timeline <- function(traj_df, focus_term = "GenPref") {
+  if (nrow(traj_df) == 0) return(invisible(NULL))
+  df <- traj_df |> filter(as.character(term) == focus_term)
+  if (nrow(df) == 0 || all(is.na(df$tokens))) return(invisible(NULL))
+  df <- df |> mutate(
+    p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+    pct_label = sprintf("%.0f%%", p_gt0 * 100)
+  )
+  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = model_size),
+                   linewidth = 0.7, alpha = 0.55) +
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.2, colour = "grey25", stroke = 0.35) +
+    geom_text(aes(label = pct_label, y = hi),
+              size = 2.1, vjust = -0.5, colour = "grey25") +
+    scale_colour_manual(values = SIZE_COLOURS, guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous(paste(focus_term, "coefficient (95% CI)")) +
+    facet_grid(corpus ~ model_size, scales = "free_y") +
+    coord_cartesian(clip = "off") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          strip.text = element_text(size = 9))
+}
+```
+
+## Preference
+
+In this section, we examine whether our models learn binomial ordering preferences, and if so what factors predict that preference. For each model checkpoint and binomial pair, we compute the model's ordering **preference** as the difference in log-probability of the alphabetically ordered form (e.g., *bread and butter*) compared to the reverse-ordered form (e.g., *butter and bread*). The alphabetical form is used as a relatively neutral baseline [following @morgan2016abstractknowledgedirect]. Concretely, for a binomial with alphabetically ordered token sequence $s_\alpha$ and non-alphabetically ordereed $s_n$:
+
+$$\text{preference}_i = \log P_\theta(s_{\alpha,i}) - \log P_\theta(s_{n,i})$$
+
+where $\log P_\theta(s)$ is the summed log-probability of sequence $s$ under model parameters $\theta$. Positive values indicate that the model assigns higher probability to the alphabetically ordered form.
+
+We regress preference on three item-level predictors using a Bayesian mixed-effects regression model [@burknerBrmsPackageBayesian2017]. **Generative Preference** (GenPref) is an estimate of ordering preferences driven by a combination of phonological and semantic predictors [@morgan2016abstractknowledgedirect]. **RelFreq** is the relative corpus frequency of the alpha-ordered form (centered):
+
+$$\text{RelFreq}_i = P(\text{alpha})_i - 0.5, \quad \text{where} \quad P(\text{alpha})_i = \frac{c_{\alpha,i}}{c_{\alpha,i} + c_{n,i}}$$
+
+and $c_{\alpha,i}$, $c_{n,i}$ are the corpus counts of the alpha-ordered and reverse-ordered forms of binomial $i$, respectively. **Log total frequency** is $\ln(c_{\alpha,i} + c_{n,i})$, the natural log of total corpus occurrences of the binomial in either order, centered. We include interaction terms for GenPref and log total frequency as well as RelFreq and log total frequency, allowing the model to capture how ordering preferences may be differently affected by GenPref and RelFreq depending on the overall frequency of that binomial:
+
+$$\text{preference} \sim \text{GenPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})$$
+
+We fit this model at the final training checkpoint and at 20 evenly-spaced checkpoints throughout training to examine the learning trajectory of binomial ordering preferences. We additionally fit a checkpoint-interacted model in which training stage (tokens encountered, scaled and centered) is included as a predictor to test whether effects grow or shrink linearly over training:
+
+$$\text{preference} \sim (\text{GenPref} + \text{RelFreq} + \ln(\text{total})) \times \text{tokens} + (1 \mid \text{binomial})$$
+
+### Results
+
+#### Final Checkpoint
+
+```{r pref-final-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=7}
+#| label: fig-pref-final-coefs
+#| fig-cap: "Posterior fixed-effect estimates for predictors of raw preference at the final training checkpoint. Error bars show 95% credible intervals; asterisks mark intervals that exclude zero."
+coef_plot(pref_coefs_final)
+```
+
+```{r pref-final-table, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-pref-final
+#| tbl-cap: "Posterior fixed effects for preference at the final checkpoint. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
+if (nrow(pref_coefs_final) > 0) {
+  pref_coefs_final |>
+    mutate(term = gsub("\n", " ", as.character(term))) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `P(β > 0)` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3)
+}
+```
+
+#### GenPref Significance Over Training
+
+(Prose goes here.)
+
+```{r plot-5c, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5.5}
+#| label: fig-pref-traj-sig
+#| fig-cap: "GenPref coefficient (95% CI) at each of 20 sampled training checkpoints, for raw preference models. Point fill encodes P(β > 0): blue indicates the posterior is predominantly positive, red predominantly negative, grey uncertain."
+genpref_sig_timeline(pref_traj_coefs)
+```
+
+#### Checkpoint-Interacted Model
+
+(Prose goes here.)
+
+```{r pref-ckpt-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=14, fig.height=7}
+#| label: fig-pref-ckpt-coefs
+#| fig-cap: "Posterior fixed-effect estimates from the checkpoint-interacted preference model. Interactions with training stage (tokens, z-scored) test whether each predictor's effect on raw preference changes linearly over the course of training."
+coef_plot(pref_coefs_ckpt)
+```
+
+```{r pref-ckpt-table, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-pref-ckpt
+#| tbl-cap: "Posterior fixed effects from the checkpoint-interacted preference model."
+if (nrow(pref_coefs_ckpt) > 0) {
+  pref_coefs_ckpt |>
+    mutate(term = gsub("\n", " ", as.character(term))) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `P(β > 0)` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3)
+}
+```
+
+## Signed Gap
+
+In this section, we examine the **signed gap**: the difference between each model's preference score and the log corpus frequency ratio for that binomial. Formally:
+
+$$\text{signed gap}_i = \text{preference}_i - \ln\frac{c_{\alpha,i}}{c_{n,i}}$$
+
+where $\text{preference}_i$ is defined as above and $c_{\alpha,i} / c_{n,i}$ is the corpus frequency ratio of the alpha-ordered to the reverse-ordered form. A signed gap of zero means the model's preference exactly matches what corpus frequency predicts; positive values indicate a stronger preference for alpha order than corpus statistics would suggest, and negative values the reverse. Using the signed gap as the outcome allows us to ask whether models develop ordering preferences that go beyond simply reflecting the distributional statistics of their training data. We regress signed gap on the same predictors as the preference model:
+
+$$\text{signed gap} \sim \text{GenPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})$$
+
+We fit this model at the final checkpoint and at 20 evenly-spaced checkpoints throughout training. We additionally fit a checkpoint-interacted model to test whether the effect of each predictor grows or shrinks linearly over training:
+
+$$\text{signed gap} \sim (\text{GenPref} + \text{RelFreq} + \ln(\text{total})) \times \text{tokens} + (1 \mid \text{binomial})$$
+
+### Results
+
+#### Final Checkpoint
+
+```{r sg-final-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=7}
+#| label: fig-sg-final-coefs
+#| fig-cap: "Posterior fixed-effect estimates for predictors of signed gap (preference minus log corpus frequency ratio) at the final training checkpoint. Asterisks mark credible intervals that exclude zero."
+coef_plot(sg_coefs_final)
+```
+
+```{r sg-final-table, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-sg-final
+#| tbl-cap: "Posterior fixed effects for signed gap at the final checkpoint."
+if (nrow(sg_coefs_final) > 0) {
+  sg_coefs_final |>
+    mutate(term = gsub("\n", " ", as.character(term))) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `P(β > 0)` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3)
+}
+```
+
+#### GenPref Significance Over Training
+
+(Prose goes here.)
+
+```{r plot-2c, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5.5}
+#| label: fig-sg-traj-sig
+#| fig-cap: "GenPref coefficient (95% CI) at each of 20 sampled training checkpoints, for signed gap models. Point fill encodes P(β > 0)."
+genpref_sig_timeline(sg_traj_coefs)
+```
+
+#### Checkpoint-Interacted Model
+
+(Prose goes here.)
+
+```{r sg-ckpt-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=14, fig.height=7}
+#| label: fig-sg-ckpt-coefs
+#| fig-cap: "Posterior fixed-effect estimates from the checkpoint-interacted signed gap model."
+coef_plot(sg_coefs_ckpt)
+```
+
+```{r sg-ckpt-table, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-sg-ckpt
+#| tbl-cap: "Posterior fixed effects from the checkpoint-interacted signed gap model."
+if (nrow(sg_coefs_ckpt) > 0) {
+  sg_coefs_ckpt |>
+    mutate(term = gsub("\n", " ", as.character(term))) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `P(β > 0)` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3)
+}
+```
+
+## Deviation from Corpus Predictions
+
+In this section, we examine how closely models track corpus-frequency predictions over the course of training, using two descriptive summaries and one regression model. First, we compute the **mean absolute signed gap** across all binomials at each checkpoint (@fig-abs-signed-gap):
+
+$$\overline{|\text{signed gap}|}_t = \frac{1}{N}\sum_{i=1}^{N} \left|\text{signed gap}_{i,t}\right|$$
+
+where $t$ indexes the checkpoint and $N$ is the number of binomials. Lower values indicate that models' preferences are, on average, closer to what corpus frequency would predict. Second, we compute the **Pearson correlation between model preference and log corpus frequency ratio** across items at each checkpoint (@fig-freq-tracking):
+
+$$r_t = \mathrm{Cor}\!\left(\text{preference}_{i,t},\; \ln\frac{c_{\alpha,i}}{c_{n,i}}\right)$$
+
+Values near 1 indicate near-perfect frequency tracking. Finally, we fit a model predicting the absolute signed gap from training stage and log total frequency to test whether models become more or less corpus-like as training progresses and whether this depends on item frequency (@fig-absgap-coefs; @tbl-absgap):
+
+$$|\text{signed gap}| \sim \text{tokens} \times \ln(\text{total}) + (1 \mid \text{binomial})$$
+
+### Results
+
+```{r plot-d2, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+#| label: fig-abs-signed-gap
+#| fig-cap: "Mean absolute signed gap across items at each of 20 sampled checkpoints. Higher values indicate that models' preference magnitudes deviate more from what corpus frequency predicts, on average."
+if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
+  ggplot(sg_gap_summary,
+         aes(x = tokens / 1e6, y = mean_abs,
+             colour = model_size, fill = model_size, group = slug)) +
+    geom_ribbon(aes(ymin = lo95_abs, ymax = hi95_abs), alpha = 0.15, colour = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Mean |signed gap|  (95% CI of mean)") +
+    facet_grid(corpus ~ ., scales = "free_x") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "right", panel.grid.minor = element_blank())
+}
+```
+
+```{r plot-d3, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+#| label: fig-freq-tracking
+#| fig-cap: "Pearson correlation between model preference and log corpus frequency ratio across items at each sampled checkpoint. Values near 1 indicate that models rank binomials by preference in the same order as the corpus frequency ratio."
+if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
+  ggplot(sg_gap_summary,
+         aes(x = tokens / 1e6, y = cor_pref_freq,
+             colour = model_size, fill = model_size, group = slug)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Pearson r  (preference ~ log freq ratio)", limits = c(NA, 1)) +
+    facet_grid(corpus ~ ., scales = "free_x") +
+    theme_bw(base_size = 11) +
+    theme(legend.position = "right", panel.grid.minor = element_blank())
+}
+```
+
+```{r plot-p1, echo=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=6}
+#| label: fig-absgap-coefs
+#| fig-cap: "Posterior fixed-effect estimates for predictors of absolute signed gap. The main effect of training stage (tokens, z) captures overall growth or shrinkage in preference magnitude; the interaction tests whether this depends on item-level corpus exposure."
+if (nrow(absgap_coefs) > 0) {
+  coef_plot(absgap_coefs)
+}
+```
+
+```{r tbl-p1, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-absgap
+#| tbl-cap: "Posterior fixed effects for absolute signed gap. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
+if (nrow(absgap_coefs) > 0) {
+  absgap_coefs |>
+    mutate(term = gsub("\n", " ", as.character(term))) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `P(β > 0)` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3)
+}
+```
+
+# Discussion
+
+# Conclusion

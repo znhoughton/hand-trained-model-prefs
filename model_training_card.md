@@ -293,6 +293,72 @@ Training perplexity (exp of cross-entropy loss) was computed at initialization a
 
 ---
 
+## Repository Structure & Scripts
+
+### Directory Overview
+
+```
+hand-trained-model-prefs/
+├── model_training_card.md          # This file
+├── model-training-code/            # Training scripts (train_autoreg.py, etc.)
+├── Writeup/                        # Paper writeup (writeup.qmd + CoLM extension)
+├── Data/
+│   ├── checkpoint_results/         # Raw per-checkpoint scoring CSVs (from model-prefs-all-ckpts.py)
+│   ├── processed/                  # Aggregated CSVs used by R analyses
+│   │   └── checkpoint_results_with_exposures.csv  # ⚠ gitignored (30 GB) — see below
+│   └── training_quality/           # Perplexity and loss curve outputs
+└── analysis-scripts/
+    ├── models/                     # Fitted brms model .rds files
+    ├── model-prefs-all-ckpts.py
+    ├── count_corpus_exposures.py
+    ├── build_checkpoint_exposures.py
+    ├── prepare_data.py
+    ├── evaluate_training_quality.py
+    ├── analysis.Rmd / analysis.html
+    └── analysis_cleaned_up.Rmd / analysis_cleaned_up.html
+```
+
+### Python Scripts
+
+The Python scripts form a sequential data pipeline. Run them in order to reproduce the full dataset from scratch.
+
+#### 1. `model-prefs-all-ckpts.py`
+Runs inference across all model checkpoints (loaded from HuggingFace Hub) to score every binomial pair under every prompt. For each checkpoint, records `alpha_logprob` and `nonalpha_logprob` — the model's log-probabilities for the alpha-first and non-alpha-first orderings of each binomial. Output: per-checkpoint CSV files written to `Data/checkpoint_results/`. Multi-GPU (2× H100), resume-safe, OOM-safe adaptive batch sizing.
+
+#### 2. `count_corpus_exposures.py`
+Replays the training data in exact training order to compute cumulative corpus exposure counts (`alpha_seen`, `beta_seen`) for each binomial at each checkpoint step. This is a full replay of ~9–10B tokens per corpus. Output: exposure count CSV.
+
+#### 3. `build_checkpoint_exposures.py`
+Joins the raw per-checkpoint model preference data (from step 1) with the cumulative corpus exposure counts (from step 2). Output: `Data/processed/checkpoint_results_with_exposures.csv` — one row per model × checkpoint × prompt × binomial (~209M rows, ~30 GB). **This file is gitignored** due to size; run this script to regenerate it locally.
+
+#### 4. `prepare_data.py`
+Aggregates the large joined CSV into smaller, R-readable CSVs in `Data/processed/` (e.g., prompt-averaged preference per binomial × checkpoint, accuracy summaries). These smaller outputs **are** committed to the repo, so collaborators who only want to run the R analyses do not need to run steps 1–4.
+
+#### 5. `evaluate_training_quality.py`
+Computes final-checkpoint perplexity for all six models on held-out data, and fetches training loss curves from `trainer_state.json` on HuggingFace Hub. Output: `Data/training_quality/perplexity_results.csv`, `loss_curves.csv`, and corresponding plots. Run this independently of the main pipeline.
+
+### R Analysis Scripts
+
+#### `analysis.Rmd`
+Main analysis document. Loads fitted brms models from `analysis-scripts/models/` and produces all coefficient plots, trajectory plots, and summary tables. Reads `Data/processed/checkpoint_results_with_exposures.csv` (via DuckDB) to recover per-checkpoint token counts for trajectory x-axes — this requires the 30 GB file to be present locally. All other data dependencies (the processed CSVs) are committed to the repo.
+
+#### `analysis_cleaned_up.Rmd`
+Cleaned-up version of `analysis.Rmd` with the same analyses, formatted for sharing.
+
+#### `analysis-scripts/models/`
+Fitted brms model `.rds` files. These are large and may not be committed; if absent, the Rmd files will warn that no fits were found and skip the corresponding plots.
+
+### What Collaborators Need
+
+| Goal | Required files/scripts |
+|---|---|
+| Read analysis results | Open `analysis_cleaned_up.html` in a browser — no setup needed |
+| Re-render the Rmd | R + brms + the `models/` `.rds` files; processed CSVs are in the repo |
+| Regenerate trajectory x-axes | Also need `checkpoint_results_with_exposures.csv` (run steps 1–3 above) |
+| Reproduce from scratch | All Python scripts + HuggingFace Hub access + ~2× H100 GPUs |
+
+---
+
 ## References
 
 Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S., Matena, M., ... & Liu, P. J. (2020). Exploring the limits of transfer learning with a unified text-to-text transformer. *Journal of Machine Learning Research*, 21(140), 1–67.

@@ -10,3 +10,6 @@ models/*.hpp
 models/*.o
 models/*.d
 models/stan_model*/
+
+*.ipynb_checkpoints
+*.venv

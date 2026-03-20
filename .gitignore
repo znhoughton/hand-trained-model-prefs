@@ -9,3 +9,6 @@ Data/processed/checkpoint_results_with_exposures.csv
 
 # R Markdown cache (regenerable, can be very large)
 analysis-scripts/exposure_preference_analysis_cache/
+
+*.ipynb_checkpoints
+*.venv
