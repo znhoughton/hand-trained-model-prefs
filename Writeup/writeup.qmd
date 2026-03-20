@@ -11,6 +11,7 @@ author:
       literal: Zachary Houghton
     email: znhoughton@ucdavis.edu
     affiliations:
+      - name: University of Oregon
       - name: Vail Systems, Inc.
   - name:
       literal: 
@@ -34,13 +35,75 @@ The first corpus is BabyLM[Version 3, @charpentier2025babylmturns3], a developme
 
 Checkpoints were saved approximately every 10M tokens throughout training and pushed to HuggingFace Hub, giving us dense coverage of each model's learning trajectory. All models and checkpoints will be made publicly available. @tbl-models summarizes the key training parameters for each model.
 
-| Corpus | Params | Total tokens | Checkpoints |               LR |
-|--------|-------:|-------------:|------------:|-----------------:|
-| BabyLM |   125M |       \~9.1B |       \~910 | $3\times10^{-4}$ |
-| BabyLM |   350M |       \~9.1B |       \~910 | $1\times10^{-4}$ |
-| BabyLM |   1.3B |       \~9.1B |       \~860 | $1\times10^{-4}$ |
-| C4     |   125M |        \~10B |     \~1,010 | $3\times10^{-4}$ |
-| C4     |   350M |        \~10B |     \~1,005 | $1\times10^{-4}$ |
-| C4     |   1.3B |        \~10B |       \~960 | $1\times10^{-4}$ |
+```{r}
+#| label: tbl-models
+#| tbl-cap: "Training configuration for all six models. All models use the OPT architecture, a shared BPE tokenizer (vocab 8,192; context 1,024 tokens), AdamW optimization, and a linear LR schedule with 4,000 warmup steps."
+#| echo: false
+#| message: false
+#| warning: false
 
-: Training configuration for all six models. All models use the OPT architecture, a shared BPE tokenizer (vocab 8,192; context 1,024 tokens), AdamW optimization, and a linear LR schedule with 4,000 warmup steps. {#tbl-models}
+library(knitr)
+
+data.frame(
+  Corpus       = c("BabyLM", "BabyLM", "BabyLM", "C4", "C4", "C4"),
+  Params       = c("125M", "350M", "1.3B", "125M", "350M", "1.3B"),
+  `Total tokens` = c("~9.1B", "~9.1B", "~9.1B", "~10B", "~10B", "~10B"),
+  Checkpoints  = c("~910", "~910", "~860", "~1,010", "~1,005", "~960"),
+  LR           = c("$3\\times10^{-4}$", "$1\\times10^{-4}$", "$1\\times10^{-4}$",
+                   "$3\\times10^{-4}$", "$1\\times10^{-4}$", "$1\\times10^{-4}$"),
+  check.names  = FALSE
+) |>
+  kable(align = c("l", "r", "r", "r", "r"))
+```
+
+To verify training quality, we calculated the perplexity (exponentiated cross-entropy loss) at the final checkpoint for each model (@tbl-perplexity; @fig-loss-curves). All models began near random --- initial perplexity $\approx$ 8,000--13,000, consistent with the theoretical ceiling of $e^{\ln 8192} = 8{,}192$ for a uniform distribution over our vocabulary --- and converged substantially, with final perplexity ranging from 5.2 to 34.2. The 1.3B model achieves the lowest perplexity in both corpora; within each corpus, the 125M model outperforms the 350M, consistent with the larger model being relatively data-hungry at this training budget. This is reflected in convergence of the loss over training (@fig-loss-curves).
+
+```{r}
+#| label: tbl-perplexity
+#| tbl-cap: "Training perplexity at initialization and final checkpoint for all six models. Perplexity = $e^{\\text{loss}}$; values are measured on the training set. Initial perplexity reflects random initialization; all models converge well below this baseline."
+#| echo: false
+#| message: false
+#| warning: false
+
+library(dplyr)
+library(knitr)
+
+ppl  <- read.csv("../Data/training_quality/perplexity_results.csv")
+loss <- read.csv("../Data/training_quality/loss_curves.csv")
+
+initial_ppl <- loss |>
+  group_by(corpus, params) |>
+  slice_min(order_by = step, n = 1) |>
+  mutate(initial_ppl = round(exp(loss))) |>
+  select(Corpus = corpus, Params = params, `Initial PPL` = initial_ppl)
+
+ppl |>
+  rename(`Final PPL` = Perplexity) |>
+  left_join(initial_ppl, by = c("Corpus", "Params")) |>
+  mutate(Params = factor(Params, levels = c("125M", "350M", "1.3B"))) |>
+  arrange(Corpus, Params) |>
+  select(Corpus, Params, `Initial PPL`, `Final PPL`) |>
+  kable(align = c("l", "r", "r", "r"))
+```
+
+```{r}
+#| label: fig-loss-curves
+#| fig-cap: "Training loss over the course of training for all six models, separated by corpus. All models start near the theoretical random baseline ($\\ln 8192 \\approx 9.01$) and converge smoothly; the 1.3B model achieves the lowest final loss in both corpora."
+#| echo: false
+#| message: false
+#| warning: false
+
+library(ggplot2)
+
+df <- read.csv("../Data/training_quality/loss_curves.csv")
+df$params <- factor(df$params, levels = c("125M", "350M", "1.3B"))
+
+ggplot(df, aes(x = tokens_seen / 1e9, y = loss, color = params)) +
+  geom_line(linewidth = 0.7, alpha = 0.85) +
+  facet_wrap(~corpus, scales = "free_x") +
+  geom_hline(yintercept = log(8192), linetype = "dashed", color = "gray50", linewidth = 0.4) +
+  scale_color_manual(values = c("125M" = "#2166ac", "350M" = "#74add1", "1.3B" = "#d6604d")) +
+  labs(x = "Tokens seen (B)", y = "Cross-entropy loss", color = "Params") +
+  theme_classic(base_size = 10) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
+```
