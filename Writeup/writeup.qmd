@@ -11,8 +11,8 @@ author:
       literal: Zachary Houghton
     email: znhoughton@ucdavis.edu
     affiliations:
-      - name: University of Oregon
       - name: Vail Systems, Inc.
+      - name: University of Oregon
   - name:
       literal: 
     affiliations:
