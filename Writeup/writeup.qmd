@@ -1,0 +1,46 @@
+---
+title: "writeup"
+colm-mode: submission  # submission (anonymous + line numbers) | preprint (non-anonymous) | final (camera-ready)
+format:
+  colm-pdf: default
+  html: default
+editor: visual
+bibliography: references.bib
+author:
+  - name:
+      literal: Zachary Houghton
+    email: znhoughton@ucdavis.edu
+    affiliations:
+      - name: Vail Systems, Inc.
+  - name:
+      literal: 
+    affiliations:
+      - name: 
+  - name:
+      literal:
+    affiliations:
+      - name:
+abstract: |
+  (Abstract goes here.)
+---
+
+# Introduction
+
+# Model Training
+
+In order to examine the representation of binomials in language models, we trained six autoregressive language models from scratch using the OPT architecture [@zhangOPTOpenPretrained2022], crossing two training corpora with three model sizes (125M, 350M, and 1.3B parameters), for a total of six models. All models share a common tokenizer: a Byte-Pair Encoding (BPE) tokenizer with a vocabulary of 8,192 tokens and a context window of 1,024 tokens, trained once on the full BabyLM corpus and reused across all six models to ensure that differences between models reflect training data and scale rather than tokenization. Models were trained on 2× NVIDIA H100 GPUs using PyTorch Distributed Data Parallel (DDP) in bfloat16 precision, with AdamW optimization and a linear learning rate schedule with 4,000 warmup steps.
+
+The first corpus is BabyLM[Version 3, @charpentier2025babylmturns3], a developmentally plausible corpus of approximately 150M tokens consisting of child-directed speech (CHILDES), children's books, and simple web text. Each model was trained for 64 epochs over this corpus, yielding approximately 9.1B total training tokens. The second corpus is a 10B-token subset of C4 [@raffelExploringLimitsTransfer2020], a filtered English web text corpus. C4 models were trained for a single pass over this corpus, also yielding approximately 10B training tokens. Comparing the two corpora allows us to examine whether the content and register of the training data shapes how models acquire binomial ordering preferences over training.
+
+Checkpoints were saved approximately every 10M tokens throughout training and pushed to HuggingFace Hub, giving us dense coverage of each model's learning trajectory. All models and checkpoints will be made publicly available. @tbl-models summarizes the key training parameters for each model.
+
+| Corpus | Params | Total tokens | Checkpoints |               LR |
+|--------|-------:|-------------:|------------:|-----------------:|
+| BabyLM |   125M |       \~9.1B |       \~910 | $3\times10^{-4}$ |
+| BabyLM |   350M |       \~9.1B |       \~910 | $1\times10^{-4}$ |
+| BabyLM |   1.3B |       \~9.1B |       \~860 | $1\times10^{-4}$ |
+| C4     |   125M |        \~10B |     \~1,010 | $3\times10^{-4}$ |
+| C4     |   350M |        \~10B |     \~1,005 | $1\times10^{-4}$ |
+| C4     |   1.3B |        \~10B |       \~960 | $1\times10^{-4}$ |
+
+: Training configuration for all six models. All models use the OPT architecture, a shared BPE tokenizer (vocab 8,192; context 1,024 tokens), AdamW optimization, and a linear LR schedule with 4,000 warmup steps. {#tbl-models}
