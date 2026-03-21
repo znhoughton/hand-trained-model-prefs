@@ -2,7 +2,9 @@
 title: "writeup"
 colm-mode: submission  # submission (anonymous + line numbers) | preprint (non-anonymous) | final (camera-ready)
 format:
-  colm-pdf: default
+  colm-pdf:
+    tbl-cap-location: bottom
+    keep-tex: true
   html: default
 editor: visual
 bibliography: references.bib
@@ -13,27 +15,30 @@ author:
     affiliations:
       - name: Vail Systems, Inc.
       - name: University of Oregon
-  - name:
-      literal: 
-    affiliations:
-      - name: 
-  - name:
-      literal:
-    affiliations:
-      - name:
 abstract: |
   (Abstract goes here.)
 ---
 
 # Introduction
 
+```{r gs-path-setup, include=FALSE}
+# Add Ghostscript to PATH so pdfcrop.pl can find gswin64c.exe
+gs_bin <- "C:\\Program Files\\gs\\gs10.07.0\\bin"
+current_path <- Sys.getenv("PATH")
+if (!grepl(gs_bin, current_path, fixed = TRUE)) {
+  Sys.setenv(PATH = paste0(gs_bin, ";", current_path))
+}
+```
+
 # Model Training
 
-In order to examine the representation of binomials in language models, we trained six autoregressive language models from scratch using the OPT architecture [@zhangOPTOpenPretrained2022], crossing two training corpora with three model sizes (125M, 350M, and 1.3B parameters), for a total of six models. All models share a common tokenizer: a Byte-Pair Encoding (BPE) tokenizer with a vocabulary of 8,192 tokens and a context window of 1,024 tokens, trained once on the full BabyLM corpus and reused across all six models to ensure that differences between models reflect training data and scale rather than tokenization. Models were trained on 2× NVIDIA H100 GPUs using PyTorch Distributed Data Parallel (DDP) in bfloat16 precision, with AdamW optimization and a linear learning rate schedule with 4,000 warmup steps.
+In order to examine the representation of binomials in language models, we trained six autoregressive language models from scratch using the OPT architecture [@zhangOPTOpenPretrained2022], crossing two training corpora with three model sizes (125M, 350M, and 1.3B parameters), for a total of six models. All models share a common tokenizer: a Byte-Pair Encoding (BPE) tokenizer with a vocabulary of 8,192 tokens and a context window of 1,024 tokens, trained once on the full BabyLM corpus and reused across all six models to ensure that differences between models reflect training data and scale rather than tokenization. Models were trained on two NVIDIA H100 GPUs using PyTorch Distributed Data Parallel (DDP) in bfloat16 precision, with AdamW optimization and a linear learning rate schedule with 4,000 warmup steps.
 
-The first corpus is BabyLM[Version 3, @charpentier2025babylmturns3], a developmentally plausible corpus of approximately 150M tokens consisting of child-directed speech (CHILDES), children's books, and simple web text. Each model was trained for 64 epochs over this corpus, yielding approximately 9.1B total training tokens. The second corpus is a 10B-token subset of C4 [@raffelExploringLimitsTransfer2020], a filtered English web text corpus. C4 models were trained for a single pass over this corpus, also yielding approximately 10B training tokens. Comparing the two corpora allows us to examine whether the content and register of the training data shapes how models acquire binomial ordering preferences over training.
+The first corpus that we trained the models on was BabyLM[Version 3, @charpentier2025babylmturns3], a developmentally plausible corpus of approximately 150M tokens consisting of child-directed speech (CHILDES), children's books, and simple web text. Each model was trained for 64 epochs over this corpus, yielding approximately 9.1B total training tokens. The second corpus was a 10B-token subset of C4 [@raffelExploringLimitsTransfer2020], a filtered English web text corpus. C4 models were trained for a single pass over this corpus, also yielding approximately 10B training tokens. Comparing the two corpora allows us to examine how the content and diversity of the training data shapes the learning of binomials in language models.
 
-Checkpoints were saved approximately every 10M tokens throughout training and pushed to HuggingFace Hub, giving us dense coverage of each model's learning trajectory. All models and checkpoints will be made publicly available. @tbl-models summarizes the key training parameters for each model.
+Checkpoints were saved approximately every 10M tokens throughout training and pushed to HuggingFace Hub, giving us dense coverage of each model's learning trajectory. All models and checkpoints will be made publicly available.[^1] @tbl-models summarizes the key training parameters for each model.
+
+[^1]: The huggingface account would reveal the identity of one of the authors and is thus omitted from the double-blind review phase.
 
 ```{r}
 #| label: tbl-models
@@ -56,66 +61,11 @@ data.frame(
   kable(align = c("l", "r", "r", "r", "r"))
 ```
 
-To verify training quality, we report two complementary metrics: training loss over the course of training (@fig-loss-curves) and held-out validation perplexity at the final checkpoint (@tbl-perplexity). These capture different things. Training loss reflects how well the model fits the data it has already seen; perplexity is the exponentiated cross-entropy loss computed on a held-out validation set (the first 5% of the BabyLM corpus for BabyLM models; the official C4 validation split for C4 models), and therefore reflects generalization.
-
-Training loss converged smoothly for all six models (@fig-loss-curves), starting near the theoretical random baseline ($\ln 8192 \approx 9.01$, equivalent to a perplexity of 8,192) and decreasing consistently throughout training. The 1.3B model achieves the lowest final training loss in both corpora, as expected from scaling.
-
-The held-out validation perplexity tells a more nuanced story (@tbl-perplexity). For the C4 corpus, the 1.3B model achieves the lowest final perplexity (27.9), consistent with scaling. For BabyLM, however, the 1.3B model's validation perplexity (2,557) is far higher than the 350M model's (290), even though its training loss is lower. This pattern is consistent with some degree of overfitting: the BabyLM corpus contains only \$\approx\$150M tokens, a modest training budget for a 1.3B parameter model, and the large model appears to be fitting the training data more closely without generalizing as well. Importantly, the 1.3B BabyLM model is not completely failing to learn: its final perplexity (2,557) remains well below the theoretical random ceiling (8,192), but the gap relative to the 350M model suggests that the additional capacity is not being used efficiently given the available data. We return to the implications of this for our main analyses in the Results.
-
-```{r}
-#| label: tbl-perplexity
-#| tbl-cap: "Perplexity at initialization and final checkpoint for all six models. Perplexity = $e^{\\text{loss}}$; initial perplexity is derived from the first logged training step; final perplexity is measured on a held-out validation set (first 5\\% of BabyLM training split for BabyLM models; official C4 validation split for C4 models). The BabyLM 1.3B model's elevated final perplexity relative to 350M reflects overfitting pressure on a small corpus."
-#| echo: false
-#| message: false
-#| warning: false
-
-library(dplyr)
-library(knitr)
-
-ppl  <- read.csv("../Data/training_quality/perplexity_results.csv")
-loss <- read.csv("../Data/training_quality/loss_curves.csv")
-
-initial_ppl <- loss |>
-  group_by(corpus, params) |>
-  slice_min(order_by = step, n = 1) |>
-  mutate(initial_ppl = round(exp(loss))) |>
-  select(Corpus = corpus, Params = params, `Initial PPL` = initial_ppl)
-
-ppl |>
-  rename(`Final PPL` = Perplexity) |>
-  left_join(initial_ppl, by = c("Corpus", "Params")) |>
-  mutate(Params = factor(Params, levels = c("125M", "350M", "1.3B"))) |>
-  arrange(Corpus, Params) |>
-  select(Corpus, Params, `Initial PPL`, `Final PPL`) |>
-  kable(align = c("l", "r", "r", "r"))
-```
-
-```{r}
-#| label: fig-loss-curves
-#| fig-cap: "Training loss over the course of training for all six models, separated by corpus. All models start near the theoretical random baseline ($\\ln 8192 \\approx 9.01$) and converge smoothly; the 1.3B model achieves the lowest final loss in both corpora."
-#| echo: false
-#| message: false
-#| warning: false
-
-library(ggplot2)
-
-df <- read.csv("../Data/training_quality/loss_curves.csv")
-df$params <- factor(df$params, levels = c("125M", "350M", "1.3B"))
-
-ggplot(df, aes(x = tokens_seen / 1e9, y = loss, color = params)) +
-  geom_line(linewidth = 0.7, alpha = 0.85) +
-  facet_wrap(~corpus, scales = "free_x") +
-  geom_hline(yintercept = log(8192), linetype = "dashed", color = "gray50", linewidth = 0.4) +
-  scale_color_manual(values = c("125M" = "#F0B323", "350M" = "#007030", "1.3B" = "#154733"),
-                     name = "Model size") +
-  labs(x = "Tokens seen (B)", y = "Cross-entropy loss", color = "Params") +
-  theme_classic(base_size = 10) +
-  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
-```
+All six models showed smooth convergence in training loss throughout training, starting near the theoretical random baseline ($\ln 8192 \approx 9.01$) and decreasing consistently. Held-out validation perplexity confirmed successful training for all models; full loss curves and perplexity figures are reported in Appendix [-@sec-training-quality]. Notably, the BabyLM 1.3B model showed elevated final validation perplexity relative to the 350M model (2,557 vs. 290), consistent with mild overfitting given the small corpus (approximately 150M tokens) — unsurprising for a 1.3B parameter model trained on such limited data. We return to the implications of this for our main analyses in the Results.
 
 # Binomial Ordering Preferences
 
-In this section we present three complementary analyses examining how our models represent binomial ordering preferences over the course of training. The first analysis examines raw **preference** (how strongly each model favors the alpha-ordered form of a binomial). The second examines the **signed gap** (the extent to which models' preferences deviate from what corpus frequency alone would predict). The third examines **deviation from corpus predictions** as a function of training, examining how the ordering preferences of models deviates from its training distribution as a function of learning.
+In this section we present three complementary analyses examining how our models represent binomial ordering preferences over the course of training. The first analysis examines raw **preference** (how strongly each model favors the alphabetically ordered form of a binomial). The second examines the **signed gap** (the extent to which models' preferences deviate from what corpus frequency alone would predict). The third examines **deviation from corpus predictions** as a function of training, examining how the ordering preferences of models deviates from its training distribution as a function of learning.
 
 ```{r results-setup, include=FALSE}
 library(tidyverse)
@@ -185,9 +135,14 @@ coef_plot <- function(coef_df,
     scale_x_discrete(name = "Predictor") +
     scale_y_continuous(name = ylab) +
     facet_grid(corpus ~ ., scales = "free_y") +
-    theme_bw(base_size = 11) +
+    theme_bw(base_size = 13) +
     theme(legend.position = "right", panel.grid.minor = element_blank(),
-          axis.text.x = element_text(size = 9))
+          axis.text = element_text(colour = "black", size = 13),
+          axis.text.x = element_text(colour = "black", size = 13),
+          axis.title = element_text(colour = "black", size = 15),
+          legend.text = element_text(colour = "black", size = 13),
+          legend.title = element_text(colour = "black", size = 14),
+          strip.text = element_text(colour = "black", face = "bold", size = 14))
 }
 genpref_sig_timeline <- function(traj_df, focus_term = "GenPref") {
   if (nrow(traj_df) == 0) return(invisible(NULL))
@@ -204,7 +159,7 @@ genpref_sig_timeline <- function(traj_df, focus_term = "GenPref") {
     geom_point(aes(fill = p_gt0), shape = 21,
                size = 3.2, colour = "grey25", stroke = 0.35) +
     geom_text(aes(label = pct_label, y = hi),
-              size = 2.1, vjust = -0.5, colour = "grey25") +
+              size = 2.8, vjust = -0.5, colour = "black") +
     scale_colour_manual(values = SIZE_COLOURS, guide = "none") +
     scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
                          midpoint = 0.5, limits = c(0, 1),
@@ -214,25 +169,29 @@ genpref_sig_timeline <- function(traj_df, focus_term = "GenPref") {
     scale_y_continuous(paste(focus_term, "coefficient (95% CI)")) +
     facet_grid(corpus ~ model_size, scales = "free_y") +
     coord_cartesian(clip = "off") +
-    theme_bw(base_size = 11) +
+    theme_bw(base_size = 13) +
     theme(legend.position = "right", panel.grid.minor = element_blank(),
-          strip.text = element_text(size = 9))
+          axis.text = element_text(colour = "black", size = 13),
+          axis.title = element_text(colour = "black", size = 15),
+          legend.text = element_text(colour = "black", size = 13),
+          legend.title = element_text(colour = "black", size = 14),
+          strip.text = element_text(colour = "black", face = "bold", size = 14))
 }
 ```
 
 ## Preference
 
-In this section, we examine whether our models learn binomial ordering preferences, and if so what factors predict that preference. For each model checkpoint and binomial pair, we compute the model's ordering **preference** as the difference in log-probability of the alphabetically ordered form (e.g., *bread and butter*) compared to the reverse-ordered form (e.g., *butter and bread*). The alphabetical form is used as a relatively neutral baseline [following @morgan2016abstractknowledgedirect]. Concretely, for a binomial with alphabetically ordered token sequence $s_\alpha$ and non-alphabetically ordereed $s_n$:
+In this section, we examine whether our models learn binomial ordering preferences, and if so what factors predict that preference. For each model checkpoint and binomial pair, we compute the model's ordering **preference** as the difference in log-probability of the alphabetically ordered form (e.g., *bread and butter*) compared to the non-alphabetically ordered form (e.g., *butter and bread*). The alphabetical form is used as a relatively neutral baseline [following @morgan2016abstractknowledgedirect]. Concretely, for a binomial with alphabetically ordered token sequence $s_\alpha$ and non-alphabetically ordereed $s_n$:
 
 $$\text{preference}_i = \log P_\theta(s_{\alpha,i}) - \log P_\theta(s_{n,i})$$
 
 where $\log P_\theta(s)$ is the summed log-probability of sequence $s$ under model parameters $\theta$. Positive values indicate that the model assigns higher probability to the alphabetically ordered form.
 
-We regress preference on three item-level predictors using a Bayesian mixed-effects regression model [@burknerBrmsPackageBayesian2017]. **Generative Preference** (GenPref) is an estimate of ordering preferences driven by a combination of phonological and semantic predictors [@morgan2016abstractknowledgedirect]. **RelFreq** is the relative corpus frequency of the alpha-ordered form (centered):
+We regress preference on three item-level predictors using a Bayesian mixed-effects regression model [@burknerBrmsPackageBayesian2017]. **Generative Preference** (GenPref) is an estimate of ordering preferences driven by a combination of phonological and semantic predictors [@morgan2016abstractknowledgedirect]. **RelFreq** is the relative corpus frequency of the alphabetically ordered form (centered):
 
 $$\text{RelFreq}_i = P(\text{alpha})_i - 0.5, \quad \text{where} \quad P(\text{alpha})_i = \frac{c_{\alpha,i}}{c_{\alpha,i} + c_{n,i}}$$
 
-and $c_{\alpha,i}$, $c_{n,i}$ are the corpus counts of the alpha-ordered and reverse-ordered forms of binomial $i$, respectively. **Log total frequency** is $\ln(c_{\alpha,i} + c_{n,i})$, the natural log of total corpus occurrences of the binomial in either order, centered. We include interaction terms for GenPref and log total frequency as well as RelFreq and log total frequency, allowing the model to capture how ordering preferences may be differently affected by GenPref and RelFreq depending on the overall frequency of that binomial:
+and $c_{\alpha,i}$, $c_{n,i}$ are the corpus counts of the alpha-ordered and non-alphabetical forms of binomial $i$, respectively. **Log total frequency** is $\ln(c_{\alpha,i} + c_{n,i})$, the natural log of total corpus occurrences of the binomial in either order, centered. We include interaction terms for GenPref and log total frequency as well as RelFreq and log total frequency, allowing the model to capture how ordering preferences may be differently affected by GenPref and RelFreq depending on the overall frequency of that binomial:
 
 $$\text{preference} \sim \text{GenPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})$$
 
@@ -244,39 +203,29 @@ $$\text{preference} \sim (\text{GenPref} + \text{RelFreq} + \ln(\text{total})) \
 
 #### Final Checkpoint
 
+The results of the Bayesian mixed-effects regression at the final checkpoint are presented in @tbl-pref-final and visualized in @fig-pref-final-coefs. The results suggest that relative frequency is a credible predictor of the model's ordering preferences across all six models, which is consistent with models' ordering preferences being at least partly driven by the distributional statistics of their training data. Interestingly, the effect of GenPref shows a graded pattern across model sizes, with the 125M parameter models showing a credible positive effect, the 350M models showing a somewhat weaker effect, and the 1.3B models showing little credible evidence of a GenPref effect.
+
 ```{r pref-final-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=7}
 #| label: fig-pref-final-coefs
-#| fig-cap: "Posterior fixed-effect estimates for predictors of raw preference at the final training checkpoint. Error bars show 95% credible intervals; asterisks mark intervals that exclude zero."
+#| fig-cap: "Posterior fixed-effect estimates for predictors of raw preference at the final training checkpoint. Error bars show 95% credible intervals."
 coef_plot(pref_coefs_final)
-```
-
-```{r pref-final-table, echo=FALSE, message=FALSE, warning=FALSE}
-#| label: tbl-pref-final
-#| tbl-cap: "Posterior fixed effects for preference at the final checkpoint. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
-if (nrow(pref_coefs_final) > 0) {
-  pref_coefs_final |>
-    mutate(term = gsub("\n", " ", as.character(term))) |>
-    select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
-           `P(β > 0)` = p_gt0) |>
-    arrange(Corpus, Size, Term) |>
-    kable(digits = 3)
-}
 ```
 
 #### GenPref Significance Over Training
 
-(Prose goes here.)
+The results from @fig-pref-traj-sig suggest a size-graded pattern across the BabyLMs, with smaller models showing credible GenPref effects from early in training while larger models show weaker effects throughout training. Interestingly, the C4-trained 1.3B model shows a credible GenPref effect early in training that attenuates with further exposure, suggesting that the learning of generative preferences may depend on an interaction between model scale and the volume and diversity of the training data.
 
 ```{r plot-5c, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5.5}
 #| label: fig-pref-traj-sig
-#| fig-cap: "GenPref coefficient (95% CI) at each of 20 sampled training checkpoints, for raw preference models. Point fill encodes P(β > 0): blue indicates the posterior is predominantly positive, red predominantly negative, grey uncertain."
+#| fig-cap: "GenPref coefficient (95% CI) at each of 20 sampled training checkpoints, for raw preference models. Point fill encodes P($\\beta$ > 0): green indicates the posterior is predominantly positive, gold predominantly negative, grey uncertain."
 genpref_sig_timeline(pref_traj_coefs)
 ```
 
 #### Checkpoint-Interacted Model
 
-(Prose goes here.)
+The results of the checkpoint-interacted model are presented in @tbl-pref-ckpt and visualized in @fig-pref-ckpt-coefs. Because all predictors are centered, main effects in this model reflect the estimated influence of each predictor at the midpoint of training. In other words, the main effects of GenPref and RelFreq reflect their respective influences halfway through training, while interactions with training stage indicate whether each effect grows or shrinks linearly over the course of training.
+
+The results suggest that there is an effect of relative frequency across all six models at the training midpoint, and that this effect grows stronger as training progresses. Interestingly, the GenPref results differ across corpora and model sizes. Among the BabyLM models, the results suggest that only the 125M model shows an effect of GenPref at the training midpoint, and that this effect grows further over the course of training, while the 350M and 1.3B BabyLM models show little credible evidence of a GenPref effect. Among the C4 models, the results suggest that all three models show a credible GenPref effect at the training midpoint, though this effect appears to be weakest for the 350M model.
 
 ```{r pref-ckpt-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=14, fig.height=7}
 #| label: fig-pref-ckpt-coefs
@@ -284,27 +233,13 @@ genpref_sig_timeline(pref_traj_coefs)
 coef_plot(pref_coefs_ckpt)
 ```
 
-```{r pref-ckpt-table, echo=FALSE, message=FALSE, warning=FALSE}
-#| label: tbl-pref-ckpt
-#| tbl-cap: "Posterior fixed effects from the checkpoint-interacted preference model."
-if (nrow(pref_coefs_ckpt) > 0) {
-  pref_coefs_ckpt |>
-    mutate(term = gsub("\n", " ", as.character(term))) |>
-    select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
-           `P(β > 0)` = p_gt0) |>
-    arrange(Corpus, Size, Term) |>
-    kable(digits = 3)
-}
-```
-
 ## Signed Gap
 
-In this section, we examine the **signed gap**: the difference between each model's preference score and the log corpus frequency ratio for that binomial. Formally:
+Since we have access to the exact training data each model encountered, we are able to calculate exactly how many times the model has seen each ordering of each binomial at each checkpoint. Thus, in this section, we examine the **signed gap**: the difference between each model's preference score and the log corpus frequency ratio for that binomial. Formally:
 
 $$\text{signed gap}_i = \text{preference}_i - \ln\frac{c_{\alpha,i}}{c_{n,i}}$$
 
-where $\text{preference}_i$ is defined as above and $c_{\alpha,i} / c_{n,i}$ is the corpus frequency ratio of the alpha-ordered to the reverse-ordered form. A signed gap of zero means the model's preference exactly matches what corpus frequency predicts; positive values indicate a stronger preference for alpha order than corpus statistics would suggest, and negative values the reverse. Using the signed gap as the outcome allows us to ask whether models develop ordering preferences that go beyond simply reflecting the distributional statistics of their training data. We regress signed gap on the same predictors as the preference model:
+where $\text{preference}_i$ is defined as above and $c_{\alpha,i} / c_{n,i}$ is the corpus frequency ratio of the alphabetically ordered to the non-alphabetical form. A signed gap of zero means the model's preference exactly matches what corpus frequency predicts; positive values indicate a stronger preference for alpha order than corpus statistics would suggest, and negative values the reverse. Using the signed gap as the outcome allows us to ask whether models develop ordering preferences that go beyond simply reflecting the distributional statistics of their training data. We regress signed gap on the same predictors as the preference model:
 
 $$\text{signed gap} \sim \text{GenPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})$$
 
@@ -316,58 +251,36 @@ $$\text{signed gap} \sim (\text{GenPref} + \text{RelFreq} + \ln(\text{total})) \
 
 #### Final Checkpoint
 
+The results of the Bayesian mixed-effects regression for signed gap at the final checkpoint are presented in @tbl-sg-final and visualized in @fig-sg-final-coefs. Recall that because the signed gap removes the contribution of corpus frequency from the preference score, a credible positive effect of GenPref here would suggest that models develop ordering preferences consistent with phonological and semantic biases over and above what the training corpus frequency ratio would predict. A positive effect of relative frequency, on the other hand, would indicate that the model's ordering preference for the alphabetically ordered form is more extreme than the training data alone would predict, while a negative effect would indicate the opposite.
+
+The results for relative frequency are quite mixed across model sizes and corpora. Among the BabyLM models, the largest model shows a negative effect of relative frequency, while the two smaller models show little to no effect. Among the C4 models, the pattern is reversed: the two smaller models show a negative effect of relative frequency, while the largest shows little evidence of an effect. In terms of generative preferences, the 125M BabyLM model shows a weak positive effect of GenPref, while the two larger BabyLM models show little evidence of an effect. For the C4 models, the pattern is similar: the 125M C4 model shows a possible effect of GenPref (approximately 89% of posterior samples were greater than zero), while the two larger C4 models show little evidence of an effect.
+
+Taken together, the signed gap results suggest that models' ordering preferences are broadly consistent with what corpus frequency predicts, with limited evidence of preferences that go beyond the training distribution. Interestingly, the modest GenPref effects that do appear are consistently concentrated in the smallest models across both corpora, suggesting that smaller models may be more sensitive to abstract ordering biases even when controlling for frequency.
+
 ```{r sg-final-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=7}
 #| label: fig-sg-final-coefs
-#| fig-cap: "Posterior fixed-effect estimates for predictors of signed gap (preference minus log corpus frequency ratio) at the final training checkpoint. Asterisks mark credible intervals that exclude zero."
+#| fig-cap: "Posterior fixed-effect estimates for predictors of signed gap (preference minus log corpus frequency ratio) at the final training checkpoint. Error bars show 95% credible intervals."
 coef_plot(sg_coefs_final)
-```
-
-```{r sg-final-table, echo=FALSE, message=FALSE, warning=FALSE}
-#| label: tbl-sg-final
-#| tbl-cap: "Posterior fixed effects for signed gap at the final checkpoint."
-if (nrow(sg_coefs_final) > 0) {
-  sg_coefs_final |>
-    mutate(term = gsub("\n", " ", as.character(term))) |>
-    select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
-           `P(β > 0)` = p_gt0) |>
-    arrange(Corpus, Size, Term) |>
-    kable(digits = 3)
-}
 ```
 
 #### GenPref Significance Over Training
 
-(Prose goes here.)
+The results from @fig-sg-traj-sig largely mirror the preference trajectory in @fig-pref-traj-sig. The 125M models show a steady increase in the GenPref coefficient over training regardless of corpus, while the two larger BabyLM models show little to no effect of GenPref throughout. Interestingly, the two larger C4 models do show some evidence of a GenPref effect over training, suggesting that training data diversity may play a role in the learning of generative preferences. Additionally, as was the case in the preference trajectory, the largest C4 model shows a U-shaped pattern, with the GenPref effect initially growing before subsequently declining.
 
 ```{r plot-2c, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5.5}
 #| label: fig-sg-traj-sig
-#| fig-cap: "GenPref coefficient (95% CI) at each of 20 sampled training checkpoints, for signed gap models. Point fill encodes P(β > 0)."
+#| fig-cap: "GenPref coefficient (95% CI) at each of 20 sampled training checkpoints, for signed gap models. Point fill encodes P($\\beta$ > 0): green indicates the posterior is predominantly positive, gold predominantly negative, grey uncertain."
 genpref_sig_timeline(sg_traj_coefs)
 ```
 
 #### Checkpoint-Interacted Model
 
-(Prose goes here.)
+The results of the checkpoint-interacted signed gap model are presented in @tbl-sg-ckpt and visualized in @fig-sg-ckpt-coefs. Among the BabyLM models, the results suggest that the 125M model shows a credible effect of GenPref at the training midpoint, and that this effect grows stronger as training progresses. The negative effect of relative frequency across all three BabyLM models suggests that, at the midpoint of training, the models' preferences for the alphabetically ordered form fall short of what corpus frequency alone would predict, and that this gap narrows over the course of training (given the positive interaction effect between relative frequency and checkpoint). For the C4 models, the 125M and 1.3B models show an effect of GenPref, while the 350M model does not. The C4 models show a similar pattern for relative frequency as the BabyLM models, with a negative effect that also narrows over training.
 
 ```{r sg-ckpt-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=14, fig.height=7}
 #| label: fig-sg-ckpt-coefs
 #| fig-cap: "Posterior fixed-effect estimates from the checkpoint-interacted signed gap model."
 coef_plot(sg_coefs_ckpt)
-```
-
-```{r sg-ckpt-table, echo=FALSE, message=FALSE, warning=FALSE}
-#| label: tbl-sg-ckpt
-#| tbl-cap: "Posterior fixed effects from the checkpoint-interacted signed gap model."
-if (nrow(sg_coefs_ckpt) > 0) {
-  sg_coefs_ckpt |>
-    mutate(term = gsub("\n", " ", as.character(term))) |>
-    select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
-           `P(β > 0)` = p_gt0) |>
-    arrange(Corpus, Size, Term) |>
-    kable(digits = 3)
-}
 ```
 
 ## Deviation from Corpus Predictions
@@ -386,6 +299,14 @@ $$|\text{signed gap}| \sim \text{tokens} \times \ln(\text{total}) + (1 \mid \tex
 
 ### Results
 
+The results from @fig-abs-signed-gap suggest that the mean absolute signed gap grows throughout training for all six models, indicating that models' ordering preferences deviate more from what corpus frequency alone would predict as training progresses. Among the BabyLM models, this growth is most pronounced for the 1.3B model and weakest for the 350M model. Among the C4 models, all three follow a broadly similar trajectory.
+
+Interestingly, @fig-freq-tracking suggests that even as the absolute signed gap grows over training, models' ordering preferences simultaneously become more correlated with corpus frequency. In other words, models' preferences grow more extreme over training, but in a direction that is broadly consistent with the corpus frequency ordering.
+
+Finally, the results of the Bayesian mixed-effects regression are presented in @tbl-absgap and visualized in @fig-absgap-coefs. The effect of training stage on absolute signed gap is quite mixed across models. Among the BabyLM models, the 125M and 1.3B models show a positive effect, while the 350M model shows a negative effect. Among the C4 models, the two smaller models show a slightly negative effect while the largest shows a slightly positive effect. In general, the effect of training stage appears weaker for the C4 models than for the BabyLM models, suggesting that training data diversity may dampen the growth of the gap between models' learned preferences and what corpus frequency alone predicts.
+
+The effect of overall frequency also varies across models. The 125M and 1.3B BabyLM models show a slightly negative effect of overall frequency, suggesting that the absolute signed gap is smaller for more frequently encountered binomials, while the 350M BabyLM model shows a large positive effect, suggesting the opposite. All three C4 models show a strong positive effect of overall frequency, indicating that the gap between model preference and the frequency-based prediction is larger for higher-frequency binomials. This pattern is of particular interest given existing work demonstrating frequency-dependent preference extremity in humans, whereby humans develop more extreme ordering preferences for high-frequency binomials over time [e.g., @morganFrequencydependentRegularizationIterated2016a; @houghton2024frequencydependentpreferenceextremity; @houghton2025boltsnutslanguage]. The present results suggest that model size and training data diversity may modulate a similar effect in language models, though a full investigation of this question is left for future research.
+
 ```{r plot-d2, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
 #| label: fig-abs-signed-gap
 #| fig-cap: "Mean absolute signed gap across items at each of 20 sampled checkpoints. Higher values indicate that models' preference magnitudes deviate more from what corpus frequency predicts, on average."
@@ -401,8 +322,13 @@ if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
     scale_x_continuous("Training tokens (millions)") +
     scale_y_continuous("Mean |signed gap|  (95% CI of mean)") +
     facet_grid(corpus ~ ., scales = "free_x") +
-    theme_bw(base_size = 11) +
-    theme(legend.position = "right", panel.grid.minor = element_blank())
+    theme_bw(base_size = 13) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          axis.text = element_text(colour = "black", size = 13),
+          axis.title = element_text(colour = "black", size = 15),
+          legend.text = element_text(colour = "black", size = 13),
+          legend.title = element_text(colour = "black", size = 14),
+          strip.text = element_text(colour = "black", face = "bold", size = 14))
 }
 ```
 
@@ -421,8 +347,13 @@ if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
     scale_x_continuous("Training tokens (millions)") +
     scale_y_continuous("Pearson r  (preference ~ log freq ratio)", limits = c(NA, 1)) +
     facet_grid(corpus ~ ., scales = "free_x") +
-    theme_bw(base_size = 11) +
-    theme(legend.position = "right", panel.grid.minor = element_blank())
+    theme_bw(base_size = 13) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          axis.text = element_text(colour = "black", size = 13),
+          axis.title = element_text(colour = "black", size = 15),
+          legend.text = element_text(colour = "black", size = 13),
+          legend.title = element_text(colour = "black", size = 14),
+          strip.text = element_text(colour = "black", face = "bold", size = 14))
 }
 ```
 
@@ -434,20 +365,163 @@ if (nrow(absgap_coefs) > 0) {
 }
 ```
 
-```{r tbl-p1, echo=FALSE, message=FALSE, warning=FALSE}
+# Discussion
+
+The results of the present study suggest that the models trained here do develop binomial ordering preferences over the course of training, and that these preferences are at least partly driven by the distributional statistics of the training data. Beyond frequency, however, the picture is more nuanced. Smaller models — particularly the 125M models across both corpora — show the most consistent evidence of GenPref effects, suggesting that they are sensitive to abstract ordering preferences over and above what corpus frequency alone would predict. Larger models, by contrast, show weaker or absent GenPref effects at the final checkpoint, though the trajectory results suggest that these models do show some sensitivity to GenPref earlier in training, with the effect weakening as training progresses. This may reflect a tendency for larger models to gradually shift toward relying on distributional frequency as they accumulate more training experience, at the expense of abstract knowledge. The nature of the training corpus also appears to matter: C4-trained models generally show weaker deviations from corpus frequency predictions than BabyLM-trained models, suggesting that training data diversity plays a role in shaping models' ordering preferences. Finally, as training progresses, models' preferences grow more extreme in a direction broadly consistent with corpus frequency, but the absolute gap between model preferences and frequency-based predictions also grows, with the size of this gap modulated by both model size and item frequency in a manner reminiscent of frequency-dependent preference extremity observed in humans.
+
+# Conclusion
+
+\bibliography{references}
+\bibliographystyle{colm2026_conference}
+
+\appendix
+
+# Training Quality {#sec-training-quality}
+
+```{r}
+#| label: tbl-perplexity
+#| tbl-cap: "Perplexity at initialization and final checkpoint for all six models. Perplexity = $e^{\\text{loss}}$; initial perplexity is derived from the first logged training step; final perplexity is measured on a held-out validation set (first 5\\% of BabyLM training split for BabyLM models; official C4 validation split for C4 models). The BabyLM 1.3B model's elevated final perplexity relative to 350M reflects overfitting pressure on a small corpus."
+#| echo: false
+#| message: false
+#| warning: false
+
+library(dplyr)
+library(knitr)
+
+ppl  <- read.csv("../Data/training_quality/perplexity_results.csv")
+loss <- read.csv("../Data/training_quality/loss_curves.csv")
+
+initial_ppl <- loss |>
+  group_by(corpus, params) |>
+  slice_min(order_by = step, n = 1) |>
+  mutate(initial_ppl = round(exp(loss))) |>
+  select(Corpus = corpus, Params = params, `Initial PPL` = initial_ppl)
+
+ppl |>
+  rename(`Final PPL` = Perplexity) |>
+  left_join(initial_ppl, by = c("Corpus", "Params")) |>
+  mutate(Params = factor(Params, levels = c("125M", "350M", "1.3B"))) |>
+  arrange(Corpus, Params) |>
+  select(Corpus, Params, `Initial PPL`, `Final PPL`) |>
+  kable(align = c("l", "r", "r", "r"))
+```
+
+```{r}
+#| label: fig-loss-curves
+#| fig-cap: "Training loss over the course of training for all six models, separated by corpus. All models start near the theoretical random baseline ($\\ln 8192 \\approx 9.01$) and converge smoothly; the 1.3B model achieves the lowest final loss in both corpora."
+#| echo: false
+#| message: false
+#| warning: false
+
+library(ggplot2)
+
+df <- read.csv("../Data/training_quality/loss_curves.csv")
+df$params <- factor(df$params, levels = c("125M", "350M", "1.3B"))
+
+ggplot(df, aes(x = tokens_seen / 1e9, y = loss, color = params)) +
+  geom_line(linewidth = 0.7, alpha = 0.85) +
+  facet_wrap(~corpus, scales = "free_x") +
+  geom_hline(yintercept = log(8192), linetype = "dashed", color = "gray50", linewidth = 0.4) +
+  scale_color_manual(values = c("125M" = "#F0B323", "350M" = "#007030", "1.3B" = "#154733"),
+                     name = "Model size") +
+  labs(x = "Tokens seen (B)", y = "Cross-entropy loss", color = "Params") +
+  theme_classic(base_size = 13) +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(face = "bold", colour = "black", size = 14),
+        axis.text = element_text(colour = "black", size = 13),
+        axis.title = element_text(colour = "black", size = 15),
+        legend.text = element_text(colour = "black", size = 13),
+        legend.title = element_text(colour = "black", size = 14))
+```
+
+# Posterior Coefficient Tables
+
+## Preference: Final Checkpoint
+
+```{r tbl-app-pref-final, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-pref-final
+#| tbl-cap: "Posterior fixed effects for preference at the final checkpoint. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
+if (nrow(pref_coefs_final) > 0) {
+  pref_coefs_final |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "$-$", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `$P(\\beta > 0)$` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3, escape = FALSE)
+}
+```
+
+## Preference: Checkpoint-Interacted Model
+
+```{r tbl-app-pref-ckpt, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-pref-ckpt
+#| tbl-cap: "Posterior fixed effects from the checkpoint-interacted preference model."
+if (nrow(pref_coefs_ckpt) > 0) {
+  pref_coefs_ckpt |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "$-$", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `$P(\\beta > 0)$` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3, escape = FALSE)
+}
+```
+
+## Signed Gap: Final Checkpoint
+
+```{r tbl-app-sg-final, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-sg-final
+#| tbl-cap: "Posterior fixed effects for signed gap at the final checkpoint."
+if (nrow(sg_coefs_final) > 0) {
+  sg_coefs_final |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "$-$", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `$P(\\beta > 0)$` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3, escape = FALSE)
+}
+```
+
+## Signed Gap: Checkpoint-Interacted Model
+
+```{r tbl-app-sg-ckpt, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-sg-ckpt
+#| tbl-cap: "Posterior fixed effects from the checkpoint-interacted signed gap model."
+if (nrow(sg_coefs_ckpt) > 0) {
+  sg_coefs_ckpt |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "$-$", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `$P(\\beta > 0)$` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3, escape = FALSE)
+}
+```
+
+## Absolute Signed Gap
+
+```{r tbl-app-absgap, echo=FALSE, message=FALSE, warning=FALSE}
 #| label: tbl-absgap
 #| tbl-cap: "Posterior fixed effects for absolute signed gap. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
 if (nrow(absgap_coefs) > 0) {
   absgap_coefs |>
-    mutate(term = gsub("\n", " ", as.character(term))) |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "$-$", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
     select(Corpus = corpus, Size = model_size, Term = term,
            Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
-           `P(β > 0)` = p_gt0) |>
+           `$P(\\beta > 0)$` = p_gt0) |>
     arrange(Corpus, Size, Term) |>
-    kable(digits = 3)
+    kable(digits = 3, escape = FALSE)
 }
 ```
-
-# Discussion
-
-# Conclusion

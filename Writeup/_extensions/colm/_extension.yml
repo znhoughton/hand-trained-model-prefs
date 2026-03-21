@@ -9,3 +9,4 @@ contributes:
       format-resources:
         - colm2026_conference.sty
         - colm2026_conference.bst
+        - fancyhdr.sty

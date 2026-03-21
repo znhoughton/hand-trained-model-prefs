@@ -44,6 +44,10 @@ $endif$
 % Line numbers for submission mode (toggled by \ifcolmsubmission in body)
 \usepackage{lineno}
 
+% Caption placement — force table captions below (matching CoLM template)
+\usepackage{caption}
+\captionsetup[table]{position=below}
+
 % hyperref — load after natbib (already loaded by colm sty)
 \usepackage{hyperref}
 \definecolor{darkblue}{rgb}{0, 0, 0.5}
@@ -100,10 +104,5 @@ $abstract$
 $endif$
 
 $body$
-
-$if(bibliography)$
-\bibliography{$for(bibliography)$$bibliography$$sep$,$endfor$}
-\bibliographystyle{colm2026_conference}
-$endif$
 
 \end{document}
