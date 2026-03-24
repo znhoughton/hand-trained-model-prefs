@@ -1,0 +1,112 @@
+CmdStan path set to: /opt/modeling/zhoughton/.cmdstan/cmdstan-2.33.1
+
+
+processing file: analysis.Rmd
+1/56                         
+2/56 [setup]                 
+3/56                         
+4/56 [libraries]             
+5/56                         
+6/56 [brms-config]           
+7/56                         
+8/56 [helpers]               
+9/56                         
+10/56 [open-db]               
+CmdStan path set to: /opt/modeling/zhoughton/.cmdstan/cmdstan-2.33.1
+
+
+processing file: analysis.Rmd
+1/56                         
+2/56 [setup]                 
+3/56                         
+4/56 [libraries]             
+5/56                         
+6/56 [brms-config]           
+7/56                         
+8/56 [helpers]               
+9/56                         
+10/56 [open-db]               
+1111//5656                                                  
+
+12/56 [load-genpref]          
+12/56 [load-genpref]          
+13/56                         
+14/56 [load-model-data-fn]    
+15/56                         
+16/56 [setup-parallel]        
+13/56                         
+14/56 [load-model-data-fn]    
+15/56                         
+16/56 [setup-parallel]        
+17/56                         
+18/56 [sg-analysis1-fit]      
+17/56                         
+18/56 [sg-analysis1-fit]      
+19/56                         
+20/56 [sg-plot1]              
+19/56                         
+20/56 [sg-plot1]              
+21/56                         
+22/56 [sg-analysis2-fit]      
+21/56                         
+22/56 [sg-analysis2-fit]      
+23/56                         
+24/56 [sg-plot2a]             
+25/56                         
+26/56 [sg-plot2b]             
+27/56                         
+28/56 [sg-analysis3-fit]      
+23/56                         
+24/56 [sg-plot2a]             
+25/56                         
+26/56 [sg-plot2b]             
+27/56                         
+28/56 [sg-analysis3-fit]      
+29/56                         
+30/56 [sg-plot3a]             
+31/56                         
+32/56 [sg-plot3b]             
+29/56                         
+30/56 [sg-plot3a]             
+31/56                         
+32/56 [sg-plot3b]             
+33/56                         
+34/56 [pref-analysis4-fit]    
+33/56                         
+34/56 [pref-analysis4-fit]    
+35/56                         
+36/56 [pref-plot4]            
+37/56                         
+38/56 [pref-analysis5-fit]    
+35/56                         
+36/56 [pref-plot4]            
+37/56                         
+38/56 [pref-analysis5-fit]    
+39/56                         
+40/56 [pref-plot5a]           
+41/56                         
+42/56 [pref-plot5b]           
+43/56                         
+44/56 [pref-analysis6-fit]    
+39/56                         
+40/56 [pref-plot5a]           
+41/56                         
+42/56 [pref-plot5b]           
+43/56                         
+44/56 [pref-analysis6-fit]    
+45/56                         
+46/56 [pref-plot6a]           
+47/56                         
+48/56 [pref-plot6b]           
+45/56                         
+46/56 [pref-plot6a]           
+47/56                         
+48/56 [pref-plot6b]           
+49/56                         
+50/56 [absgap-fit]            
+49/56                         
+50/56 [absgap-fit]            
+51/56                         
+52/56 [absgap-lognormal-fit]  
+51/56                         
+52/56 [absgap-lognormal-fit]  
