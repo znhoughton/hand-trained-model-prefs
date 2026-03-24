@@ -331,15 +331,13 @@ If models behave like humans, AbsPref should predict ordering
 preferences more strongly for lower-frequency binomials, with relative
 frequency playing a larger role for higher-frequency items. By examining
 ordering preferences at the final checkpoint and across the full
-learning trajectory --- including both the direction of preferences and
-how their magnitude evolves relative to frequency predictions --- we
-assess not only whether this human-like abstract-storage trade-off
-emerges, but when and how it develops. If the null results found in
-\citet{houghton2025roleabstractrepresentations} reflect memorization due
-to a combination of training data and model size, then this should be
-clear in the learning trajectories. On the other hand, if it is an
-architectural limitation, then we should see no emergence of abstract
-preferences at any point in training.
+learning trajectory we assess not only whether this human-like
+abstract-storage trade-off emerges, but when and how it develops. If the
+null results found in \citet{houghton2025roleabstractrepresentations}
+reflect memorization due to a combination of training data and model
+size, then this should be clear in the learning trajectories. On the
+other hand, if it is an architectural limitation, then we should see no
+emergence of abstract preferences at any point in training.
 
 \section{Model Training}\label{model-training}
 
@@ -373,35 +371,8 @@ training and pushed to HuggingFace Hub, giving us dense coverage of each
 model's learning trajectory. All models and checkpoints will be made
 publicly available.\footnote{The huggingface account would reveal the
   identity of one of the authors and is thus omitted from the
-  double-blind review phase.} Table~\ref{tbl-models} summarizes the key
-training parameters for each model.
-
-\begin{table}
-
-\centering{
-
-\begin{tabular}{lrrrr}
-\toprule
-Corpus & Params & Total tokens & Checkpoints & LR\\
-\midrule
-BabyLM & 125M & $\sim 9.1\mathrm{B}$ & $\sim 910$ & $3\times10^{-4}$\\
-BabyLM & 350M & $\sim 9.1\mathrm{B}$ & $\sim 910$ & $1\times10^{-4}$\\
-BabyLM & 1.3B & $\sim 9.1\mathrm{B}$ & $\sim 860$ & $1\times10^{-4}$\\
-C4 & 125M & $\sim 10\mathrm{B}$ & $\sim 1{,}010$ & $3\times10^{-4}$\\
-C4 & 350M & $\sim 10\mathrm{B}$ & $\sim 1{,}005$ & $1\times10^{-4}$\\
-\addlinespace
-C4 & 1.3B & $\sim 10\mathrm{B}$ & $\sim 960$ & $1\times10^{-4}$\\
-\bottomrule
-\end{tabular}
-
-}
-
-\caption{\label{tbl-models}Training configuration for all six models.
-All models use the OPT architecture, a shared BPE tokenizer (vocab
-8,192; context 1,024 tokens), AdamW optimization, and a linear LR
-schedule with 4,000 warmup steps.}
-
-\end{table}%
+  double-blind review phase.} Key training parameters for each model are
+summarized in Table~\ref{tbl-models} (Appendix).
 
 All six models showed smooth convergence in training loss throughout
 training, starting near the theoretical random baseline
@@ -480,9 +451,7 @@ factors predict each measure at the final checkpoint. The second
 examines how these preferences develop over the course of training,
 tracking how the influence of abstract and frequency-based factors
 changes across checkpoints and how the overall magnitude of preferences
---- including whether models develop increasingly extreme preferences
-for more frequently encountered binomials --- evolves as training
-progresses.
+evolves as training progresses.
 
 \subsubsection{Ordering Preferences at the Final
 Checkpoint}\label{ordering-preferences-at-the-final-checkpoint}
@@ -569,8 +538,8 @@ distributional statistics of their training data. Interestingly, the
 effect of AbsPref shows a graded pattern across model sizes, with the
 125M parameter models showing a positive effect, the 350M models showing
 a somewhat weaker effect, and the 1.3B models showing little evidence of
-an effect. Posterior predictive checks suggest adequate model fit
-(Figure~\ref{fig-ppc-pref}).
+an effect. Posterior predictive checks suggest adequate model fit (see
+Figure~\ref{fig-ppc-pref}, Appendix).
 
 \begin{figure}
 
@@ -583,21 +552,6 @@ an effect. Posterior predictive checks suggest adequate model fit
 \caption{\label{fig-pref-final-coefs}Posterior fixed-effect estimates
 for predictors of raw preference at the final training checkpoint. Error
 bars show 95\% credible intervals.}
-
-\end{figure}%
-
-\begin{figure}
-
-\centering{
-
-\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-pref-1.pdf}
-
-}
-
-\caption{\label{fig-ppc-pref}Posterior predictive check for the
-preference model at the final training checkpoint. The dark line shows
-the observed outcome density; light lines show 100 replicated datasets
-drawn from the posterior predictive distribution.}
 
 \end{figure}%
 
@@ -636,7 +590,8 @@ training distribution. Interestingly, the modest AbsPref effects that do
 appear are consistently concentrated in the smallest models across both
 corpora, suggesting that smaller models may be more sensitive to
 abstract ordering biases even when controlling for frequency. Posterior
-predictive checks suggest adequate model fit (Figure~\ref{fig-ppc-sg}).
+predictive checks suggest adequate model fit (see
+Figure~\ref{fig-ppc-sg}, Appendix).
 
 \begin{figure}
 
@@ -650,21 +605,6 @@ predictive checks suggest adequate model fit (Figure~\ref{fig-ppc-sg}).
 predictors of preference deviation (preference minus log relative
 frequency ratio) at the final training checkpoint. Error bars show 95\%
 credible intervals.}
-
-\end{figure}%
-
-\begin{figure}
-
-\centering{
-
-\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-sg-1.pdf}
-
-}
-
-\caption{\label{fig-ppc-sg}Posterior predictive check for the preference
-deviation model at the final training checkpoint. The dark line shows
-the observed outcome density; light lines show 100 replicated datasets
-drawn from the posterior predictive distribution.}
 
 \end{figure}%
 
@@ -767,12 +707,12 @@ preferences for high-frequency binomials
 The present results suggest that under certain circumstances language
 models may show a similar pattern, though a full investigation of this
 question is left for future research. Posterior predictive checks
-suggest adequate model fit (Figure~\ref{fig-ppc-absgap}). Finally, as a
-sanity check, we confirmed that the correlation between model preference
-and log relative frequency increases steadily throughout training for
-all six models (see Figure~\ref{fig-cor-traj}, Appendix), confirming
-that models are learning ordering preferences even as the absolute
-preference deviation grows.
+suggest adequate model fit (see Figure~\ref{fig-ppc-absgap}, Appendix).
+Finally, as a sanity check, we confirmed that the correlation between
+model preference and log relative frequency increases steadily
+throughout training for all six models (see Figure~\ref{fig-cor-traj},
+Appendix), confirming that models are learning ordering preferences even
+as the absolute preference deviation grows.
 
 \begin{figure}
 
@@ -802,21 +742,6 @@ predictors of absolute preference deviation. The main effect of training
 stage (tokens, scaled and centered) captures overall growth or shrinkage
 in preference magnitude; the interaction tests whether this depends on
 item-level corpus exposure.}
-
-\end{figure}%
-
-\begin{figure}
-
-\centering{
-
-\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-absgap-1.pdf}
-
-}
-
-\caption{\label{fig-ppc-absgap}Posterior predictive check for the
-absolute preference deviation model. The dark line shows the observed
-outcome density; light lines show 100 replicated datasets drawn from the
-posterior predictive distribution.}
 
 \end{figure}%
 
@@ -905,6 +830,35 @@ boundary (dashed line) now correctly separates positive from negative
 cases.}
 
 \end{figure}%
+
+\section{Training Configuration}\label{sec-training-config}
+
+\begin{table}
+
+\centering{
+
+\begin{tabular}{lrrrr}
+\toprule
+Corpus & Params & Total tokens & Checkpoints & LR\\
+\midrule
+BabyLM & 125M & $\sim 9.1\mathrm{B}$ & $\sim 910$ & $3\times10^{-4}$\\
+BabyLM & 350M & $\sim 9.1\mathrm{B}$ & $\sim 910$ & $1\times10^{-4}$\\
+BabyLM & 1.3B & $\sim 9.1\mathrm{B}$ & $\sim 860$ & $1\times10^{-4}$\\
+C4 & 125M & $\sim 10\mathrm{B}$ & $\sim 1{,}010$ & $3\times10^{-4}$\\
+C4 & 350M & $\sim 10\mathrm{B}$ & $\sim 1{,}005$ & $1\times10^{-4}$\\
+\addlinespace
+C4 & 1.3B & $\sim 10\mathrm{B}$ & $\sim 960$ & $1\times10^{-4}$\\
+\bottomrule
+\end{tabular}
+
+}
+
+\caption{\label{tbl-models}Training configuration for all six models.
+All models use the OPT architecture, a shared BPE tokenizer (vocab
+8,192; context 1,024 tokens), AdamW optimization, and a linear LR
+schedule with 4,000 warmup steps.}
+
+\end{table}%
 
 \section{Training Quality}\label{sec-training-quality}
 
@@ -1319,6 +1273,53 @@ training.}
 
 \caption{\label{fig-sg-ckpt-coefs}Posterior fixed-effect estimates from
 the checkpoint-interacted preference deviation model.}
+
+\end{figure}%
+
+\section{Posterior Predictive Checks}\label{sec-ppc}
+
+\begin{figure}
+
+\centering{
+
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-pref-1.pdf}
+
+}
+
+\caption{\label{fig-ppc-pref}Posterior predictive check for the
+preference model at the final training checkpoint. The dark line shows
+the observed outcome density; light lines show 100 replicated datasets
+drawn from the posterior predictive distribution.}
+
+\end{figure}%
+
+\begin{figure}
+
+\centering{
+
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-sg-1.pdf}
+
+}
+
+\caption{\label{fig-ppc-sg}Posterior predictive check for the preference
+deviation model at the final training checkpoint. The dark line shows
+the observed outcome density; light lines show 100 replicated datasets
+drawn from the posterior predictive distribution.}
+
+\end{figure}%
+
+\begin{figure}
+
+\centering{
+
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-absgap-1.pdf}
+
+}
+
+\caption{\label{fig-ppc-absgap}Posterior predictive check for the
+absolute preference deviation model. The dark line shows the observed
+outcome density; light lines show 100 replicated datasets drawn from the
+posterior predictive distribution.}
 
 \end{figure}%
 
