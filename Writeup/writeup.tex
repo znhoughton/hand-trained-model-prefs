@@ -144,8 +144,12 @@ in humans. Our main contributions are as follows:
   relative frequency.
 \item
   We examine the full learning trajectory of binomial ordering
-  preferences across training, allowing us to assess not only whether
-  human-like preferences emerge, but when and how they develop.
+  preferences across training --- including both the direction of
+  preferences (driven by abstract or frequency-based factors) and their
+  overall magnitude --- allowing us to assess not only whether
+  human-like preferences emerge, but when and how they develop, and
+  whether models show a frequency-dependent preference extremity
+  analogous to what is observed in humans.
 \item
   We introduce a preference deviation measure that captures the
   deviation between a model's ordering preference and what relative
@@ -205,16 +209,16 @@ language usage has a long history in the literature
 \citep[e.g.,][]{bybee1999usagebasedphonology, kapatsinski2010frequencyuseleads, stembergerAreInflectedForms2004, stembergerFrequencyLexicalStorage1986, houghton2025multiwordrepresentationsminds, morgan2016abstractknowledgedirect, morganFrequencydependentRegularizationIterated2016a, morganModelingIdiosyncraticPreferences2015}.
 For example, \citet{stembergerAreInflectedForms2004} demonstrated that
 inflection errors are less common for high-frequency words than
-low-frequency words, and \citet{bybee1999usagebasedphonology} showed
-that \emph{don't} is more phonetically reduced in high-frequency phrases
-(e.g., \emph{I don't know}) than in low-frequency ones (e.g., \emph{I
-don't go}). Processing measures have provided convergent evidence:
-recognition of constituent words is harder in high-frequency
+low-frequency words. Similarly, \citet{bybee1999usagebasedphonology}
+showed that \emph{don't} is more phonetically reduced in high-frequency
+phrases (e.g., \emph{I don't know}) than in low-frequency ones (e.g.,
+\emph{I don't go}). Processing measures have provided convergent
+evidence: recognition of constituent words is harder in high-frequency
 \citep{kapatsinski2010frequencyuseleads} and high-predictability
 \citep{houghton2025multiwordrepresentationsminds} phrases (e.g.,
 recognizing \emph{up} in \emph{pick up}), consistent with holistic
-storage of these sequences. Despite this broad empirical support, the
-mechanism driving the trade-off remains unclear.
+storage of these sequences. Despite this broad empirical support,
+however, the mechanism driving the trade-off remains unclear.
 
 \subsection{Accounts of Abstract Knowledge and Stored
 Knowledge}\label{accounts-of-abstract-knowledge-and-stored-knowledge}
@@ -226,32 +230,19 @@ distributional representations that reflect both the statistical
 regularities shared across items and the idiosyncratic properties of
 individual items, these systems can in principle capture both rule-like
 generalizations and item-specific stored knowledge within a unified
-architecture. To understand how, it helps to trace the development of
-these models. One of the oldest neurobiological models of language is a
-simple 2-layer perceptron
-\citep{rosenblatt1959twotheoremsstatistical, rosenblatt1960perceptronsimulationexperiments},
-a fully connected network capable of solving only linearly separable
-problems. A major advance came when
-\citet{rumelhart1986learningrepresentationsbackpropagating} showed that
-introducing a hidden layer allows the network to solve non-linearly
-separable problems
-\citep{rumelhart1986learningrepresentationsbackpropagating, pulvermuller2002neurosciencelanguagebrain}.
-The hidden layer achieves this by transforming the input into a new
+architecture. Neural networks enable this ability to capture both types
+of knowledge through hidden layers, which project the input into a new
 representational space where previously intractable classification
 boundaries become linear (see Section~\ref{sec-xor} for a concrete
-illustration). In a seminal follow-up,
-\citet{rumelhart1986learningtensesenglish} demonstrated that such a
-model can not only learn the English past tense, but reproduces the same
-u-shaped learning curve observed in children. Crucially, networks with
-hidden layers can support both abstraction and item-specific
-memorization within the same architecture.
+illustration).
 
-While these are much older models, at the heart of modern day
-transformer models \citep{vaswaniAttentionAllYou2017} is still a
-multi-layer perceptron. Thus, given their impressive capacity for
-language, it is possible that these models trade off between stored and
-abstract knowledge in a way that is similar to humans. Unfortunately,
-the evidence for this is quite mixed
+Multi-layer neural networks underlie a great deal of success behind the
+transformer architecture \citep{vaswaniAttentionAllYou2017}, which is
+the architecture behind nearly every successful language model that has
+emerged within the last few years. However, it is unclear whether
+transformer models trade off between stored and abstract knowledge in a
+way that is similar to humans. Indeed, the evidence for abstract
+knowledge altogether is quite mixed
 \citep{haleyThisBERTNow2020, lasriSubjectVerbAgreement2022, liAssessingCapacityTransformer2023, li2021areneuralnetworks, houghton2025roleabstractrepresentations, mccoy2023howmuchlanguage, misraLanguageModelsLearn2024, yaoBothDirectIndirect2025, kapatsinski2026transformersperformadaptive}.
 
 On one hand, there is evidence that GPT-2
@@ -270,7 +261,17 @@ GPT-2 exhibits adaptive partial pooling during training, such that
 predictions become increasingly context-specific for frequent contexts
 while continuing to draw on broader distributional information for rare
 ones, a pattern that closely mirrors the frequency-dependent trade-off
-between stored and abstract knowledge observed in humans.
+between stored and abstract knowledge observed in humans. Relatedly,
+\citet{jian2026humans} examined whether GPT-2's learning trajectory over
+the course of training is better characterized by abstraction-first or
+exemplar-first accounts. Using a novel divergence-based metric, they
+tracked how next-word prediction distributions change across training
+checkpoints. Under an exemplar-first account, next-word predictions for
+individual items should initially diverge from others in the same class
+before converging as training progresses. Instead, they found that
+class-level distinctions arise as soon as any item-specific change is
+detectable, suggesting that transformer models have an inductive bias
+toward abstraction when learning language.
 
 On the other hand, there is evidence that these models rely heavily on
 memorization
@@ -329,9 +330,11 @@ binomial ordering preferences \citep{morgan2016abstractknowledgedirect}.
 If models behave like humans, AbsPref should predict ordering
 preferences more strongly for lower-frequency binomials, with relative
 frequency playing a larger role for higher-frequency items. By examining
-both the final checkpoint and the full learning trajectory, we assess
-not only whether this human-like pattern emerges, but when and how it
-develops over the course of training. If the null results found in
+ordering preferences at the final checkpoint and across the full
+learning trajectory --- including both the direction of preferences and
+how their magnitude evolves relative to frequency predictions --- we
+assess not only whether this human-like abstract-storage trade-off
+emerges, but when and how it develops. If the null results found in
 \citet{houghton2025roleabstractrepresentations} reflect memorization due
 to a combination of training data and model size, then this should be
 clear in the learning trajectories. On the other hand, if it is an
@@ -373,49 +376,32 @@ publicly available.\footnote{The huggingface account would reveal the
   double-blind review phase.} Table~\ref{tbl-models} summarizes the key
 training parameters for each model.
 
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1045}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.1045}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.3134}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2239}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 8\tabcolsep) * \real{0.2537}}@{}}
+\begin{table}
 
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Corpus
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Params
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Total tokens
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Checkpoints
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-LR
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-BabyLM & 125M & \(\sim 9.1\mathrm{B}\) & \(\sim 910\) &
-\(3\times10^{-4}\) \\
-BabyLM & 350M & \(\sim 9.1\mathrm{B}\) & \(\sim 910\) &
-\(1\times10^{-4}\) \\
-BabyLM & 1.3B & \(\sim 9.1\mathrm{B}\) & \(\sim 860\) &
-\(1\times10^{-4}\) \\
-C4 & 125M & \(\sim 10\mathrm{B}\) & \(\sim 1{,}010\) &
-\(3\times10^{-4}\) \\
-C4 & 350M & \(\sim 10\mathrm{B}\) & \(\sim 1{,}005\) &
-\(1\times10^{-4}\) \\
-C4 & 1.3B & \(\sim 10\mathrm{B}\) & \(\sim 960\) & \(1\times10^{-4}\) \\
+\centering{
 
+\begin{tabular}{lrrrr}
+\toprule
+Corpus & Params & Total tokens & Checkpoints & LR\\
+\midrule
+BabyLM & 125M & $\sim 9.1\mathrm{B}$ & $\sim 910$ & $3\times10^{-4}$\\
+BabyLM & 350M & $\sim 9.1\mathrm{B}$ & $\sim 910$ & $1\times10^{-4}$\\
+BabyLM & 1.3B & $\sim 9.1\mathrm{B}$ & $\sim 860$ & $1\times10^{-4}$\\
+C4 & 125M & $\sim 10\mathrm{B}$ & $\sim 1{,}010$ & $3\times10^{-4}$\\
+C4 & 350M & $\sim 10\mathrm{B}$ & $\sim 1{,}005$ & $1\times10^{-4}$\\
+\addlinespace
+C4 & 1.3B & $\sim 10\mathrm{B}$ & $\sim 960$ & $1\times10^{-4}$\\
+\bottomrule
+\end{tabular}
+
+}
 
 \caption{\label{tbl-models}Training configuration for all six models.
 All models use the OPT architecture, a shared BPE tokenizer (vocab
 8,192; context 1,024 tokens), AdamW optimization, and a linear LR
 schedule with 4,000 warmup steps.}
 
-\tabularnewline
-\end{longtable}
+\end{table}%
 
 All six models showed smooth convergence in training loss throughout
 training, starting near the theoretical random baseline
@@ -452,77 +438,139 @@ training, we can compute the exact number of times each model has seen
 each binomial in each ordering at every checkpoint (as opposed to an
 approximation based on corpus statistics). For each binomial and
 checkpoint, we computed the total number of exposures across both
-orderings.
+orderings. Table~\ref{tbl-corpus-stats} summarizes the coverage of the
+attested binomials in each corpus.
+
+\begin{table}
+
+\centering{
+
+\begin{tabular}{lrr}
+\toprule
+Statistic & BabyLM & C4\\
+\midrule
+Total attested binomials & 594 & 594\\
+Both orderings attested ($n > 0$) & 185 & 553\\
+Log overall frequency: mean & 6.95 & 5.46\\
+Log overall frequency: SD & 1.47 & 2.19\\
+\bottomrule
+\end{tabular}
+
+}
+
+\caption{\label{tbl-corpus-stats}Summary statistics for attested
+binomials in each training corpus. \emph{Both orderings attested} counts
+binomials for which both the alphabetical and non-alphabetical orderings
+appear at least once in the corpus. Log overall frequency is
+\(\ln(n_\alpha + n_\beta)\) after applying this exclusion.}
+
+\end{table}%
 
 \subsection{Analyses}\label{analyses}
 
-In this section we present three complementary analyses examining how
-our models represent binomial ordering preferences over the course of
+In this section we present two complementary analyses examining how our
+models represent binomial ordering preferences over the course of
 training.\footnote{All code, including code for model training,
   analyses, and results, will be made publicly available upon acceptance
   since the code for model training (which pushes to huggingface) would
   reveal one of the authors' identities and thus violate the double
-  blind policy.} The first analysis examines model \textbf{preference}
-(how strongly each model favors the alphabetically ordered form of a
-binomial). The second examines the \textbf{preference deviation} (the
-extent to which models' preferences deviate from what relative frequency
-alone would predict). The third examines \textbf{absolute preference
-deviation} (the magnitude of models' preference deviations, regardless
-of direction) as a function of training.
+  blind policy.} The first examines model \textbf{preference} and
+\textbf{preference deviation} at the end of training, asking what
+factors predict each measure at the final checkpoint. The second
+examines how these preferences develop over the course of training,
+tracking how the influence of abstract and frequency-based factors
+changes across checkpoints and how the overall magnitude of preferences
+--- including whether models develop increasingly extreme preferences
+for more frequently encountered binomials --- evolves as training
+progresses.
 
-\subsubsection{Preference}\label{preference}
+\subsubsection{Ordering Preferences at the Final
+Checkpoint}\label{ordering-preferences-at-the-final-checkpoint}
 
-In this section, we examine whether our models learn binomial ordering
-preferences, and if so what factors predict that preference. For each
-model checkpoint and binomial pair, we compute the model's ordering
-\textbf{preference} as the difference in log-probability of the
-alphabetically ordered form (e.g., \emph{bread and butter}) compared to
-the non-alphabetically ordered form (e.g., \emph{butter and bread}),
-following \citet{houghton2025roleabstractrepresentations}. Positive
-values indicate a stronger model preference for the alphabetically
-ordered form (see Section~\ref{sec-def-preference} for a formal
-definition).
+We consider two complementary outcome measures. The first is model
+\textbf{preference}: for each model checkpoint and binomial pair, we
+computed the preference by prepending each of 51 diverse prompt prefixes
+(e.g., a single space, \emph{Well,}, \emph{A friend once described the})
+to both orderings, computing the difference in summed token
+log-probability between the alphabetically ordered form (e.g.,
+\emph{bread and butter}) and the non-alphabetically ordered form (e.g.,
+\emph{butter and bread}) within each prompt context, and averaging those
+per-prompt differences, following
+\citet{houghton2025roleabstractrepresentations}. Positive values
+indicate a stronger preference for the alphabetically ordered form (see
+Section~\ref{sec-def-preference} for a formal definition). The second
+outcome is the \textbf{preference deviation}: the difference between the
+model's preference score and the log relative frequency ratio for that
+binomial (see Section~\ref{sec-def-prefdev} for a formal definition).
+Because we train our models from scratch and checkpoint them throughout
+training, we can compute the exact number of times each model has seen
+each ordering of each binomial at every checkpoint. A preference
+deviation of zero means the model's preference exactly matches what
+relative frequency predicts; positive values indicate a stronger
+preference for the alpha-ordered form than corpus statistics alone would
+suggest, and negative values the reverse. Figure~\ref{fig-scoring}
+illustrates both measures for five example binomials from the C4 125M
+model at the final checkpoint.
 
-In order to examine the model ordering preferences, we implemented a
-Bayesian mixed-effects regression model in R \citep{R-base} using the
-brms package \citep{burknerBrmsPackageBayesian2017} with fixed effects
-for \textbf{AbsPref} (Abstract Preference), \textbf{RelFreq}, and
+\begin{figure}
+
+\centering{
+
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-scoring-1.pdf}
+
+}
+
+\caption{\label{fig-scoring}Illustration of the preference scoring
+method. \textbf{(a)} For each binomial, 51 diverse prompt prefixes are
+prepended to both orderings; per-prompt log-probability differences
+(\(\Delta \log P\)) are averaged to yield a single preference score
+(shown for \emph{bread and butter} vs.~\emph{butter and bread}, C4 125M
+model, final checkpoint). \textbf{(b)} Example preference scores for
+five attested binomials from the same model. Positive values indicate
+preference for the alphabetically ordered form; negative values indicate
+preference for the reverse. \textbf{(c)} Preference deviation
+(preference minus log relative frequency ratio) for the same binomials.
+Values near zero indicate that the model's preference matches what
+corpus frequency would predict; positive values indicate stronger
+preference for the alphabetical order than frequency alone would
+predict.}
+
+\end{figure}%
+
+For each outcome, we implemented a Bayesian mixed-effects regression
+model in R \citep{R-base} using the brms package
+\citep{burknerBrmsPackageBayesian2017} with fixed effects for
+\textbf{AbsPref} (Abstract Preference), \textbf{RelFreq}, and
 \textbf{overall frequency}, interactions between each of AbsPref and
 RelFreq with overall frequency, and random intercepts for binomial.
 AbsPref captures the degree to which abstract phonological and semantic
 constraints favor one ordering over the other
 \citep{morgan2016abstractknowledgedirect}; RelFreq is the proportion of
-corpus occurrences in the alphabetically ordered form, centered; and
-overall frequency is the natural log of total occurrences in either
-ordering, logged and centered. The interaction terms allow us to test
-whether the influence of abstract constraints and relative frequency on
-ordering preferences varies with overall binomial frequency:
+corpus occurrences in the alphabetically ordered form, centered (see
+Section~\ref{sec-def-relfreq}); and overall frequency is the natural log
+of total occurrences in either ordering, logged and centered. The
+interaction terms allow us to test whether the influence of abstract
+constraints and relative frequency varies with overall binomial
+frequency:
 
-\[\text{preference} \sim \text{AbsPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})\]
-
-We fit this model at the final training checkpoint and at 20
-evenly-spaced checkpoints throughout training to examine the learning
-trajectory of binomial ordering preferences. We additionally fit a
-checkpoint-interacted model in which training stage (tokens encountered,
-scaled and centered) is included as a predictor to test whether effects
-grow or shrink linearly over training:
-
-\[\text{preference} \sim (\text{AbsPref} + \text{RelFreq} + \ln(\text{total})) \times \text{tokens} + (1 \mid \text{binomial})\]
+\[\text{preference / pref. deviation} \sim \text{AbsPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})\]
 
 \paragraph{Results}\label{results}
 
-\paragraph{Final Checkpoint}\label{final-checkpoint}
+\subparagraph{Preference}\label{preference}
 
-The results of the Bayesian mixed-effects regression at the final
-checkpoint are visualized in Figure~\ref{fig-pref-final-coefs} (for full
-results, see Table~\ref{tbl-pref-final}, Appendix). The results suggest
-that there is an effect of relative frequency on ordering preferences
-across all six models, which is consistent with models' ordering
-preferences being at least partly driven by the distributional
-statistics of their training data. Interestingly, the effect of AbsPref
-shows a graded pattern across model sizes, with the 125M parameter
-models showing a positive effect, the 350M models showing a somewhat
-weaker effect, and the 1.3B models showing little evidence of an effect.
+The results of the Bayesian mixed-effects regression for preference at
+the final checkpoint are visualized in Figure~\ref{fig-pref-final-coefs}
+(for full results, see Table~\ref{tbl-pref-final}, Appendix). The
+results suggest that there is an effect of relative frequency on
+ordering preferences across all six models, which is consistent with
+models' ordering preferences being at least partly driven by the
+distributional statistics of their training data. Interestingly, the
+effect of AbsPref shows a graded pattern across model sizes, with the
+125M parameter models showing a positive effect, the 350M models showing
+a somewhat weaker effect, and the 1.3B models showing little evidence of
+an effect. Posterior predictive checks suggest adequate model fit
+(Figure~\ref{fig-ppc-pref}).
 
 \begin{figure}
 
@@ -538,37 +586,22 @@ bars show 95\% credible intervals.}
 
 \end{figure}%
 
-As a follow-up, we fit a checkpoint-interacted model with training stage
-as an additional predictor (full results are included in the Appendix,
-in Table~\ref{tbl-pref-ckpt} and Figure~\ref{fig-pref-ckpt-coefs}). This
-revealed that relative frequency effects grow stronger as training
-progresses across all six models. For the BabyLMs, only the 125M shows
-an effect of AbsPref, while C4 models show effects of AbsPref at the
-training midpoint for all models; the AbsPref trajectories are shown in
-Figure~\ref{fig-absp-traj} (top panel).
+\begin{figure}
 
-\subsubsection{Preference Deviation}\label{preference-deviation}
+\centering{
 
-Since we have access to the exact training data each model encountered,
-we are able to calculate exactly how many times the model has seen each
-ordering of each binomial at every checkpoint. Thus, in this section, we
-examine the \textbf{preference deviation}: the difference between each
-model's preference score and the log relative frequency for that
-binomial (see Section~\ref{sec-def-prefdev} for a formal definition). A
-preference deviation of zero means the model's preference exactly
-matches what relative frequency predicts; positive values indicate a
-stronger preference for alpha order than corpus statistics would
-suggest, and negative values the reverse. Using the preference deviation
-as the outcome allows us to ask whether models develop ordering
-preferences that go beyond simply reflecting the distributional
-statistics of their training data. We regress preference deviation on
-the same predictors using the same model specification as for preference
-(above), fit at the final checkpoint and at 20 evenly-spaced checkpoints
-throughout training.
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-pref-1.pdf}
 
-\paragraph{Results}\label{results-1}
+}
 
-\paragraph{Final Checkpoint}\label{final-checkpoint-1}
+\caption{\label{fig-ppc-pref}Posterior predictive check for the
+preference model at the final training checkpoint. The dark line shows
+the observed outcome density; light lines show 100 replicated datasets
+drawn from the posterior predictive distribution.}
+
+\end{figure}%
+
+\subparagraph{Preference Deviation}\label{preference-deviation}
 
 The results of the Bayesian mixed-effects regression for preference
 deviation at the final checkpoint are visualized in
@@ -578,10 +611,10 @@ deviation removes the contribution of relative frequency from the
 preference score, an effect of AbsPref here would suggest that models
 develop ordering preferences consistent with phonological and semantic
 biases over and above what the training data would predict. A positive
-effect of relative frequency, on the other hand, would indicate that the
-model's ordering preference for the alphabetically ordered form is more
-extreme than the training data alone would predict, while a negative
-effect would indicate the opposite.
+effect of relative frequency would indicate that the model's ordering
+preference for the alphabetically ordered form is more extreme than the
+training data alone would predict, while a negative effect would
+indicate the opposite.
 
 The results for relative frequency are quite mixed across model sizes
 and corpora. Among the BabyLM models, the largest model shows a negative
@@ -602,7 +635,8 @@ predicts, with limited evidence of preferences that go beyond the
 training distribution. Interestingly, the modest AbsPref effects that do
 appear are consistently concentrated in the smallest models across both
 corpora, suggesting that smaller models may be more sensitive to
-abstract ordering biases even when controlling for frequency.
+abstract ordering biases even when controlling for frequency. Posterior
+predictive checks suggest adequate model fit (Figure~\ref{fig-ppc-sg}).
 
 \begin{figure}
 
@@ -619,16 +653,66 @@ credible intervals.}
 
 \end{figure}%
 
-A follow-up checkpoint-interacted model for preference deviation (full
-results in Table~\ref{tbl-sg-ckpt} and Figure~\ref{fig-sg-ckpt-coefs},
-Appendix) similarly revealed a growing AbsPref effect for the 125M
-BabyLM over training, with relative frequency effects narrowing toward
-corpus predictions over time. A similar analysis revealed that at the
-midpoint of training, both the C4 125M and 1.3B parameter models show an
-effect of AbsPref. The AbsPref trajectories for both outcomes are shown
-in Figure~\ref{fig-absp-traj}; preference deviation trajectories largely
-mirror those for preference, with the largest C4 model showing a
-U-shaped pattern in both.
+\begin{figure}
+
+\centering{
+
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-sg-1.pdf}
+
+}
+
+\caption{\label{fig-ppc-sg}Posterior predictive check for the preference
+deviation model at the final training checkpoint. The dark line shows
+the observed outcome density; light lines show 100 replicated datasets
+drawn from the posterior predictive distribution.}
+
+\end{figure}%
+
+\subsubsection{Development of Preferences Across
+Training}\label{development-of-preferences-across-training}
+
+To examine how ordering preferences develop over the course of training,
+we fit the regression model described above for both preference and
+preference deviation separately at 20 evenly-spaced checkpoints
+throughout training, and additionally fit a checkpoint-interacted model
+for each outcome in which training stage (tokens encountered, scaled and
+centered) is included as a predictor to test whether effects grow or
+shrink linearly over training:
+
+\[\text{preference / pref. deviation} \sim (\text{AbsPref} + \text{RelFreq} + \ln(\text{total})) \times \text{tokens} + (1 \mid \text{binomial})\]
+
+Full coefficient tables and plots from the checkpoint-interacted models
+are reported in the Appendix (Tables Table~\ref{tbl-pref-ckpt} and
+Table~\ref{tbl-sg-ckpt}; Figures Figure~\ref{fig-pref-ckpt-coefs} and
+Figure~\ref{fig-sg-ckpt-coefs}). We additionally examine how the overall
+magnitude of preference deviations changes over training by computing
+the \textbf{mean absolute preference deviation} across all binomials at
+each checkpoint; lower values indicate that models' preferences are
+closer to what relative frequency predicts on average. We also fit a
+Bayesian mixed-effects model predicting absolute preference deviation
+from training stage (scaled and centered) interacted with log overall
+frequency, to test whether models become more or less corpus-like over
+training and whether this depends on item frequency
+(Figure~\ref{fig-absgap-coefs}; for full results, see
+Table~\ref{tbl-absgap}, Appendix).\footnote{For these analyses, we
+  excluded binomials that did not occur at least one time in each
+  ordering. This resulted in 185 items for the BabyLM model analyses and
+  553 items for the C4 analyses.}
+
+\paragraph{Results}\label{results-1}
+
+Across all six models, relative frequency effects grow stronger as
+training progresses for both outcomes. For preference, the
+checkpoint-interacted model reveals that the 125M BabyLM develops a
+growing AbsPref effect over training, while C4 models show effects of
+AbsPref at the training midpoint for all three sizes. The pattern for
+preference deviation is similar: the 125M BabyLM shows a growing AbsPref
+effect with relative frequency effects narrowing toward corpus
+predictions over time, and at the midpoint of training both the C4 125M
+and 1.3B models show an effect of AbsPref. These AbsPref trajectories
+for both outcomes are shown in Figure~\ref{fig-absp-traj}; preference
+deviation trajectories largely mirror those for preference, with the
+largest C4 model showing a U-shaped pattern in both.
 
 \begin{figure}
 
@@ -646,44 +730,27 @@ predominantly negative, grey uncertain.}
 
 \end{figure}%
 
-\subsubsection{Absolute Preference
-Deviation}\label{absolute-preference-deviation}
-
-In this section, we examine how closely models track relative-frequency
-predictions over the course of training. We compute the \textbf{mean
-absolute preference deviation} across all binomials at each checkpoint
-(Figure~\ref{fig-corpus-tracking}); lower values indicate models'
-preferences are closer to what relative frequency predicts on average.
-We also fit a Bayesian mixed-effects model predicting absolute
-preference deviation from training stage (scaled and centered)
-interacted with log overall frequency, to test whether models become
-more or less corpus-like over training and whether this depends on item
-frequency (Figure~\ref{fig-absgap-coefs}; for full results, see
-Table~\ref{tbl-absgap}, Appendix).
-
-\paragraph{Results}\label{results-2}
-
-The results from Figure~\ref{fig-corpus-tracking} suggest that the mean
+Beyond the direction of preferences, we also examined how the overall
+magnitude of preference deviations changes over training. The mean
 absolute preference deviation grows throughout training for all six
-models, indicating that models' ordering preferences deviate more from
-what relative frequency alone would predict as training progresses.
-Among the BabyLM models, this growth is most pronounced for the 1.3B
-model and weakest for the 350M model. Among the C4 models, all three
-follow a broadly similar trajectory.
+models (Figure~\ref{fig-corpus-tracking}), indicating that models'
+preferences deviate increasingly from what relative frequency alone
+would predict. Among the BabyLM models, this growth is most pronounced
+for the 1.3B model and weakest for the 350M model. Among the C4 models,
+all three follow a broadly similar trajectory.
 
-Finally, the results of the Bayesian mixed-effects regression are
-visualized in Figure~\ref{fig-absgap-coefs} (for full results, see
-Table~\ref{tbl-absgap}, Appendix). The effect of training stage on
-absolute preference deviation is quite mixed across models. Among the
-BabyLM models, the 125M and 1.3B models show a positive effect, while
-the 350M model shows a negative effect. Among the C4 models, the two
-smaller models show a slightly negative effect while the largest shows a
-slightly positive effect. In general, the effect of checkpoint appears
-weaker for the C4 models than for the BabyLM models, suggesting that
-training data diversity may dampen the mean absolute preference
-deviation \citep[indeed, this is expected following evidence of adaptive
-partial pooling in transformer
-models,][]{kapatsinski2026transformersperformadaptive}.
+The results of the Bayesian mixed-effects regression for absolute
+preference deviation are visualized in Figure~\ref{fig-absgap-coefs}
+(for full results, see Table~\ref{tbl-absgap}, Appendix). The effect of
+training stage is quite mixed across models. Among the BabyLM models,
+the 125M and 1.3B models show a positive effect, while the 350M model
+shows a negative effect. Among the C4 models, the two smaller models
+show a slightly negative effect while the largest shows a slightly
+positive effect. In general, the effect of checkpoint appears weaker for
+the C4 models than for the BabyLM models, suggesting that training data
+diversity may dampen the growth of preference magnitude \citep[indeed,
+this is expected following evidence of adaptive partial pooling in
+transformer models,][]{kapatsinski2026transformersperformadaptive}.
 
 The effect of overall frequency also varies across models. The 125M and
 1.3B BabyLM models show a negative effect of overall frequency,
@@ -697,14 +764,15 @@ given existing work demonstrating frequency-dependent preference
 extremity in humans, whereby humans develop more extreme ordering
 preferences for high-frequency binomials
 \citep[e.g.,][]{morganFrequencydependentRegularizationIterated2016a, houghton2024frequencydependentpreferenceextremity, houghton2025boltsnutslanguage}.
-The present results suggest under certain circumstances language models
-may show a similar pattern, though a full investigation of this question
-is left for future research. Finally, as a sanity check, we confirmed
-that the correlation between model preference and log relative frequency
-increases steadily throughout training for all six models (see
-Figure~\ref{fig-cor-traj}, Appendix), confirming that models are
-learning ordering preferences even as the absolute preference deviation
-grows.
+The present results suggest that under certain circumstances language
+models may show a similar pattern, though a full investigation of this
+question is left for future research. Posterior predictive checks
+suggest adequate model fit (Figure~\ref{fig-ppc-absgap}). Finally, as a
+sanity check, we confirmed that the correlation between model preference
+and log relative frequency increases steadily throughout training for
+all six models (see Figure~\ref{fig-cor-traj}, Appendix), confirming
+that models are learning ordering preferences even as the absolute
+preference deviation grows.
 
 \begin{figure}
 
@@ -734,6 +802,21 @@ predictors of absolute preference deviation. The main effect of training
 stage (tokens, scaled and centered) captures overall growth or shrinkage
 in preference magnitude; the interaction tests whether this depends on
 item-level corpus exposure.}
+
+\end{figure}%
+
+\begin{figure}
+
+\centering{
+
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-ppc-absgap-1.pdf}
+
+}
+
+\caption{\label{fig-ppc-absgap}Posterior predictive check for the
+absolute preference deviation model. The dark line shows the observed
+outcome density; light lines show 100 replicated datasets drawn from the
+posterior predictive distribution.}
 
 \end{figure}%
 
@@ -825,21 +908,25 @@ cases.}
 
 \section{Training Quality}\label{sec-training-quality}
 
-\begin{longtable}[]{@{}lrrr@{}}
+\begin{table}
 
-\toprule\noalign{}
-Corpus & Params & Initial PPL & Final PPL \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-BabyLM & 125M & 9725 & 537.50 \\
-BabyLM & 350M & 9470 & 289.68 \\
-BabyLM & 1.3B & 13078 & 2557.08 \\
-C4 & 125M & 9528 & 31.63 \\
-C4 & 350M & 9352 & 43.16 \\
-C4 & 1.3B & 12275 & 27.87 \\
+\centering{
 
+\begin{tabular}{lrrr}
+\toprule
+Corpus & Params & Initial PPL & Final PPL\\
+\midrule
+BabyLM & 125M & 9725 & 537.50\\
+BabyLM & 350M & 9470 & 289.68\\
+BabyLM & 1.3B & 13078 & 2557.08\\
+C4 & 125M & 9528 & 31.63\\
+C4 & 350M & 9352 & 43.16\\
+\addlinespace
+C4 & 1.3B & 12275 & 27.87\\
+\bottomrule
+\end{tabular}
+
+}
 
 \caption{\label{tbl-perplexity}Perplexity at initialization and final
 checkpoint for all six models. Perplexity = \(e^{\text{loss}}\); initial
@@ -849,8 +936,7 @@ training split for BabyLM models; official C4 validation split for C4
 models). The BabyLM 1.3B model's elevated final perplexity relative to
 350M reflects overfitting pressure on a small corpus.}
 
-\tabularnewline
-\end{longtable}
+\end{table}%
 
 \begin{figure}
 
@@ -873,13 +959,15 @@ corpora.}
 \subsection{Preference}\label{sec-def-preference}
 
 For a binomial with alphabetically ordered token sequence \(s_\alpha\)
-and non-alphabetically ordered sequence \(s_n\), the model's
-\textbf{preference} is:
+and non-alphabetically ordered sequence \(s_n\), and a set of \(K = 51\)
+prompt prefixes \(\{c_k\}_{k=1}^{K}\), the model's \textbf{preference}
+is:
 
-\[\text{preference}_i = \log P_\theta(s_{\alpha,i}) - \log P_\theta(s_{n,i})\]
+\[\text{preference}_i = \frac{1}{K}\sum_{k=1}^{K}\Bigl[\log P_\theta(c_k \circ s_{\alpha,i}) - \log P_\theta(c_k \circ s_{n,i})\Bigr]\]
 
-where \(\log P_\theta(s)\) is the summed log-probability of sequence
-\(s\) under model parameters \(\theta\).
+where \(\log P_\theta(s)\) is the summed token log-probability of
+sequence \(s\) under next-token prediction with model parameters
+\(\theta\), and \(\circ\) denotes concatenation.
 
 \subsection{Relative Frequency}\label{sec-def-relfreq}
 
@@ -908,519 +996,300 @@ Tables}\label{posterior-coefficient-tables}
 \subsection{Preference: Final
 Checkpoint}\label{preference-final-checkpoint}
 
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0843}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0602}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.3614}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0843}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0723}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0843}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0723}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1807}}@{}}
+\begin{table}
 
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Corpus
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Size
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Term
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Mean
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-SD
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-2.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-97.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-\(P(\beta > 0)\)
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-BabyLM & 125M & AbsPref & 1.835 & 0.790 & 0.243 & 3.313 & 0.990 \\
-BabyLM & 125M & AbsPref \(\times\) Overall freq & -0.105 & 0.827 &
--1.713 & 1.514 & 0.449 \\
-BabyLM & 125M & Overall freq (ln total) & 0.024 & 0.170 & -0.312 & 0.339
-& 0.556 \\
-BabyLM & 125M & RelFreq \(\times\) Overall freq & 1.688 & 0.587 & 0.553
-& 2.892 & 0.998 \\
-BabyLM & 125M & RelFreq (P(alpha)-0.5) & 4.404 & 0.638 & 3.185 & 5.687 &
-1.000 \\
-BabyLM & 350M & AbsPref & 0.863 & 0.643 & -0.388 & 2.080 & 0.910 \\
-BabyLM & 350M & AbsPref \(\times\) Overall freq & 0.664 & 0.675 & -0.655
-& 1.996 & 0.838 \\
-BabyLM & 350M & Overall freq (ln total) & -0.120 & 0.117 & -0.344 &
-0.106 & 0.152 \\
-BabyLM & 350M & RelFreq \(\times\) Overall freq & 2.254 & 0.442 & 1.385
-& 3.112 & 1.000 \\
-BabyLM & 350M & RelFreq (P(alpha)-0.5) & 2.945 & 0.447 & 2.062 & 3.806 &
-1.000 \\
-BabyLM & 1.3B & AbsPref & 1.078 & 0.848 & -0.573 & 2.750 & 0.898 \\
-BabyLM & 1.3B & AbsPref \(\times\) Overall freq & 0.234 & 0.854 & -1.412
-& 1.914 & 0.608 \\
-BabyLM & 1.3B & Overall freq (ln total) & 0.029 & 0.217 & -0.394 & 0.458
-& 0.554 \\
-BabyLM & 1.3B & RelFreq \(\times\) Overall freq & 1.205 & 0.659 & -0.106
-& 2.480 & 0.966 \\
-BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & 3.632 & 0.666 & 2.337 & 4.924 &
-1.000 \\
-C4 & 125M & AbsPref & 0.917 & 0.493 & -0.080 & 1.872 & 0.969 \\
-C4 & 125M & AbsPref \(\times\) Overall freq & -0.113 & 0.465 & -1.034 &
-0.796 & 0.404 \\
-C4 & 125M & Overall freq (ln total) & 0.021 & 0.078 & -0.131 & 0.180 &
-0.607 \\
-C4 & 125M & RelFreq \(\times\) Overall freq & 3.401 & 0.294 & 2.835 &
-3.972 & 1.000 \\
-C4 & 125M & RelFreq (P(alpha)-0.5) & 4.406 & 0.336 & 3.754 & 5.054 &
-1.000 \\
-C4 & 350M & AbsPref & 0.777 & 0.452 & -0.091 & 1.652 & 0.957 \\
-C4 & 350M & AbsPref \(\times\) Overall freq & 0.061 & 0.452 & -0.817 &
-0.953 & 0.553 \\
-C4 & 350M & Overall freq (ln total) & 0.050 & 0.071 & -0.085 & 0.190 &
-0.761 \\
-C4 & 350M & RelFreq \(\times\) Overall freq & 2.760 & 0.287 & 2.185 &
-3.309 & 1.000 \\
-C4 & 350M & RelFreq (P(alpha)-0.5) & 2.913 & 0.319 & 2.279 & 3.530 &
-1.000 \\
-C4 & 1.3B & AbsPref & 0.466 & 0.509 & -0.505 & 1.502 & 0.820 \\
-C4 & 1.3B & AbsPref \(\times\) Overall freq & 0.063 & 0.487 & -0.892 &
-1.033 & 0.552 \\
-C4 & 1.3B & Overall freq (ln total) & -0.031 & 0.080 & -0.186 & 0.124 &
-0.351 \\
-C4 & 1.3B & RelFreq \(\times\) Overall freq & 3.472 & 0.323 & 2.855 &
-4.109 & 1.000 \\
-C4 & 1.3B & RelFreq (P(alpha)-0.5) & 5.389 & 0.375 & 4.635 & 6.097 &
-1.000 \\
+\centering{
 
+\begin{tabular}{lllrrrrr}
+\toprule
+Corpus & Size & Term & Mean & SD & 2.5\% & 97.5\% & $P(\beta > 0)$\\
+\midrule
+BabyLM & 125M & AbsPref & 1.835 & 0.790 & 0.243 & 3.313 & 0.990\\
+BabyLM & 125M & AbsPref $\times$ Overall freq & -0.105 & 0.827 & -1.713 & 1.514 & 0.449\\
+BabyLM & 125M & Overall freq (ln total) & 0.024 & 0.170 & -0.312 & 0.339 & 0.556\\
+BabyLM & 125M & RelFreq $\times$ Overall freq & 1.688 & 0.587 & 0.553 & 2.892 & 0.998\\
+BabyLM & 125M & RelFreq (P(alpha)-0.5) & 4.404 & 0.638 & 3.185 & 5.687 & 1.000\\
+\addlinespace
+BabyLM & 350M & AbsPref & 0.863 & 0.643 & -0.388 & 2.080 & 0.910\\
+BabyLM & 350M & AbsPref $\times$ Overall freq & 0.664 & 0.675 & -0.655 & 1.996 & 0.838\\
+BabyLM & 350M & Overall freq (ln total) & -0.120 & 0.117 & -0.344 & 0.106 & 0.152\\
+BabyLM & 350M & RelFreq $\times$ Overall freq & 2.254 & 0.442 & 1.385 & 3.112 & 1.000\\
+BabyLM & 350M & RelFreq (P(alpha)-0.5) & 2.945 & 0.447 & 2.062 & 3.806 & 1.000\\
+\addlinespace
+BabyLM & 1.3B & AbsPref & 1.078 & 0.848 & -0.573 & 2.750 & 0.898\\
+BabyLM & 1.3B & AbsPref $\times$ Overall freq & 0.234 & 0.854 & -1.412 & 1.914 & 0.608\\
+BabyLM & 1.3B & Overall freq (ln total) & 0.029 & 0.217 & -0.394 & 0.458 & 0.554\\
+BabyLM & 1.3B & RelFreq $\times$ Overall freq & 1.205 & 0.659 & -0.106 & 2.480 & 0.966\\
+BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & 3.632 & 0.666 & 2.337 & 4.924 & 1.000\\
+\addlinespace
+C4 & 125M & AbsPref & 0.917 & 0.493 & -0.080 & 1.872 & 0.969\\
+C4 & 125M & AbsPref $\times$ Overall freq & -0.113 & 0.465 & -1.034 & 0.796 & 0.404\\
+C4 & 125M & Overall freq (ln total) & 0.021 & 0.078 & -0.131 & 0.180 & 0.607\\
+C4 & 125M & RelFreq $\times$ Overall freq & 3.401 & 0.294 & 2.835 & 3.972 & 1.000\\
+C4 & 125M & RelFreq (P(alpha)-0.5) & 4.406 & 0.336 & 3.754 & 5.054 & 1.000\\
+\addlinespace
+C4 & 350M & AbsPref & 0.777 & 0.452 & -0.091 & 1.652 & 0.957\\
+C4 & 350M & AbsPref $\times$ Overall freq & 0.061 & 0.452 & -0.817 & 0.953 & 0.553\\
+C4 & 350M & Overall freq (ln total) & 0.050 & 0.071 & -0.085 & 0.190 & 0.761\\
+C4 & 350M & RelFreq $\times$ Overall freq & 2.760 & 0.287 & 2.185 & 3.309 & 1.000\\
+C4 & 350M & RelFreq (P(alpha)-0.5) & 2.913 & 0.319 & 2.279 & 3.530 & 1.000\\
+\addlinespace
+C4 & 1.3B & AbsPref & 0.466 & 0.509 & -0.505 & 1.502 & 0.820\\
+C4 & 1.3B & AbsPref $\times$ Overall freq & 0.063 & 0.487 & -0.892 & 1.033 & 0.552\\
+C4 & 1.3B & Overall freq (ln total) & -0.031 & 0.080 & -0.186 & 0.124 & 0.351\\
+C4 & 1.3B & RelFreq $\times$ Overall freq & 3.472 & 0.323 & 2.855 & 4.109 & 1.000\\
+C4 & 1.3B & RelFreq (P(alpha)-0.5) & 5.389 & 0.375 & 4.635 & 6.097 & 1.000\\
+\bottomrule
+\end{tabular}
+
+}
 
 \caption{\label{tbl-pref-final}Posterior fixed effects for preference at
 the final checkpoint. Mean = posterior mean; SD = posterior SD;
 2.5\%/97.5\% = 95\% credible interval bounds.}
 
-\tabularnewline
-\end{longtable}
+\end{table}%
 
 \subsection{Preference: Checkpoint-Interacted
 Model}\label{preference-checkpoint-interacted-model}
 
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0575}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.3793}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0690}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1724}}@{}}
+\begin{table}
 
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Corpus
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Size
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Term
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Mean
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-SD
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-2.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-97.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-\(P(\beta > 0)\)
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-BabyLM & 125M & AbsPref & 1.360 & 0.618 & 0.069 & 2.492 & 0.986 \\
-BabyLM & 125M & AbsPref \(\times\) Checkpoint & 0.999 & 0.021 & 0.958 &
-1.040 & 1.000 \\
-BabyLM & 125M & Checkpoint (tokens, z) & -0.164 & 0.006 & -0.177 &
--0.152 & 0.000 \\
-BabyLM & 125M & Overall freq \(\times\) Checkpoint & 0.034 & 0.003 &
-0.028 & 0.040 & 1.000 \\
-BabyLM & 125M & Overall freq (ln total) & 0.229 & 0.013 & 0.204 & 0.254
-& 1.000 \\
-BabyLM & 125M & RelFreq \(\times\) Checkpoint & 1.945 & 0.012 & 1.922 &
-1.968 & 1.000 \\
-BabyLM & 125M & RelFreq (P(alpha)-0.5) & 3.932 & 0.183 & 3.574 & 4.282 &
-1.000 \\
-BabyLM & 350M & AbsPref & 0.474 & 0.522 & -0.545 & 1.486 & 0.818 \\
-BabyLM & 350M & AbsPref \(\times\) Checkpoint & 0.126 & 0.016 & 0.095 &
-0.157 & 1.000 \\
-BabyLM & 350M & Checkpoint (tokens, z) & -0.004 & 0.005 & -0.013 & 0.005
-& 0.209 \\
-BabyLM & 350M & Overall freq \(\times\) Checkpoint & 0.035 & 0.002 &
-0.030 & 0.039 & 1.000 \\
-BabyLM & 350M & Overall freq (ln total) & 0.155 & 0.010 & 0.136 & 0.174
-& 1.000 \\
-BabyLM & 350M & RelFreq \(\times\) Checkpoint & 1.593 & 0.009 & 1.576 &
-1.611 & 1.000 \\
-BabyLM & 350M & RelFreq (P(alpha)-0.5) & 1.851 & 0.146 & 1.572 & 2.152 &
-1.000 \\
-BabyLM & 1.3B & AbsPref & 0.319 & 0.662 & -1.008 & 1.552 & 0.685 \\
-BabyLM & 1.3B & AbsPref \(\times\) Checkpoint & 0.278 & 0.023 & 0.232 &
-0.323 & 1.000 \\
-BabyLM & 1.3B & Checkpoint (tokens, z) & -0.002 & 0.007 & -0.016 & 0.012
-& 0.372 \\
-BabyLM & 1.3B & Overall freq \(\times\) Checkpoint & 0.051 & 0.003 &
-0.044 & 0.058 & 1.000 \\
-BabyLM & 1.3B & Overall freq (ln total) & 0.254 & 0.014 & 0.225 & 0.282
-& 1.000 \\
-BabyLM & 1.3B & RelFreq \(\times\) Checkpoint & 1.901 & 0.013 & 1.873 &
-1.926 & 1.000 \\
-BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & 4.030 & 0.201 & 3.646 & 4.457 &
-1.000 \\
-C4 & 125M & AbsPref & 2.925 & 0.373 & 2.165 & 3.558 & 1.000 \\
-C4 & 125M & AbsPref \(\times\) Checkpoint & 0.085 & 0.010 & 0.066 &
-0.105 & 1.000 \\
-C4 & 125M & Checkpoint (tokens, z) & -0.060 & 0.003 & -0.066 & -0.053 &
-0.000 \\
-C4 & 125M & Overall freq \(\times\) Checkpoint & -0.014 & 0.001 & -0.017
-& -0.011 & 0.000 \\
-C4 & 125M & Overall freq (ln total) & 0.234 & 0.008 & 0.217 & 0.249 &
-1.000 \\
-C4 & 125M & RelFreq \(\times\) Checkpoint & 2.079 & 0.006 & 2.066 &
-2.091 & 1.000 \\
-C4 & 125M & RelFreq (P(alpha)-0.5) & 1.557 & 0.028 & 1.503 & 1.613 &
-1.000 \\
-C4 & 350M & AbsPref & 1.340 & 0.335 & 0.742 & 2.002 & 1.000 \\
-C4 & 350M & AbsPref \(\times\) Checkpoint & 0.390 & 0.009 & 0.372 &
-0.407 & 1.000 \\
-C4 & 350M & Checkpoint (tokens, z) & -0.031 & 0.003 & -0.037 & -0.026 &
-0.000 \\
-C4 & 350M & Overall freq \(\times\) Checkpoint & 0.033 & 0.001 & 0.030 &
-0.035 & 1.000 \\
-C4 & 350M & Overall freq (ln total) & 0.170 & 0.007 & 0.156 & 0.184 &
-1.000 \\
-C4 & 350M & RelFreq \(\times\) Checkpoint & 1.622 & 0.006 & 1.611 &
-1.633 & 1.000 \\
-C4 & 350M & RelFreq (P(alpha)-0.5) & 1.148 & 0.024 & 1.101 & 1.195 &
-1.000 \\
-C4 & 1.3B & AbsPref & 3.097 & 0.446 & 2.196 & 3.993 & 1.000 \\
-C4 & 1.3B & AbsPref \(\times\) Checkpoint & 0.032 & 0.011 & 0.010 &
-0.054 & 0.997 \\
-C4 & 1.3B & Checkpoint (tokens, z) & -0.066 & 0.004 & -0.073 & -0.060 &
-0.000 \\
-C4 & 1.3B & Overall freq \(\times\) Checkpoint & -0.018 & 0.002 & -0.021
-& -0.015 & 0.000 \\
-C4 & 1.3B & Overall freq (ln total) & 0.251 & 0.009 & 0.233 & 0.268 &
-1.000 \\
-C4 & 1.3B & RelFreq \(\times\) Checkpoint & 2.475 & 0.007 & 2.461 &
-2.489 & 1.000 \\
-C4 & 1.3B & RelFreq (P(alpha)-0.5) & 1.467 & 0.031 & 1.407 & 1.526 &
-1.000 \\
+\centering{
 
+\begin{tabular}{lllrrrrr}
+\toprule
+Corpus & Size & Term & Mean & SD & 2.5\% & 97.5\% & $P(\beta > 0)$\\
+\midrule
+BabyLM & 125M & AbsPref & 1.360 & 0.618 & 0.069 & 2.492 & 0.986\\
+BabyLM & 125M & AbsPref $\times$ Checkpoint & 0.999 & 0.021 & 0.958 & 1.040 & 1.000\\
+BabyLM & 125M & Checkpoint (tokens, z) & -0.164 & 0.006 & -0.177 & -0.152 & 0.000\\
+BabyLM & 125M & Overall freq $\times$ Checkpoint & 0.034 & 0.003 & 0.028 & 0.040 & 1.000\\
+BabyLM & 125M & Overall freq (ln total) & 0.229 & 0.013 & 0.204 & 0.254 & 1.000\\
+\addlinespace
+BabyLM & 125M & RelFreq $\times$ Checkpoint & 1.945 & 0.012 & 1.922 & 1.968 & 1.000\\
+BabyLM & 125M & RelFreq (P(alpha)-0.5) & 3.932 & 0.183 & 3.574 & 4.282 & 1.000\\
+BabyLM & 350M & AbsPref & 0.474 & 0.522 & -0.545 & 1.486 & 0.818\\
+BabyLM & 350M & AbsPref $\times$ Checkpoint & 0.126 & 0.016 & 0.095 & 0.157 & 1.000\\
+BabyLM & 350M & Checkpoint (tokens, z) & -0.004 & 0.005 & -0.013 & 0.005 & 0.209\\
+\addlinespace
+BabyLM & 350M & Overall freq $\times$ Checkpoint & 0.035 & 0.002 & 0.030 & 0.039 & 1.000\\
+BabyLM & 350M & Overall freq (ln total) & 0.155 & 0.010 & 0.136 & 0.174 & 1.000\\
+BabyLM & 350M & RelFreq $\times$ Checkpoint & 1.593 & 0.009 & 1.576 & 1.611 & 1.000\\
+BabyLM & 350M & RelFreq (P(alpha)-0.5) & 1.851 & 0.146 & 1.572 & 2.152 & 1.000\\
+BabyLM & 1.3B & AbsPref & 0.319 & 0.662 & -1.008 & 1.552 & 0.685\\
+\addlinespace
+BabyLM & 1.3B & AbsPref $\times$ Checkpoint & 0.278 & 0.023 & 0.232 & 0.323 & 1.000\\
+BabyLM & 1.3B & Checkpoint (tokens, z) & -0.002 & 0.007 & -0.016 & 0.012 & 0.372\\
+BabyLM & 1.3B & Overall freq $\times$ Checkpoint & 0.051 & 0.003 & 0.044 & 0.058 & 1.000\\
+BabyLM & 1.3B & Overall freq (ln total) & 0.254 & 0.014 & 0.225 & 0.282 & 1.000\\
+BabyLM & 1.3B & RelFreq $\times$ Checkpoint & 1.901 & 0.013 & 1.873 & 1.926 & 1.000\\
+\addlinespace
+BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & 4.030 & 0.201 & 3.646 & 4.457 & 1.000\\
+C4 & 125M & AbsPref & 2.925 & 0.373 & 2.165 & 3.558 & 1.000\\
+C4 & 125M & AbsPref $\times$ Checkpoint & 0.085 & 0.010 & 0.066 & 0.105 & 1.000\\
+C4 & 125M & Checkpoint (tokens, z) & -0.060 & 0.003 & -0.066 & -0.053 & 0.000\\
+C4 & 125M & Overall freq $\times$ Checkpoint & -0.014 & 0.001 & -0.017 & -0.011 & 0.000\\
+\addlinespace
+C4 & 125M & Overall freq (ln total) & 0.234 & 0.008 & 0.217 & 0.249 & 1.000\\
+C4 & 125M & RelFreq $\times$ Checkpoint & 2.079 & 0.006 & 2.066 & 2.091 & 1.000\\
+C4 & 125M & RelFreq (P(alpha)-0.5) & 1.557 & 0.028 & 1.503 & 1.613 & 1.000\\
+C4 & 350M & AbsPref & 1.340 & 0.335 & 0.742 & 2.002 & 1.000\\
+C4 & 350M & AbsPref $\times$ Checkpoint & 0.390 & 0.009 & 0.372 & 0.407 & 1.000\\
+\addlinespace
+C4 & 350M & Checkpoint (tokens, z) & -0.031 & 0.003 & -0.037 & -0.026 & 0.000\\
+C4 & 350M & Overall freq $\times$ Checkpoint & 0.033 & 0.001 & 0.030 & 0.035 & 1.000\\
+C4 & 350M & Overall freq (ln total) & 0.170 & 0.007 & 0.156 & 0.184 & 1.000\\
+C4 & 350M & RelFreq $\times$ Checkpoint & 1.622 & 0.006 & 1.611 & 1.633 & 1.000\\
+C4 & 350M & RelFreq (P(alpha)-0.5) & 1.148 & 0.024 & 1.101 & 1.195 & 1.000\\
+\addlinespace
+C4 & 1.3B & AbsPref & 3.097 & 0.446 & 2.196 & 3.993 & 1.000\\
+C4 & 1.3B & AbsPref $\times$ Checkpoint & 0.032 & 0.011 & 0.010 & 0.054 & 0.997\\
+C4 & 1.3B & Checkpoint (tokens, z) & -0.066 & 0.004 & -0.073 & -0.060 & 0.000\\
+C4 & 1.3B & Overall freq $\times$ Checkpoint & -0.018 & 0.002 & -0.021 & -0.015 & 0.000\\
+C4 & 1.3B & Overall freq (ln total) & 0.251 & 0.009 & 0.233 & 0.268 & 1.000\\
+\addlinespace
+C4 & 1.3B & RelFreq $\times$ Checkpoint & 2.475 & 0.007 & 2.461 & 2.489 & 1.000\\
+C4 & 1.3B & RelFreq (P(alpha)-0.5) & 1.467 & 0.031 & 1.407 & 1.526 & 1.000\\
+\bottomrule
+\end{tabular}
+
+}
 
 \caption{\label{tbl-pref-ckpt}Posterior fixed effects from the
 checkpoint-interacted preference model.}
 
-\tabularnewline
-\end{longtable}
+\end{table}%
 
 \subsection{Preference Deviation: Final
 Checkpoint}\label{preference-deviation-final-checkpoint}
 
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0833}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0595}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.3571}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0833}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0714}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0833}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0833}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1786}}@{}}
+\begin{table}
 
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Corpus
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Size
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Term
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Mean
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-SD
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-2.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-97.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-\(P(\beta > 0)\)
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-BabyLM & 125M & AbsPref & 1.013 & 0.796 & -0.551 & 2.555 & 0.898 \\
-BabyLM & 125M & AbsPref \(\times\) Overall freq & -0.364 & 0.808 &
--1.931 & 1.230 & 0.326 \\
-BabyLM & 125M & Overall freq (ln total) & 0.020 & 0.171 & -0.316 & 0.353
-& 0.546 \\
-BabyLM & 125M & RelFreq \(\times\) Overall freq & 0.775 & 0.579 & -0.350
-& 1.906 & 0.910 \\
-BabyLM & 125M & RelFreq (P(alpha)-0.5) & 0.948 & 0.612 & -0.316 & 2.113
-& 0.939 \\
-BabyLM & 350M & AbsPref & 0.033 & 0.642 & -1.218 & 1.312 & 0.521 \\
-BabyLM & 350M & AbsPref \(\times\) Overall freq & 0.436 & 0.683 & -0.912
-& 1.785 & 0.738 \\
-BabyLM & 350M & Overall freq (ln total) & -0.119 & 0.116 & -0.362 &
-0.096 & 0.153 \\
-BabyLM & 350M & RelFreq \(\times\) Overall freq & 1.427 & 0.444 & 0.511
-& 2.281 & 0.999 \\
-BabyLM & 350M & RelFreq (P(alpha)-0.5) & -1.325 & 0.469 & -2.228 &
--0.395 & 0.002 \\
-BabyLM & 1.3B & AbsPref & 0.265 & 0.842 & -1.404 & 1.900 & 0.624 \\
-BabyLM & 1.3B & AbsPref \(\times\) Overall freq & -0.069 & 0.848 &
--1.733 & 1.608 & 0.468 \\
-BabyLM & 1.3B & Overall freq (ln total) & 0.013 & 0.209 & -0.402 & 0.408
-& 0.525 \\
-BabyLM & 1.3B & RelFreq \(\times\) Overall freq & 0.262 & 0.651 & -0.982
-& 1.555 & 0.656 \\
-BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & 0.645 & 0.663 & -0.682 & 1.936
-& 0.835 \\
-C4 & 125M & AbsPref & 0.595 & 0.475 & -0.328 & 1.553 & 0.895 \\
-C4 & 125M & AbsPref \(\times\) Overall freq & -0.351 & 0.462 & -1.256 &
-0.552 & 0.224 \\
-C4 & 125M & Overall freq (ln total) & 0.039 & 0.073 & -0.103 & 0.183 &
-0.700 \\
-C4 & 125M & RelFreq \(\times\) Overall freq & 2.557 & 0.304 & 1.966 &
-3.139 & 1.000 \\
-C4 & 125M & RelFreq (P(alpha)-0.5) & -0.874 & 0.334 & -1.537 & -0.230 &
-0.004 \\
-C4 & 350M & AbsPref & 0.430 & 0.478 & -0.500 & 1.394 & 0.816 \\
-C4 & 350M & AbsPref \(\times\) Overall freq & -0.115 & 0.456 & -0.980 &
-0.780 & 0.401 \\
-C4 & 350M & Overall freq (ln total) & 0.079 & 0.078 & -0.076 & 0.226 &
-0.847 \\
-C4 & 350M & RelFreq \(\times\) Overall freq & 1.881 & 0.313 & 1.256 &
-2.482 & 1.000 \\
-C4 & 350M & RelFreq (P(alpha)-0.5) & -2.385 & 0.340 & -3.043 & -1.721 &
-0.000 \\
-C4 & 1.3B & AbsPref & 0.125 & 0.488 & -0.855 & 1.077 & 0.601 \\
-C4 & 1.3B & AbsPref \(\times\) Overall freq & -0.207 & 0.466 & -1.123 &
-0.713 & 0.328 \\
-C4 & 1.3B & Overall freq (ln total) & -0.002 & 0.077 & -0.153 & 0.151 &
-0.489 \\
-C4 & 1.3B & RelFreq \(\times\) Overall freq & 2.632 & 0.312 & 2.038 &
-3.255 & 1.000 \\
-C4 & 1.3B & RelFreq (P(alpha)-0.5) & 0.175 & 0.355 & -0.530 & 0.865 &
-0.689 \\
+\centering{
 
+\begin{tabular}{lllrrrrr}
+\toprule
+Corpus & Size & Term & Mean & SD & 2.5\% & 97.5\% & $P(\beta > 0)$\\
+\midrule
+BabyLM & 125M & AbsPref & 1.013 & 0.796 & -0.551 & 2.555 & 0.898\\
+BabyLM & 125M & AbsPref $\times$ Overall freq & -0.364 & 0.808 & -1.931 & 1.230 & 0.326\\
+BabyLM & 125M & Overall freq (ln total) & 0.020 & 0.171 & -0.316 & 0.353 & 0.546\\
+BabyLM & 125M & RelFreq $\times$ Overall freq & 0.775 & 0.579 & -0.350 & 1.906 & 0.910\\
+BabyLM & 125M & RelFreq (P(alpha)-0.5) & 0.948 & 0.612 & -0.316 & 2.113 & 0.939\\
+\addlinespace
+BabyLM & 350M & AbsPref & 0.033 & 0.642 & -1.218 & 1.312 & 0.521\\
+BabyLM & 350M & AbsPref $\times$ Overall freq & 0.436 & 0.683 & -0.912 & 1.785 & 0.738\\
+BabyLM & 350M & Overall freq (ln total) & -0.119 & 0.116 & -0.362 & 0.096 & 0.153\\
+BabyLM & 350M & RelFreq $\times$ Overall freq & 1.427 & 0.444 & 0.511 & 2.281 & 0.999\\
+BabyLM & 350M & RelFreq (P(alpha)-0.5) & -1.325 & 0.469 & -2.228 & -0.395 & 0.002\\
+\addlinespace
+BabyLM & 1.3B & AbsPref & 0.265 & 0.842 & -1.404 & 1.900 & 0.624\\
+BabyLM & 1.3B & AbsPref $\times$ Overall freq & -0.069 & 0.848 & -1.733 & 1.608 & 0.468\\
+BabyLM & 1.3B & Overall freq (ln total) & 0.013 & 0.209 & -0.402 & 0.408 & 0.525\\
+BabyLM & 1.3B & RelFreq $\times$ Overall freq & 0.262 & 0.651 & -0.982 & 1.555 & 0.656\\
+BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & 0.645 & 0.663 & -0.682 & 1.936 & 0.835\\
+\addlinespace
+C4 & 125M & AbsPref & 0.595 & 0.475 & -0.328 & 1.553 & 0.895\\
+C4 & 125M & AbsPref $\times$ Overall freq & -0.351 & 0.462 & -1.256 & 0.552 & 0.224\\
+C4 & 125M & Overall freq (ln total) & 0.039 & 0.073 & -0.103 & 0.183 & 0.700\\
+C4 & 125M & RelFreq $\times$ Overall freq & 2.557 & 0.304 & 1.966 & 3.139 & 1.000\\
+C4 & 125M & RelFreq (P(alpha)-0.5) & -0.874 & 0.334 & -1.537 & -0.230 & 0.004\\
+\addlinespace
+C4 & 350M & AbsPref & 0.430 & 0.478 & -0.500 & 1.394 & 0.816\\
+C4 & 350M & AbsPref $\times$ Overall freq & -0.115 & 0.456 & -0.980 & 0.780 & 0.401\\
+C4 & 350M & Overall freq (ln total) & 0.079 & 0.078 & -0.076 & 0.226 & 0.847\\
+C4 & 350M & RelFreq $\times$ Overall freq & 1.881 & 0.313 & 1.256 & 2.482 & 1.000\\
+C4 & 350M & RelFreq (P(alpha)-0.5) & -2.385 & 0.340 & -3.043 & -1.721 & 0.000\\
+\addlinespace
+C4 & 1.3B & AbsPref & 0.125 & 0.488 & -0.855 & 1.077 & 0.601\\
+C4 & 1.3B & AbsPref $\times$ Overall freq & -0.207 & 0.466 & -1.123 & 0.713 & 0.328\\
+C4 & 1.3B & Overall freq (ln total) & -0.002 & 0.077 & -0.153 & 0.151 & 0.489\\
+C4 & 1.3B & RelFreq $\times$ Overall freq & 2.632 & 0.312 & 2.038 & 3.255 & 1.000\\
+C4 & 1.3B & RelFreq (P(alpha)-0.5) & 0.175 & 0.355 & -0.530 & 0.865 & 0.689\\
+\bottomrule
+\end{tabular}
+
+}
 
 \caption{\label{tbl-sg-final}Posterior fixed effects for preference
 deviation at the final checkpoint.}
 
-\tabularnewline
-\end{longtable}
+\end{table}%
 
 \subsection{Preference Deviation: Checkpoint-Interacted
 Model}\label{preference-deviation-checkpoint-interacted-model}
 
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0575}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.3793}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0690}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0805}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1724}}@{}}
+\begin{table}
 
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Corpus
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Size
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Term
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Mean
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-SD
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-2.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-97.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-\(P(\beta > 0)\)
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-BabyLM & 125M & AbsPref & 0.851 & 0.596 & -0.294 & 1.941 & 0.923 \\
-BabyLM & 125M & AbsPref \(\times\) Checkpoint & 0.999 & 0.021 & 0.958 &
-1.040 & 1.000 \\
-BabyLM & 125M & Checkpoint (tokens, z) & -0.161 & 0.006 & -0.174 &
--0.149 & 0.000 \\
-BabyLM & 125M & Overall freq \(\times\) Checkpoint & 0.033 & 0.003 &
-0.027 & 0.039 & 1.000 \\
-BabyLM & 125M & Overall freq (ln total) & 0.222 & 0.013 & 0.197 & 0.247
-& 1.000 \\
-BabyLM & 125M & RelFreq \(\times\) Checkpoint & 1.945 & 0.012 & 1.921 &
-1.968 & 1.000 \\
-BabyLM & 125M & RelFreq (P(alpha)-0.5) & -0.919 & 0.190 & -1.279 &
--0.549 & 0.000 \\
-BabyLM & 350M & AbsPref & -0.140 & 0.500 & -1.097 & 0.909 & 0.390 \\
-BabyLM & 350M & AbsPref \(\times\) Checkpoint & 0.127 & 0.016 & 0.097 &
-0.158 & 1.000 \\
-BabyLM & 350M & Checkpoint (tokens, z) & -0.001 & 0.005 & -0.011 & 0.008
-& 0.392 \\
-BabyLM & 350M & Overall freq \(\times\) Checkpoint & 0.034 & 0.002 &
-0.030 & 0.039 & 1.000 \\
-BabyLM & 350M & Overall freq (ln total) & 0.148 & 0.010 & 0.129 & 0.167
-& 1.000 \\
-BabyLM & 350M & RelFreq \(\times\) Checkpoint & 1.592 & 0.009 & 1.575 &
-1.609 & 1.000 \\
-BabyLM & 350M & RelFreq (P(alpha)-0.5) & -3.071 & 0.151 & -3.387 &
--2.784 & 0.000 \\
-BabyLM & 1.3B & AbsPref & -0.028 & 0.633 & -1.158 & 1.299 & 0.483 \\
-BabyLM & 1.3B & AbsPref \(\times\) Checkpoint & 0.277 & 0.024 & 0.230 &
-0.323 & 1.000 \\
-BabyLM & 1.3B & Checkpoint (tokens, z) & 0.001 & 0.007 & -0.013 & 0.015
-& 0.543 \\
-BabyLM & 1.3B & Overall freq \(\times\) Checkpoint & 0.051 & 0.003 &
-0.044 & 0.057 & 1.000 \\
-BabyLM & 1.3B & Overall freq (ln total) & 0.247 & 0.014 & 0.218 & 0.275
-& 1.000 \\
-BabyLM & 1.3B & RelFreq \(\times\) Checkpoint & 1.900 & 0.014 & 1.874 &
-1.927 & 1.000 \\
-BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & -0.757 & 0.202 & -1.157 &
--0.366 & 0.000 \\
-C4 & 125M & AbsPref & 1.762 & 0.360 & 1.123 & 2.442 & 1.000 \\
-C4 & 125M & AbsPref \(\times\) Checkpoint & 0.079 & 0.010 & 0.059 &
-0.098 & 1.000 \\
-C4 & 125M & Checkpoint (tokens, z) & -0.057 & 0.003 & -0.063 & -0.051 &
-0.000 \\
-C4 & 125M & Overall freq \(\times\) Checkpoint & -0.014 & 0.001 & -0.017
-& -0.011 & 0.000 \\
-C4 & 125M & Overall freq (ln total) & 0.217 & 0.009 & 0.200 & 0.234 &
-1.000 \\
-C4 & 125M & RelFreq \(\times\) Checkpoint & 2.073 & 0.006 & 2.060 &
-2.085 & 1.000 \\
-C4 & 125M & RelFreq (P(alpha)-0.5) & -3.176 & 0.027 & -3.229 & -3.124 &
-0.000 \\
-C4 & 350M & AbsPref & 0.268 & 0.385 & -0.494 & 0.934 & 0.757 \\
-C4 & 350M & AbsPref \(\times\) Checkpoint & 0.383 & 0.009 & 0.365 &
-0.401 & 1.000 \\
-C4 & 350M & Checkpoint (tokens, z) & -0.029 & 0.003 & -0.034 & -0.024 &
-0.000 \\
-C4 & 350M & Overall freq \(\times\) Checkpoint & 0.033 & 0.001 & 0.031 &
-0.036 & 1.000 \\
-C4 & 350M & Overall freq (ln total) & 0.154 & 0.007 & 0.141 & 0.168 &
-1.000 \\
-C4 & 350M & RelFreq \(\times\) Checkpoint & 1.616 & 0.006 & 1.605 &
-1.628 & 1.000 \\
-C4 & 350M & RelFreq (P(alpha)-0.5) & -3.590 & 0.026 & -3.639 & -3.539 &
-0.000 \\
-C4 & 1.3B & AbsPref & 2.162 & 0.345 & 1.553 & 2.834 & 1.000 \\
-C4 & 1.3B & AbsPref \(\times\) Checkpoint & 0.025 & 0.011 & 0.003 &
-0.048 & 0.987 \\
-C4 & 1.3B & Checkpoint (tokens, z) & -0.064 & 0.004 & -0.071 & -0.057 &
-0.000 \\
-C4 & 1.3B & Overall freq \(\times\) Checkpoint & -0.018 & 0.002 & -0.021
-& -0.014 & 0.000 \\
-C4 & 1.3B & Overall freq (ln total) & 0.235 & 0.009 & 0.217 & 0.253 &
-1.000 \\
-C4 & 1.3B & RelFreq \(\times\) Checkpoint & 2.469 & 0.007 & 2.455 &
-2.483 & 1.000 \\
-C4 & 1.3B & RelFreq (P(alpha)-0.5) & -3.261 & 0.031 & -3.321 & -3.199 &
-0.000 \\
+\centering{
 
+\begin{tabular}{lllrrrrr}
+\toprule
+Corpus & Size & Term & Mean & SD & 2.5\% & 97.5\% & $P(\beta > 0)$\\
+\midrule
+BabyLM & 125M & AbsPref & 0.851 & 0.596 & -0.294 & 1.941 & 0.923\\
+BabyLM & 125M & AbsPref $\times$ Checkpoint & 0.999 & 0.021 & 0.958 & 1.040 & 1.000\\
+BabyLM & 125M & Checkpoint (tokens, z) & -0.161 & 0.006 & -0.174 & -0.149 & 0.000\\
+BabyLM & 125M & Overall freq $\times$ Checkpoint & 0.033 & 0.003 & 0.027 & 0.039 & 1.000\\
+BabyLM & 125M & Overall freq (ln total) & 0.222 & 0.013 & 0.197 & 0.247 & 1.000\\
+\addlinespace
+BabyLM & 125M & RelFreq $\times$ Checkpoint & 1.945 & 0.012 & 1.921 & 1.968 & 1.000\\
+BabyLM & 125M & RelFreq (P(alpha)-0.5) & -0.919 & 0.190 & -1.279 & -0.549 & 0.000\\
+BabyLM & 350M & AbsPref & -0.140 & 0.500 & -1.097 & 0.909 & 0.390\\
+BabyLM & 350M & AbsPref $\times$ Checkpoint & 0.127 & 0.016 & 0.097 & 0.158 & 1.000\\
+BabyLM & 350M & Checkpoint (tokens, z) & -0.001 & 0.005 & -0.011 & 0.008 & 0.392\\
+\addlinespace
+BabyLM & 350M & Overall freq $\times$ Checkpoint & 0.034 & 0.002 & 0.030 & 0.039 & 1.000\\
+BabyLM & 350M & Overall freq (ln total) & 0.148 & 0.010 & 0.129 & 0.167 & 1.000\\
+BabyLM & 350M & RelFreq $\times$ Checkpoint & 1.592 & 0.009 & 1.575 & 1.609 & 1.000\\
+BabyLM & 350M & RelFreq (P(alpha)-0.5) & -3.071 & 0.151 & -3.387 & -2.784 & 0.000\\
+BabyLM & 1.3B & AbsPref & -0.028 & 0.633 & -1.158 & 1.299 & 0.483\\
+\addlinespace
+BabyLM & 1.3B & AbsPref $\times$ Checkpoint & 0.277 & 0.024 & 0.230 & 0.323 & 1.000\\
+BabyLM & 1.3B & Checkpoint (tokens, z) & 0.001 & 0.007 & -0.013 & 0.015 & 0.543\\
+BabyLM & 1.3B & Overall freq $\times$ Checkpoint & 0.051 & 0.003 & 0.044 & 0.057 & 1.000\\
+BabyLM & 1.3B & Overall freq (ln total) & 0.247 & 0.014 & 0.218 & 0.275 & 1.000\\
+BabyLM & 1.3B & RelFreq $\times$ Checkpoint & 1.900 & 0.014 & 1.874 & 1.927 & 1.000\\
+\addlinespace
+BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & -0.757 & 0.202 & -1.157 & -0.366 & 0.000\\
+C4 & 125M & AbsPref & 1.762 & 0.360 & 1.123 & 2.442 & 1.000\\
+C4 & 125M & AbsPref $\times$ Checkpoint & 0.079 & 0.010 & 0.059 & 0.098 & 1.000\\
+C4 & 125M & Checkpoint (tokens, z) & -0.057 & 0.003 & -0.063 & -0.051 & 0.000\\
+C4 & 125M & Overall freq $\times$ Checkpoint & -0.014 & 0.001 & -0.017 & -0.011 & 0.000\\
+\addlinespace
+C4 & 125M & Overall freq (ln total) & 0.217 & 0.009 & 0.200 & 0.234 & 1.000\\
+C4 & 125M & RelFreq $\times$ Checkpoint & 2.073 & 0.006 & 2.060 & 2.085 & 1.000\\
+C4 & 125M & RelFreq (P(alpha)-0.5) & -3.176 & 0.027 & -3.229 & -3.124 & 0.000\\
+C4 & 350M & AbsPref & 0.268 & 0.385 & -0.494 & 0.934 & 0.757\\
+C4 & 350M & AbsPref $\times$ Checkpoint & 0.383 & 0.009 & 0.365 & 0.401 & 1.000\\
+\addlinespace
+C4 & 350M & Checkpoint (tokens, z) & -0.029 & 0.003 & -0.034 & -0.024 & 0.000\\
+C4 & 350M & Overall freq $\times$ Checkpoint & 0.033 & 0.001 & 0.031 & 0.036 & 1.000\\
+C4 & 350M & Overall freq (ln total) & 0.154 & 0.007 & 0.141 & 0.168 & 1.000\\
+C4 & 350M & RelFreq $\times$ Checkpoint & 1.616 & 0.006 & 1.605 & 1.628 & 1.000\\
+C4 & 350M & RelFreq (P(alpha)-0.5) & -3.590 & 0.026 & -3.639 & -3.539 & 0.000\\
+\addlinespace
+C4 & 1.3B & AbsPref & 2.162 & 0.345 & 1.553 & 2.834 & 1.000\\
+C4 & 1.3B & AbsPref $\times$ Checkpoint & 0.025 & 0.011 & 0.003 & 0.048 & 0.987\\
+C4 & 1.3B & Checkpoint (tokens, z) & -0.064 & 0.004 & -0.071 & -0.057 & 0.000\\
+C4 & 1.3B & Overall freq $\times$ Checkpoint & -0.018 & 0.002 & -0.021 & -0.014 & 0.000\\
+C4 & 1.3B & Overall freq (ln total) & 0.235 & 0.009 & 0.217 & 0.253 & 1.000\\
+\addlinespace
+C4 & 1.3B & RelFreq $\times$ Checkpoint & 2.469 & 0.007 & 2.455 & 2.483 & 1.000\\
+C4 & 1.3B & RelFreq (P(alpha)-0.5) & -3.261 & 0.031 & -3.321 & -3.199 & 0.000\\
+\bottomrule
+\end{tabular}
+
+}
 
 \caption{\label{tbl-sg-ckpt}Posterior fixed effects from the
 checkpoint-interacted preference deviation model.}
 
-\tabularnewline
-\end{longtable}
+\end{table}%
 
 \subsection{Absolute Preference
-Deviation}\label{absolute-preference-deviation-1}
+Deviation}\label{absolute-preference-deviation}
 
-\begin{longtable}[]{@{}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0753}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0538}}
-  >{\raggedright\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.4194}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0753}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0645}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0753}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.0753}}
-  >{\raggedleft\arraybackslash}p{(\linewidth - 14\tabcolsep) * \real{0.1613}}@{}}
+\begin{table}
 
-\toprule\noalign{}
-\begin{minipage}[b]{\linewidth}\raggedright
-Corpus
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Size
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
-Term
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-Mean
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-SD
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-2.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-97.5\%
-\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedleft
-\(P(\beta > 0)\)
-\end{minipage} \\
-\midrule\noalign{}
-\endhead
-\bottomrule\noalign{}
-\endlastfoot
-BabyLM & 125M & Checkpoint \(\times\) Overall freq & -0.184 & 0.002 &
--0.189 & -0.180 & 0.000 \\
-BabyLM & 125M & Checkpoint (tokens, z) & 0.180 & 0.002 & 0.176 & 0.184 &
-1.000 \\
-BabyLM & 125M & Overall freq (ln total, z within ckpt) & -0.067 & 0.040
-& -0.148 & 0.012 & 0.048 \\
-BabyLM & 350M & Checkpoint \(\times\) Overall freq & -0.142 & 0.002 &
--0.146 & -0.139 & 0.000 \\
-BabyLM & 350M & Checkpoint (tokens, z) & -0.086 & 0.002 & -0.089 &
--0.082 & 0.000 \\
-BabyLM & 350M & Overall freq (ln total, z within ckpt) & 0.395 & 0.038 &
-0.320 & 0.465 & 1.000 \\
-BabyLM & 1.3B & Checkpoint \(\times\) Overall freq & -0.237 & 0.002 &
--0.242 & -0.233 & 0.000 \\
-BabyLM & 1.3B & Checkpoint (tokens, z) & 0.287 & 0.002 & 0.283 & 0.292 &
-1.000 \\
-BabyLM & 1.3B & Overall freq (ln total, z within ckpt) & -0.080 & 0.047
-& -0.168 & 0.020 & 0.044 \\
-C4 & 125M & Checkpoint \(\times\) Overall freq & -0.043 & 0.001 & -0.046
-& -0.041 & 0.000 \\
-C4 & 125M & Checkpoint (tokens, z) & -0.035 & 0.002 & -0.037 & -0.031 &
-0.000 \\
-C4 & 125M & Overall freq (ln total, z within ckpt) & 0.275 & 0.010 &
-0.255 & 0.293 & 1.000 \\
-C4 & 350M & Checkpoint \(\times\) Overall freq & -0.090 & 0.001 & -0.093
-& -0.088 & 0.000 \\
-C4 & 350M & Checkpoint (tokens, z) & -0.068 & 0.002 & -0.071 & -0.065 &
-0.000 \\
-C4 & 350M & Overall freq (ln total, z within ckpt) & 0.375 & 0.011 &
-0.355 & 0.397 & 1.000 \\
-C4 & 1.3B & Checkpoint \(\times\) Overall freq & -0.045 & 0.001 & -0.048
-& -0.043 & 0.000 \\
-C4 & 1.3B & Checkpoint (tokens, z) & 0.017 & 0.002 & 0.013 & 0.020 &
-1.000 \\
-C4 & 1.3B & Overall freq (ln total, z within ckpt) & 0.232 & 0.011 &
-0.210 & 0.252 & 1.000 \\
+\centering{
 
+\begin{tabular}{lllrrrrr}
+\toprule
+Corpus & Size & Term & Mean & SD & 2.5\% & 97.5\% & $P(\beta > 0)$\\
+\midrule
+BabyLM & 125M & Checkpoint $\times$ Overall freq & -0.184 & 0.002 & -0.189 & -0.180 & 0.000\\
+BabyLM & 125M & Checkpoint (tokens, z) & 0.180 & 0.002 & 0.176 & 0.184 & 1.000\\
+BabyLM & 125M & Overall freq (ln total, z within ckpt) & -0.067 & 0.040 & -0.148 & 0.012 & 0.048\\
+BabyLM & 350M & Checkpoint $\times$ Overall freq & -0.142 & 0.002 & -0.146 & -0.139 & 0.000\\
+BabyLM & 350M & Checkpoint (tokens, z) & -0.086 & 0.002 & -0.089 & -0.082 & 0.000\\
+\addlinespace
+BabyLM & 350M & Overall freq (ln total, z within ckpt) & 0.395 & 0.038 & 0.320 & 0.465 & 1.000\\
+BabyLM & 1.3B & Checkpoint $\times$ Overall freq & -0.237 & 0.002 & -0.242 & -0.233 & 0.000\\
+BabyLM & 1.3B & Checkpoint (tokens, z) & 0.287 & 0.002 & 0.283 & 0.292 & 1.000\\
+BabyLM & 1.3B & Overall freq (ln total, z within ckpt) & -0.080 & 0.047 & -0.168 & 0.020 & 0.044\\
+C4 & 125M & Checkpoint $\times$ Overall freq & -0.043 & 0.001 & -0.046 & -0.041 & 0.000\\
+\addlinespace
+C4 & 125M & Checkpoint (tokens, z) & -0.035 & 0.002 & -0.037 & -0.031 & 0.000\\
+C4 & 125M & Overall freq (ln total, z within ckpt) & 0.275 & 0.010 & 0.255 & 0.293 & 1.000\\
+C4 & 350M & Checkpoint $\times$ Overall freq & -0.090 & 0.001 & -0.093 & -0.088 & 0.000\\
+C4 & 350M & Checkpoint (tokens, z) & -0.068 & 0.002 & -0.071 & -0.065 & 0.000\\
+C4 & 350M & Overall freq (ln total, z within ckpt) & 0.375 & 0.011 & 0.355 & 0.397 & 1.000\\
+\addlinespace
+C4 & 1.3B & Checkpoint $\times$ Overall freq & -0.045 & 0.001 & -0.048 & -0.043 & 0.000\\
+C4 & 1.3B & Checkpoint (tokens, z) & 0.017 & 0.002 & 0.013 & 0.020 & 1.000\\
+C4 & 1.3B & Overall freq (ln total, z within ckpt) & 0.232 & 0.011 & 0.210 & 0.252 & 1.000\\
+\bottomrule
+\end{tabular}
+
+}
 
 \caption{\label{tbl-absgap}Posterior fixed effects for absolute
 preference deviation. Mean = posterior mean; SD = posterior SD;
 2.5\%/97.5\% = 95\% credible interval bounds.}
 
-\tabularnewline
-\end{longtable}
+\end{table}%
 
 \section{Checkpoint-Interacted Coefficient Plots}\label{sec-ckpt-coefs}
 

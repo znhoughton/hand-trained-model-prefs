@@ -4,6 +4,7 @@ colm-mode: submission  # submission (anonymous + line numbers) | preprint (non-a
 format:
   colm-pdf:
     tbl-cap-location: bottom
+    longtable: false
     keep-tex: true
   html: default
 editor: visual
@@ -31,6 +32,12 @@ if (!grepl(gs_bin, current_path, fixed = TRUE)) {
 
 # Generate R and package citations
 knitr::write_bib(c("base", "brms", "tidyverse"), "r-references.bib")
+
+# Force kable to emit raw LaTeX (not markdown pipe tables) for PDF output.
+# Without this, knitr outputs pipe tables which pandoc converts to longtable
+# environments with \bottomrule in \endlastfoot — placing the rule *after*
+# the caption when tbl-cap-location: bottom is set.
+if (knitr::is_latex_output()) options(knitr.table.format = "latex")
 ```
 
 The ability to trade off between stored and abstract knowledge is central to human language. A proficient language user must be able to apply abstract rules productively (for example, generating the plural of a novel word like *wug* as *wugs*) while simultaneously drawing on stored knowledge that resists those rules (knowing that the plural of *goose* is *geese*, not *gooses*). There is substantial evidence that humans navigate this trade-off dynamically as a function of linguistic experience [e.g., @morgan2016abstractknowledgedirect; @morgan2024productiveknowledgeitemspecific; @houghton2025multiwordrepresentationsminds], yet the mechanisms driving it remain poorly understood.
@@ -39,7 +46,7 @@ In the present study, we investigate whether transformer language models trained
 
 -   We train six autoregressive language models from scratch on two corpora [BabyLM, @charpentier2025babylmturns3; and a subset of C4, @raffelExploringLimitsTransfer2020] at three model sizes (125M, 350M, and 1.3B parameters), providing a controlled testbed for examining how training data and scale jointly shape ordering preferences. In order to promote open access research, we also make these 6 models (along with all checkpoints) publicly accessible.
 -   We replicate and extend @houghton2025roleabstractrepresentations by examining whether models trained on a developmentally plausible amount of data show evidence of abstract preferences, rather than relying exclusively on relative frequency.
--   We examine the full learning trajectory of binomial ordering preferences across training, allowing us to assess not only whether human-like preferences emerge, but when and how they develop.
+-   We examine the full learning trajectory of binomial ordering preferences across training — including both the direction of preferences (driven by abstract or frequency-based factors) and their overall magnitude — allowing us to assess not only whether human-like preferences emerge, but when and how they develop, and whether models show a frequency-dependent preference extremity analogous to what is observed in humans.
 -   We introduce a preference deviation measure that captures the deviation between a model's ordering preference and what relative frequency alone would predict, enabling a more direct test of whether model preferences are driven by factors beyond memorization.
 
 ## Abstract Knowledge and Stored Knowledge in Humans
@@ -50,15 +57,15 @@ Evidence for abstract knowledge spans virtually every level of linguistic repres
 
 Abstract knowledge also shapes the learning and processing of specific lexical constructions. For example, @benorChickenEggProbabilistic2006 demonstrated that binomial orderings in corpus data (e.g., *bishops and seamstresses* vs. *seamstresses and bishops*) are driven by a range of phonological, semantic, and metrical constraints, such as a preference to place the more powerful or shorter word first. @morgan2016abstractknowledgedirect operationalized these constraints by coding a set of binomials for these features and fitting a logistic regression model to corpus data, yielding a single fitted value per binomial (abstract preference) that summarizes the degree to which abstract constraints favor one ordering over the other. They found that abstract preferences predicted human ordering preferences for low-frequency binomials, while relative frequency (the proportion that a binomial appears in corpus data in alphabetical ordering relative to nonalphabetical ordering) predicted the ordering of high-frequency items. A follow-up study [@morgan2024productiveknowledgeitemspecific] subsequently showed that while relative frequency remains a strong predictor for high-frequency binomials, abstract preferences exert an influence across the full frequency spectrum. Together, these results suggest that humans draw on stored knowledge for high-frequency binomials while relying on abstract preferences for lower-frequency items.
 
-The trade-off between abstract and stored knowledge as a function of language usage has a long history in the literature [e.g., @bybee1999usagebasedphonology; @kapatsinski2010frequencyuseleads; @stembergerAreInflectedForms2004; @stembergerFrequencyLexicalStorage1986; @houghton2025multiwordrepresentationsminds; @morgan2016abstractknowledgedirect; @morganFrequencydependentRegularizationIterated2016a; @morganModelingIdiosyncraticPreferences2015]. For example, @stembergerAreInflectedForms2004 demonstrated that inflection errors are less common for high-frequency words than low-frequency words, and @bybee1999usagebasedphonology showed that *don't* is more phonetically reduced in high-frequency phrases (e.g., *I don't know*) than in low-frequency ones (e.g., *I don't go*). Processing measures have provided convergent evidence: recognition of constituent words is harder in high-frequency [@kapatsinski2010frequencyuseleads] and high-predictability [@houghton2025multiwordrepresentationsminds] phrases (e.g., recognizing *up* in *pick up*), consistent with holistic storage of these sequences. Despite this broad empirical support, the mechanism driving the trade-off remains unclear.
+The trade-off between abstract and stored knowledge as a function of language usage has a long history in the literature [e.g., @bybee1999usagebasedphonology; @kapatsinski2010frequencyuseleads; @stembergerAreInflectedForms2004; @stembergerFrequencyLexicalStorage1986; @houghton2025multiwordrepresentationsminds; @morgan2016abstractknowledgedirect; @morganFrequencydependentRegularizationIterated2016a; @morganModelingIdiosyncraticPreferences2015]. For example, @stembergerAreInflectedForms2004 demonstrated that inflection errors are less common for high-frequency words than low-frequency words. Similarly, @bybee1999usagebasedphonology showed that *don't* is more phonetically reduced in high-frequency phrases (e.g., *I don't know*) than in low-frequency ones (e.g., *I don't go*). Processing measures have provided convergent evidence: recognition of constituent words is harder in high-frequency [@kapatsinski2010frequencyuseleads] and high-predictability [@houghton2025multiwordrepresentationsminds] phrases (e.g., recognizing *up* in *pick up*), consistent with holistic storage of these sequences. Despite this broad empirical support, however, the mechanism driving the trade-off remains unclear.
 
 ## Accounts of Abstract Knowledge and Stored Knowledge
 
-One influential mechanistic account appeals to neural network models, which offer an explanation for how abstraction and storage can emerge from the same underlying system: by learning to map inputs onto distributional representations that reflect both the statistical regularities shared across items and the idiosyncratic properties of individual items, these systems can in principle capture both rule-like generalizations and item-specific stored knowledge within a unified architecture. To understand how, it helps to trace the development of these models. One of the oldest neurobiological models of language is a simple 2-layer perceptron [@rosenblatt1959twotheoremsstatistical; @rosenblatt1960perceptronsimulationexperiments], a fully connected network capable of solving only linearly separable problems. A major advance came when @rumelhart1986learningrepresentationsbackpropagating showed that introducing a hidden layer allows the network to solve non-linearly separable problems [@rumelhart1986learningrepresentationsbackpropagating; @pulvermuller2002neurosciencelanguagebrain]. The hidden layer achieves this by transforming the input into a new representational space where previously intractable classification boundaries become linear (see @sec-xor for a concrete illustration). In a seminal follow-up, @rumelhart1986learningtensesenglish demonstrated that such a model can not only learn the English past tense, but reproduces the same u-shaped learning curve observed in children. Crucially, networks with hidden layers can support both abstraction and item-specific memorization within the same architecture.
+One influential mechanistic account appeals to neural network models, which offer an explanation for how abstraction and storage can emerge from the same underlying system: by learning to map inputs onto distributional representations that reflect both the statistical regularities shared across items and the idiosyncratic properties of individual items, these systems can in principle capture both rule-like generalizations and item-specific stored knowledge within a unified architecture. Neural networks enable this ability to capture both types of knowledge through hidden layers, which project the input into a new representational space where previously intractable classification boundaries become linear (see @sec-xor for a concrete illustration).
 
-While these are much older models, at the heart of modern day transformer models [@vaswaniAttentionAllYou2017] is still a multi-layer perceptron. Thus, given their impressive capacity for language, it is possible that these models trade off between stored and abstract knowledge in a way that is similar to humans. Unfortunately, the evidence for this is quite mixed [@haleyThisBERTNow2020; @lasriSubjectVerbAgreement2022; @liAssessingCapacityTransformer2023; @li2021areneuralnetworks; @houghton2025roleabstractrepresentations; @mccoy2023howmuchlanguage; @misraLanguageModelsLearn2024; @yaoBothDirectIndirect2025; @kapatsinski2026transformersperformadaptive].
+Multi-layer neural networks underlie a great deal of success behind the transformer architecture [@vaswaniAttentionAllYou2017], which is the architecture behind nearly every successful language model that has emerged within the last few years. However, it is unclear whether transformer models trade off between stored and abstract knowledge in a way that is similar to humans. Indeed, the evidence for abstract knowledge altogether is quite mixed [@haleyThisBERTNow2020; @lasriSubjectVerbAgreement2022; @liAssessingCapacityTransformer2023; @li2021areneuralnetworks; @houghton2025roleabstractrepresentations; @mccoy2023howmuchlanguage; @misraLanguageModelsLearn2024; @yaoBothDirectIndirect2025; @kapatsinski2026transformersperformadaptive].
 
-On one hand, there is evidence that GPT-2 [@radfordLanguageModelsAre2019] can generate both novel words and novel syntactic structures [@mccoy2023howmuchlanguage], and that models can generalize learned knowledge beyond the specific constructions in which they encounter it [@misraLanguageModelsLearn2024]. For example, @misraLanguageModelsLearn2024 examined whether models can learn the rare Article Adjective Numeral Noun construction (e.g., *a beautiful five days*) without direct exposure, and found that models can learn it by generalizing from similar structures they have encountered, such as *a few days*. Similarly, @kapatsinski2026transformersperformadaptive demonstrated that GPT-2 exhibits adaptive partial pooling during training, such that predictions become increasingly context-specific for frequent contexts while continuing to draw on broader distributional information for rare ones, a pattern that closely mirrors the frequency-dependent trade-off between stored and abstract knowledge observed in humans.
+On one hand, there is evidence that GPT-2 [@radfordLanguageModelsAre2019] can generate both novel words and novel syntactic structures [@mccoy2023howmuchlanguage], and that models can generalize learned knowledge beyond the specific constructions in which they encounter it [@misraLanguageModelsLearn2024]. For example, @misraLanguageModelsLearn2024 examined whether models can learn the rare Article Adjective Numeral Noun construction (e.g., *a beautiful five days*) without direct exposure, and found that models can learn it by generalizing from similar structures they have encountered, such as *a few days*. Similarly, @kapatsinski2026transformersperformadaptive demonstrated that GPT-2 exhibits adaptive partial pooling during training, such that predictions become increasingly context-specific for frequent contexts while continuing to draw on broader distributional information for rare ones, a pattern that closely mirrors the frequency-dependent trade-off between stored and abstract knowledge observed in humans. Relatedly, @jian2026humans examined whether GPT-2's learning trajectory over the course of training is better characterized by abstraction-first or exemplar-first accounts. Using a novel divergence-based metric, they tracked how next-word prediction distributions change across training checkpoints. Under an exemplar-first account, next-word predictions for individual items should initially diverge from others in the same class before converging as training progresses. Instead, they found that class-level distinctions arise as soon as any item-specific change is detectable, suggesting that transformer models have an inductive bias toward abstraction when learning language.
 
 On the other hand, there is evidence that these models rely heavily on memorization [@houghton2025roleabstractrepresentations; @mccoy2023howmuchlanguage]. Although @mccoy2023howmuchlanguage demonstrated that GPT-2 can generate novel words and syntactic structures, the same study found that it also reproduces a substantial portion of its training data verbatim. Similarly, @houghton2025roleabstractrepresentations examined binomial ordering preferences in eight models ranging from 124M to 70B parameters and found no evidence of abstract preferences in any of them: ordering preferences were driven entirely by relative frequency across the board. Critically, a key ambiguity in this study is that the models were trained on trillions of tokens, making it impossible to determine whether the absence of abstract ordering preferences reflects a genuine architectural limitation or simply the overwhelming influence of having encountered each binomial many times over. Whether transformer models can trade off between abstraction and storage in a human-like manner therefore remains an open question.
 
@@ -68,7 +75,7 @@ A further complication is that examining models only at their final training che
 
 To examine whether language models can trade off between abstract and stored knowledge in a human-like manner, we extend @houghton2025roleabstractrepresentations to models trained on a developmentally plausible amount of data [@charpentier2025babylmturns3]. Specifically, we train six autoregressive language models from scratch using the OPT architecture [@zhangOPTOpenPretrained2022], crossing two training corpora [BabyLM, @charpentier2025babylmturns3; and a subset of C4, @raffelExploringLimitsTransfer2020] with three model sizes (125M, 350M, and 1.3B parameters). Models are checkpointed throughout training to track how binomial ordering preferences evolve as a function of experience.
 
-For each model and checkpoint, we computed the model's ordering preference along with the model's preference deviation which captures the degree to which the model's preferences deviate from what relative frequency alone would predict. We then regress these measures on two item-level predictors: relative frequency (RelFreq) and abstract preference (AbsPref), the latter being a summary of the abstract phonological, semantic, and metrical constraints known to drive human binomial ordering preferences [@morgan2016abstractknowledgedirect]. If models behave like humans, AbsPref should predict ordering preferences more strongly for lower-frequency binomials, with relative frequency playing a larger role for higher-frequency items. By examining both the final checkpoint and the full learning trajectory, we assess not only whether this human-like pattern emerges, but when and how it develops over the course of training. If the null results found in @houghton2025roleabstractrepresentations reflect memorization due to a combination of training data and model size, then this should be clear in the learning trajectories. On the other hand, if it is an architectural limitation, then we should see no emergence of abstract preferences at any point in training.
+For each model and checkpoint, we computed the model's ordering preference along with the model's preference deviation which captures the degree to which the model's preferences deviate from what relative frequency alone would predict. We then regress these measures on two item-level predictors: relative frequency (RelFreq) and abstract preference (AbsPref), the latter being a summary of the abstract phonological, semantic, and metrical constraints known to drive human binomial ordering preferences [@morgan2016abstractknowledgedirect]. If models behave like humans, AbsPref should predict ordering preferences more strongly for lower-frequency binomials, with relative frequency playing a larger role for higher-frequency items. By examining ordering preferences at the final checkpoint and across the full learning trajectory — including both the direction of preferences and how their magnitude evolves relative to frequency predictions — we assess not only whether this human-like abstract-storage trade-off emerges, but when and how it develops. If the null results found in @houghton2025roleabstractrepresentations reflect memorization due to a combination of training data and model size, then this should be clear in the learning trajectories. On the other hand, if it is an architectural limitation, then we should see no emergence of abstract preferences at any point in training.
 
 # Model Training
 
@@ -98,7 +105,7 @@ data.frame(
                    "$3\\times10^{-4}$", "$1\\times10^{-4}$", "$1\\times10^{-4}$"),
   check.names  = FALSE
 ) |>
-  kable(align = c("l", "r", "r", "r", "r"), escape = FALSE)
+  kable(align = c("l", "r", "r", "r", "r"), escape = FALSE, booktabs = TRUE)
 ```
 
 All six models showed smooth convergence in training loss throughout training, starting near the theoretical random baseline ($\ln 8192 \approx 9.01$) and decreasing consistently. Held-out validation perplexity confirmed successful training for all models; full loss curves and perplexity figures are reported in the Appendix [section -@sec-training-quality]. Notably, the BabyLM 1.3B model showed elevated final validation perplexity relative to the 350M model (2,557 vs. 290), consistent with mild overfitting given the small corpus (approximately 150M tokens) — unsurprising for a 1.3B parameter model trained on such limited data.
@@ -109,11 +116,30 @@ All six models showed smooth convergence in training loss throughout training, s
 
 The binomial items used in all analyses are taken from @morganModelingIdiosyncraticPreferences2015, which comprises 594 attested English binomial expressions annotated for various phonological, semantic, and metrical constraints identified by @benorChickenEggProbabilistic2006. For each binomial, the corpus provides an abstract preference score (AbsPref), derived from a logistic regression model fit to these constraint values [@morgan2016abstractknowledgedirect], which captures the degree to which abstract constraints favor one ordering over the other independently of corpus experience. This is the same set of items used in @houghton2025roleabstractrepresentations.
 
-Frequency statistics for each binomial were estimated directly from the two training corpora rather than from an external source. Crucially, because we train our models from scratch and checkpoint them throughout training, we can compute the exact number of times each model has seen each binomial in each ordering at every checkpoint (as opposed to an approximation based on corpus statistics). For each binomial and checkpoint, we computed the total number of exposures across both orderings.
+Frequency statistics for each binomial were estimated directly from the two training corpora rather than from an external source. Crucially, because we train our models from scratch and checkpoint them throughout training, we can compute the exact number of times each model has seen each binomial in each ordering at every checkpoint (as opposed to an approximation based on corpus statistics). For each binomial and checkpoint, we computed the total number of exposures across both orderings. @tbl-corpus-stats summarizes the coverage of the attested binomials in each corpus.
+
+```{r}
+#| label: tbl-corpus-stats
+#| tbl-cap: "Summary statistics for attested binomials in each training corpus. *Both orderings attested* counts binomials for which both the alphabetical and non-alphabetical orderings appear at least once in the corpus. Log overall frequency is $\\ln(n_\\alpha + n_\\beta)$ after applying this exclusion."
+#| echo: false
+
+data.frame(
+  Statistic = c(
+    "Total attested binomials",
+    "Both orderings attested ($n > 0$)",
+    "Log overall frequency: mean",
+    "Log overall frequency: SD"
+  ),
+  BabyLM = c("594", "185", "6.95", "1.47"),
+  C4     = c("594", "553", "5.46", "2.19"),
+  check.names = FALSE
+) |>
+  kable(align = c("l", "r", "r"), escape = FALSE, booktabs = TRUE)
+```
 
 ## Analyses
 
-In this section we present three complementary analyses examining how our models represent binomial ordering preferences over the course of training.[^2] The first analysis examines model **preference** (how strongly each model favors the alphabetically ordered form of a binomial). The second examines the **preference deviation** (the extent to which models' preferences deviate from what relative frequency alone would predict). The third examines **absolute preference deviation** (the magnitude of models' preference deviations, regardless of direction) as a function of training.
+In this section we present two complementary analyses examining how our models represent binomial ordering preferences over the course of training.[^2] The first examines model **preference** and **preference deviation** at the end of training, asking what factors predict each measure at the final checkpoint. The second examines how these preferences develop over the course of training, tracking how the influence of abstract and frequency-based factors changes across checkpoints and how the overall magnitude of preferences — including whether models develop increasingly extreme preferences for more frequently encountered binomials — evolves as training progresses.
 
 [^2]: All code, including code for model training, analyses, and results, will be made publicly available upon acceptance since the code for model training (which pushes to huggingface) would reveal one of the authors' identities and thus violate the double blind policy.
 
@@ -167,6 +193,27 @@ sg_coefs_final   <- load_coef_csv("sg_final_coefs.csv",   TERM_LABELS)
 sg_traj_coefs    <- load_coef_csv("sg_traj_coefs.csv",    TERM_LABELS)
 sg_coefs_ckpt    <- load_coef_csv("sg_ckpt_coefs.csv",    TERM_LABELS_CK)
 absgap_coefs     <- load_coef_csv("absgap_coefs.csv",     TERM_LABELS_ABSGAP)
+
+ppc_plot <- function(csv_fname, x_lab) {
+  path <- file.path(RESULTS_DIR, "ppc", csv_fname)
+  if (!file.exists(path)) return(invisible(NULL))
+  dat  <- read_csv(path, show_col_types = FALSE) |>
+    mutate(model_size = factor(model_size, levels = SIZE_LEVELS))
+  obs  <- dat[dat$source == "y",    ]
+  reps <- dat[dat$source == "yrep", ]
+  ggplot() +
+    geom_line(data = reps, aes(x = x, y = dens, group = draw),
+              colour = "#4575b4", alpha = 0.15, linewidth = 0.3) +
+    geom_line(data = obs,  aes(x = x, y = dens),
+              colour = "black", linewidth = 0.9) +
+    facet_grid(corpus ~ model_size) +
+    labs(x = x_lab, y = "Density") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank(),
+          axis.text  = element_text(colour = "black"),
+          axis.title = element_text(colour = "black"),
+          strip.text = element_text(colour = "black", face = "bold"))
+}
 
 sg_gap_path <- file.path(RESULTS_DIR, "sg_gap_summary.csv")
 sg_gap_summary <- if (file.exists(sg_gap_path)) {
@@ -250,23 +297,196 @@ genpref_sig_timeline <- function(traj_df, focus_term = "AbsPref") {
 }
 ```
 
-### Preference
+### Ordering Preferences at the Final Checkpoint
 
-In this section, we examine whether our models learn binomial ordering preferences, and if so what factors predict that preference. For each model checkpoint and binomial pair, we compute the model's ordering **preference** as the difference in log-probability of the alphabetically ordered form (e.g., *bread and butter*) compared to the non-alphabetically ordered form (e.g., *butter and bread*), following @houghton2025roleabstractrepresentations. Positive values indicate a stronger model preference for the alphabetically ordered form (see @sec-def-preference for a formal definition).
+We consider two complementary outcome measures. The first is model **preference**: for each model checkpoint and binomial pair, we computed the preference by prepending each of 51 diverse prompt prefixes (e.g., a single space, *Well,*, *A friend once described the*) to both orderings, computing the difference in summed token log-probability between the alphabetically ordered form (e.g., *bread and butter*) and the non-alphabetically ordered form (e.g., *butter and bread*) within each prompt context, and averaging those per-prompt differences, following @houghton2025roleabstractrepresentations. Positive values indicate a stronger preference for the alphabetically ordered form (see @sec-def-preference for a formal definition). The second outcome is the **preference deviation**: the difference between the model's preference score and the log relative frequency ratio for that binomial (see @sec-def-prefdev for a formal definition). Because we train our models from scratch and checkpoint them throughout training, we can compute the exact number of times each model has seen each ordering of each binomial at every checkpoint. A preference deviation of zero means the model's preference exactly matches what relative frequency predicts; positive values indicate a stronger preference for the alpha-ordered form than corpus statistics alone would suggest, and negative values the reverse. @fig-scoring illustrates both measures for five example binomials from the C4 125M model at the final checkpoint.
 
-In order to examine the model ordering preferences, we implemented a Bayesian mixed-effects regression model in R [@R-base] using the brms package [@burknerBrmsPackageBayesian2017] with fixed effects for **AbsPref** (Abstract Preference), **RelFreq**, and **overall frequency**, interactions between each of AbsPref and RelFreq with overall frequency, and random intercepts for binomial. AbsPref captures the degree to which abstract phonological and semantic constraints favor one ordering over the other [@morgan2016abstractknowledgedirect]; RelFreq is the proportion of corpus occurrences in the alphabetically ordered form, centered; and overall frequency is the natural log of total occurrences in either ordering, logged and centered. The interaction terms allow us to test whether the influence of abstract constraints and relative frequency on ordering preferences varies with overall binomial frequency:
+```{r fig-scoring, echo=FALSE, message=FALSE, warning=FALSE, fig.width=13, fig.height=7}
+#| label: fig-scoring
+#| out-width: "100%"
+#| dev: cairo_pdf
+#| fig-cap: "Illustration of the preference scoring method. **(a)** For each binomial, 51 diverse prompt prefixes are prepended to both orderings; per-prompt log-probability differences ($\\Delta \\log P$) are averaged to yield a single preference score (shown for *bread and butter* vs. *butter and bread*, C4 125M model, final checkpoint). **(b)** Example preference scores for five attested binomials from the same model. Positive values indicate preference for the alphabetically ordered form; negative values indicate preference for the reverse. **(c)** Preference deviation (preference minus log relative frequency ratio) for the same binomials. Values near zero indicate that the model's preference matches what corpus frequency would predict; positive values indicate stronger preference for the alphabetical order than frequency alone would predict."
 
-$$\text{preference} \sim \text{AbsPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})$$
+library(patchwork)
 
-We fit this model at the final training checkpoint and at 20 evenly-spaced checkpoints throughout training to examine the learning trajectory of binomial ordering preferences. We additionally fit a checkpoint-interacted model in which training stage (tokens encountered, scaled and centered) is included as a predictor to test whether effects grow or shrink linearly over training:
+FIG1_G <- "#154733"   # Oregon green — alpha ordering / positive values
+FIG1_R <- "#F0B323"   # UO Gold      — non-alpha / negative values
 
-$$\text{preference} \sim (\text{AbsPref} + \text{RelFreq} + \ln(\text{total})) \times \text{tokens} + (1 \mid \text{binomial})$$
+CKPT_CSV  <- "../Data/checkpoint_results/opt-c4-125m-seed964_step-12192.csv"
+FINAL_CSV <- "../Data/processed/final_attested.csv"
+
+# ── Panel a data ──────────────────────────────────────────────────────────────
+ckpt   <- read_csv(CKPT_CSV,  show_col_types = FALSE)
+final  <- read_csv(FINAL_CSV, show_col_types = FALSE)
+
+bb_all    <- ckpt |> filter(binom == "bread and butter")
+mean_pref <- mean(bb_all$preference)
+
+show_prompts <- c(" ", "Well, ", "Or even ", "Maybe a ")
+bb_table <- bb_all |>
+  filter(trimws(prompt) %in% trimws(show_prompts)) |>
+  arrange(match(trimws(prompt), trimws(show_prompts)))
+if (nrow(bb_table) == 0) bb_table <- head(bb_all, 4)
+
+# ── Panel b & c data ──────────────────────────────────────────────────────────
+c4_125m <- final |>
+  filter(grepl("c4-125m", model, ignore.case = TRUE)) |>
+  filter(step == max(step)) |>
+  mutate(
+    freq_log_odds = qlogis(RelFreq),
+    pref_dev      = preference - freq_log_odds
+  )
+
+candidates <- c4_125m |>
+  filter(Attested == "True" | Attested == TRUE) |>
+  filter(abs(RelFreq - 0.5) > 0.05) |>
+  arrange(preference)
+n   <- nrow(candidates)
+idx <- unique(round(seq(1, n, length.out = 5)))
+examples <- candidates[idx, ]
+
+# ── Panel a: scoring table ────────────────────────────────────────────────────
+p_left <- local({
+  body <- bb_table |>
+    transmute(
+      y      = rev(seq_len(n())),
+      prompt = case_when(
+        trimws(prompt) == "" ~ "(empty)",
+        TRUE                 ~ sprintf('"%s"', trimws(prompt))
+      ),
+      lp_a = sprintf("%.2f", alpha_logprob),
+      lp_n = sprintf("%.2f", nonalpha_logprob),
+      diff = sprintf("%+.2f", preference)
+    )
+
+  ROW_H  <- 0.60
+  body   <- body |> mutate(y = rev(seq_len(n())) * ROW_H)
+  ellipsis_y <- 0
+  more_label <- sprintf("... (%d more prompts)", nrow(bb_all) - nrow(bb_table))
+
+  X_PFX <- 0; X_A <- 3.2; X_N <- 6.1; X_D <- 8.3
+  Y_HDR  <- max(body$y) + 0.52
+  Y_SEP1 <- max(body$y) + 0.28
+  Y_SEP2 <- ellipsis_y - 0.28
+  Y_AVG  <- ellipsis_y - 0.64
+
+  ggplot() +
+    annotate("text", x = X_PFX, y = Y_HDR, label = "Prefix",
+             hjust = 0,   fontface = "bold", size = 7.0) +
+    annotate("text", x = X_A,   y = Y_HDR, label = "bread and butter",
+             hjust = 0.5, fontface = "bold", size = 6.5, colour = FIG1_G) +
+    annotate("text", x = X_N,   y = Y_HDR, label = "butter and bread",
+             hjust = 0.5, fontface = "bold", size = 6.5, colour = FIG1_R) +
+    annotate("text", x = X_D,   y = Y_HDR, label = "\u0394 log P",
+             hjust = 0.5, fontface = "bold", size = 7.0) +
+    annotate("segment", x = -0.2, xend = 9.5, y = Y_SEP1, yend = Y_SEP1,
+             colour = "grey40", linewidth = 0.5) +
+    geom_text(data = body, aes(x = X_PFX, y = y, label = prompt),
+              hjust = 0,   size = 6.5) +
+    geom_text(data = body, aes(x = X_A,   y = y, label = lp_a),
+              hjust = 0.5, size = 6.5, colour = FIG1_G) +
+    geom_text(data = body, aes(x = X_N,   y = y, label = lp_n),
+              hjust = 0.5, size = 6.5, colour = FIG1_R) +
+    geom_text(data = body, aes(x = X_D,   y = y, label = diff),
+              hjust = 0.5, size = 6.5) +
+    annotate("text", x = X_PFX, y = ellipsis_y, label = more_label,
+             hjust = 0, size = 6.0, colour = "grey50", fontface = "italic") +
+    annotate("segment", x = -0.2, xend = 9.5, y = Y_SEP2, yend = Y_SEP2,
+             colour = "grey40", linewidth = 0.5) +
+    annotate("text", x = X_PFX, y = Y_AVG,
+             label = sprintf("preference  =  mean(\u0394 log P)  =  %+.2f", mean_pref),
+             hjust = 0, fontface = "bold", size = 6.8) +
+    xlim(-0.3, 9.7) +
+    ylim(Y_AVG - 0.44, Y_HDR + 0.38) +
+    theme_void(base_size = 17) +
+    theme(plot.background = element_rect(fill = "white", colour = NA),
+          plot.margin     = margin(6, 8, 6, 8))
+})
+
+# ── Shared helper: horizontal lollipop ───────────────────────────────────────
+lollipop_fig1 <- function(ex, x_var, x_lab, neg_label, pos_label) {
+  ex <- ex |> arrange(.data[[x_var]]) |>
+    mutate(binom = factor(binom, levels = binom),
+           score = .data[[x_var]])
+  x_range  <- range(ex$score)
+  x_pad    <- max(diff(x_range) * 0.28, 1.5)
+  x_limits <- c(x_range[1] - x_pad, x_range[2] + x_pad)
+
+  ggplot(ex, aes(x = score, y = binom)) +
+    geom_vline(xintercept = 0, linetype = "dashed",
+               colour = "grey65", linewidth = 0.4) +
+    geom_segment(aes(x = 0, xend = score, yend = binom),
+                 colour = "grey78", linewidth = 0.7) +
+    geom_point(aes(colour = score > 0), size = 6.0) +
+    geom_text(aes(label = sprintf("%.2f", score), colour = score > 0,
+                  hjust = ifelse(score >= 0, -0.35, 1.35)),
+              size = 6.0, fontface = "bold") +
+    scale_colour_manual(values = c(FIG1_R, FIG1_G), guide = "none") +
+    scale_x_continuous(name = x_lab, limits = x_limits) +
+    # Large top expansion pushes dots away from the annotation labels;
+    # bottom expansion compresses the row spacing.
+    scale_y_discrete(name = NULL, expand = expansion(mult = c(0.3, 0.55))) +
+    coord_cartesian(clip = "off") +
+    annotate("text", x = -diff(x_limits) * 0.02, y = Inf,
+             label = neg_label, hjust = 1, vjust = 1.3,
+             size = 6.2, colour = FIG1_R, fontface = "italic") +
+    annotate("text", x = diff(x_limits) * 0.02, y = Inf,
+             label = pos_label, hjust = 0, vjust = 1.3,
+             size = 6.2, colour = FIG1_G, fontface = "italic") +
+    theme_classic(base_size = 17) +
+    theme(
+      axis.line.x        = element_line(colour = "grey60", linewidth = 0.4),
+      axis.line.y        = element_blank(),
+      axis.ticks.y       = element_blank(),
+      axis.text.y        = element_text(colour = "grey20", size = 13,
+                                        hjust = 0, margin = margin(r = 4)),
+      axis.text.x        = element_text(colour = "grey30", size = 13),
+      axis.title.x       = element_text(colour = "grey20", size = 15,
+                                        margin = margin(t = 4)),
+      panel.grid.major.x = element_line(colour = "grey92", linewidth = 0.3),
+      plot.background    = element_rect(fill = "white", colour = NA),
+      plot.margin        = margin(4, 28, 6, 4)
+    )
+}
+
+p_mid <- lollipop_fig1(
+  examples, "preference",
+  x_lab     = "Preference",
+  neg_label = "\u2190 prefers non-\u03b1 ordering",
+  pos_label = "prefers \u03b1 ordering \u2192"
+)
+p_right <- lollipop_fig1(
+  examples, "pref_dev",
+  x_lab     = "Preference deviation",
+  neg_label = "\u2190 below freq. prediction",
+  pos_label = "above freq. prediction \u2192"
+)
+
+bottom_row <- (p_mid | p_right)
+
+# free() opts p_left out of patchwork's axis-alignment pass so it truly
+# spans the full figure width and appears centred over panels b and c.
+(free(p_left) / bottom_row) +
+  plot_layout(heights = c(0.65, 1.0)) +
+  plot_annotation(
+    tag_levels = "a",
+    theme = theme(
+      plot.tag        = element_text(face = "bold", size = 17),
+      plot.background = element_rect(fill = "white", colour = NA),
+      plot.margin     = margin(10, 20, 10, 12)
+    )
+  )
+```
+
+For each outcome, we implemented a Bayesian mixed-effects regression model in R [@R-base] using the brms package [@burknerBrmsPackageBayesian2017] with fixed effects for **AbsPref** (Abstract Preference), **RelFreq**, and **overall frequency**, interactions between each of AbsPref and RelFreq with overall frequency, and random intercepts for binomial. AbsPref captures the degree to which abstract phonological and semantic constraints favor one ordering over the other [@morgan2016abstractknowledgedirect]; RelFreq is the proportion of corpus occurrences in the alphabetically ordered form, centered (see @sec-def-relfreq); and overall frequency is the natural log of total occurrences in either ordering, logged and centered. The interaction terms allow us to test whether the influence of abstract constraints and relative frequency varies with overall binomial frequency:
+
+$$\text{preference / pref. deviation} \sim \text{AbsPref} \times \ln(\text{total}) + \text{RelFreq} \times \ln(\text{total}) + (1 \mid \text{binomial})$$
 
 #### Results
 
-#### Final Checkpoint
+##### Preference
 
-The results of the Bayesian mixed-effects regression at the final checkpoint are visualized in @fig-pref-final-coefs (for full results, see @tbl-pref-final, Appendix). The results suggest that there is an effect of relative frequency on ordering preferences across all six models, which is consistent with models' ordering preferences being at least partly driven by the distributional statistics of their training data. Interestingly, the effect of AbsPref shows a graded pattern across model sizes, with the 125M parameter models showing a positive effect, the 350M models showing a somewhat weaker effect, and the 1.3B models showing little evidence of an effect.
+The results of the Bayesian mixed-effects regression for preference at the final checkpoint are visualized in @fig-pref-final-coefs (for full results, see @tbl-pref-final, Appendix). The results suggest that there is an effect of relative frequency on ordering preferences across all six models, which is consistent with models' ordering preferences being at least partly driven by the distributional statistics of their training data. Interestingly, the effect of AbsPref shows a graded pattern across model sizes, with the 125M parameter models showing a positive effect, the 350M models showing a somewhat weaker effect, and the 1.3B models showing little evidence of an effect. Posterior predictive checks suggest adequate model fit (@fig-ppc-pref).
 
 ```{r pref-final-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=9, fig.height=4.5}
 #| label: fig-pref-final-coefs
@@ -275,21 +495,20 @@ The results of the Bayesian mixed-effects regression at the final checkpoint are
 coef_plot(pref_coefs_final)
 ```
 
-As a follow-up, we fit a checkpoint-interacted model with training stage as an additional predictor (full results are included in the Appendix, in @tbl-pref-ckpt and @fig-pref-ckpt-coefs). This revealed that relative frequency effects grow stronger as training progresses across all six models. For the BabyLMs, only the 125M shows an effect of AbsPref, while C4 models show effects of AbsPref at the training midpoint for all models; the AbsPref trajectories are shown in @fig-absp-traj (top panel).
+```{r fig-ppc-pref, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=7}
+#| label: fig-ppc-pref
+#| out-width: "100%"
+#| fig-cap: "Posterior predictive check for the preference model at the final training checkpoint. The dark line shows the observed outcome density; light lines show 100 replicated datasets drawn from the posterior predictive distribution."
+ppc_plot("ppc_pref_final_dens.csv", "Preference")
+```
 
-### Preference Deviation
+##### Preference Deviation
 
-Since we have access to the exact training data each model encountered, we are able to calculate exactly how many times the model has seen each ordering of each binomial at every checkpoint. Thus, in this section, we examine the **preference deviation**: the difference between each model's preference score and the log relative frequency for that binomial (see @sec-def-prefdev for a formal definition). A preference deviation of zero means the model's preference exactly matches what relative frequency predicts; positive values indicate a stronger preference for alpha order than corpus statistics would suggest, and negative values the reverse. Using the preference deviation as the outcome allows us to ask whether models develop ordering preferences that go beyond simply reflecting the distributional statistics of their training data. We regress preference deviation on the same predictors using the same model specification as for preference (above), fit at the final checkpoint and at 20 evenly-spaced checkpoints throughout training.
-
-#### Results
-
-#### Final Checkpoint
-
-The results of the Bayesian mixed-effects regression for preference deviation at the final checkpoint are visualized in @fig-sg-final-coefs (for full results, see @tbl-sg-final, Appendix). Recall that because the preference deviation removes the contribution of relative frequency from the preference score, an effect of AbsPref here would suggest that models develop ordering preferences consistent with phonological and semantic biases over and above what the training data would predict. A positive effect of relative frequency, on the other hand, would indicate that the model's ordering preference for the alphabetically ordered form is more extreme than the training data alone would predict, while a negative effect would indicate the opposite.
+The results of the Bayesian mixed-effects regression for preference deviation at the final checkpoint are visualized in @fig-sg-final-coefs (for full results, see @tbl-sg-final, Appendix). Recall that because the preference deviation removes the contribution of relative frequency from the preference score, an effect of AbsPref here would suggest that models develop ordering preferences consistent with phonological and semantic biases over and above what the training data would predict. A positive effect of relative frequency would indicate that the model's ordering preference for the alphabetically ordered form is more extreme than the training data alone would predict, while a negative effect would indicate the opposite.
 
 The results for relative frequency are quite mixed across model sizes and corpora. Among the BabyLM models, the largest model shows a negative effect of relative frequency, while the two smaller models show little to no effect. Among the C4 models, the pattern is reversed: the two smaller models show a negative effect of relative frequency, while the largest shows little evidence of an effect. In terms of abstract preferences, the 125M BabyLM model shows a weak positive effect of AbsPref, while the two larger BabyLM models show little evidence of an effect. For the C4 models, the pattern is similar: the C4 125M model shows a weak effect of AbsPref (approximately 89% of posterior samples were greater than zero), while the two larger C4 models show little evidence of an effect.
 
-Taken together, the preference deviation results suggest that models' ordering preferences are broadly consistent with what relative frequency predicts, with limited evidence of preferences that go beyond the training distribution. Interestingly, the modest AbsPref effects that do appear are consistently concentrated in the smallest models across both corpora, suggesting that smaller models may be more sensitive to abstract ordering biases even when controlling for frequency.
+Taken together, the preference deviation results suggest that models' ordering preferences are broadly consistent with what relative frequency predicts, with limited evidence of preferences that go beyond the training distribution. Interestingly, the modest AbsPref effects that do appear are consistently concentrated in the smallest models across both corpora, suggesting that smaller models may be more sensitive to abstract ordering biases even when controlling for frequency. Posterior predictive checks suggest adequate model fit (@fig-ppc-sg).
 
 ```{r sg-final-coefs, echo=FALSE, message=FALSE, warning=FALSE, fig.width=7, fig.height=3.5}
 #| label: fig-sg-final-coefs
@@ -298,7 +517,26 @@ Taken together, the preference deviation results suggest that models' ordering p
 coef_plot(sg_coefs_final, text_size = 10)
 ```
 
-A follow-up checkpoint-interacted model for preference deviation (full results in @tbl-sg-ckpt and @fig-sg-ckpt-coefs, Appendix) similarly revealed a growing AbsPref effect for the 125M BabyLM over training, with relative frequency effects narrowing toward corpus predictions over time. A similar analysis revealed that at the midpoint of training, both the C4 125M and 1.3B parameter models show an effect of AbsPref. The AbsPref trajectories for both outcomes are shown in @fig-absp-traj; preference deviation trajectories largely mirror those for preference, with the largest C4 model showing a U-shaped pattern in both.
+```{r fig-ppc-sg, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=7}
+#| label: fig-ppc-sg
+#| out-width: "100%"
+#| fig-cap: "Posterior predictive check for the preference deviation model at the final training checkpoint. The dark line shows the observed outcome density; light lines show 100 replicated datasets drawn from the posterior predictive distribution."
+ppc_plot("ppc_sg_final_dens.csv", "Preference deviation")
+```
+
+### Development of Preferences Across Training
+
+To examine how ordering preferences develop over the course of training, we fit the regression model described above for both preference and preference deviation separately at 20 evenly-spaced checkpoints throughout training, and additionally fit a checkpoint-interacted model for each outcome in which training stage (tokens encountered, scaled and centered) is included as a predictor to test whether effects grow or shrink linearly over training:
+
+$$\text{preference / pref. deviation} \sim (\text{AbsPref} + \text{RelFreq} + \ln(\text{total})) \times \text{tokens} + (1 \mid \text{binomial})$$
+
+Full coefficient tables and plots from the checkpoint-interacted models are reported in the Appendix (Tables @tbl-pref-ckpt and @tbl-sg-ckpt; Figures @fig-pref-ckpt-coefs and @fig-sg-ckpt-coefs). We additionally examine how the overall magnitude of preference deviations changes over training by computing the **mean absolute preference deviation** across all binomials at each checkpoint; lower values indicate that models' preferences are closer to what relative frequency predicts on average. We also fit a Bayesian mixed-effects model predicting absolute preference deviation from training stage (scaled and centered) interacted with log overall frequency, to test whether models become more or less corpus-like over training and whether this depends on item frequency (@fig-absgap-coefs; for full results, see @tbl-absgap, Appendix).[^3]
+
+[^3]: For these analyses, we excluded binomials that did not occur at least one time in each ordering. This resulted in 185 items for the BabyLM model analyses and 553 items for the C4 analyses.
+
+#### Results
+
+Across all six models, relative frequency effects grow stronger as training progresses for both outcomes. For preference, the checkpoint-interacted model reveals that the 125M BabyLM develops a growing AbsPref effect over training, while C4 models show effects of AbsPref at the training midpoint for all three sizes. The pattern for preference deviation is similar: the 125M BabyLM shows a growing AbsPref effect with relative frequency effects narrowing toward corpus predictions over time, and at the midpoint of training both the C4 125M and 1.3B models show an effect of AbsPref. These AbsPref trajectories for both outcomes are shown in @fig-absp-traj; preference deviation trajectories largely mirror those for preference, with the largest C4 model showing a U-shaped pattern in both.
 
 ```{r plot-genp-traj, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=9}
 #| out-width: "75%"
@@ -313,17 +551,11 @@ p_sg_traj <- genpref_sig_timeline(sg_traj_coefs) +
 p_pref_traj / p_sg_traj + plot_layout(guides = "collect")
 ```
 
-### Absolute Preference Deviation
+Beyond the direction of preferences, we also examined how the overall magnitude of preference deviations changes over training. The mean absolute preference deviation grows throughout training for all six models (@fig-corpus-tracking), indicating that models' preferences deviate increasingly from what relative frequency alone would predict. Among the BabyLM models, this growth is most pronounced for the 1.3B model and weakest for the 350M model. Among the C4 models, all three follow a broadly similar trajectory.
 
-In this section, we examine how closely models track relative-frequency predictions over the course of training. We compute the **mean absolute preference deviation** across all binomials at each checkpoint (@fig-corpus-tracking); lower values indicate models' preferences are closer to what relative frequency predicts on average. We also fit a Bayesian mixed-effects model predicting absolute preference deviation from training stage (scaled and centered) interacted with log overall frequency, to test whether models become more or less corpus-like over training and whether this depends on item frequency (@fig-absgap-coefs; for full results, see @tbl-absgap, Appendix).
+The results of the Bayesian mixed-effects regression for absolute preference deviation are visualized in @fig-absgap-coefs (for full results, see @tbl-absgap, Appendix). The effect of training stage is quite mixed across models. Among the BabyLM models, the 125M and 1.3B models show a positive effect, while the 350M model shows a negative effect. Among the C4 models, the two smaller models show a slightly negative effect while the largest shows a slightly positive effect. In general, the effect of checkpoint appears weaker for the C4 models than for the BabyLM models, suggesting that training data diversity may dampen the growth of preference magnitude [indeed, this is expected following evidence of adaptive partial pooling in transformer models, @kapatsinski2026transformersperformadaptive].
 
-#### Results
-
-The results from @fig-corpus-tracking suggest that the mean absolute preference deviation grows throughout training for all six models, indicating that models' ordering preferences deviate more from what relative frequency alone would predict as training progresses. Among the BabyLM models, this growth is most pronounced for the 1.3B model and weakest for the 350M model. Among the C4 models, all three follow a broadly similar trajectory.
-
-Finally, the results of the Bayesian mixed-effects regression are visualized in @fig-absgap-coefs (for full results, see @tbl-absgap, Appendix). The effect of training stage on absolute preference deviation is quite mixed across models. Among the BabyLM models, the 125M and 1.3B models show a positive effect, while the 350M model shows a negative effect. Among the C4 models, the two smaller models show a slightly negative effect while the largest shows a slightly positive effect. In general, the effect of checkpoint appears weaker for the C4 models than for the BabyLM models, suggesting that training data diversity may dampen the mean absolute preference deviation [indeed, this is expected following evidence of adaptive partial pooling in transformer models, @kapatsinski2026transformersperformadaptive].
-
-The effect of overall frequency also varies across models. The 125M and 1.3B BabyLM models show a negative effect of overall frequency, suggesting that the absolute preference deviation is smaller for more frequently encountered binomials, while the 350M BabyLM model shows a large positive effect, suggesting the opposite. All three C4 models show a strong positive effect of overall frequency, indicating that the gap between model preference and the frequency-based prediction is larger for higher-frequency binomials. This pattern is of particular interest given existing work demonstrating frequency-dependent preference extremity in humans, whereby humans develop more extreme ordering preferences for high-frequency binomials [e.g., @morganFrequencydependentRegularizationIterated2016a; @houghton2024frequencydependentpreferenceextremity; @houghton2025boltsnutslanguage]. The present results suggest under certain circumstances language models may show a similar pattern, though a full investigation of this question is left for future research. Finally, as a sanity check, we confirmed that the correlation between model preference and log relative frequency increases steadily throughout training for all six models (see @fig-cor-traj, Appendix), confirming that models are learning ordering preferences even as the absolute preference deviation grows.
+The effect of overall frequency also varies across models. The 125M and 1.3B BabyLM models show a negative effect of overall frequency, suggesting that the absolute preference deviation is smaller for more frequently encountered binomials, while the 350M BabyLM model shows a large positive effect, suggesting the opposite. All three C4 models show a strong positive effect of overall frequency, indicating that the gap between model preference and the frequency-based prediction is larger for higher-frequency binomials. This pattern is of particular interest given existing work demonstrating frequency-dependent preference extremity in humans, whereby humans develop more extreme ordering preferences for high-frequency binomials [e.g., @morganFrequencydependentRegularizationIterated2016a; @houghton2024frequencydependentpreferenceextremity; @houghton2025boltsnutslanguage]. The present results suggest that under certain circumstances language models may show a similar pattern, though a full investigation of this question is left for future research. Posterior predictive checks suggest adequate model fit (@fig-ppc-absgap). Finally, as a sanity check, we confirmed that the correlation between model preference and log relative frequency increases steadily throughout training for all six models (see @fig-cor-traj, Appendix), confirming that models are learning ordering preferences even as the absolute preference deviation grows.
 
 ```{r plot-corpus-tracking, echo=FALSE, message=FALSE, warning=FALSE, fig.width=9, fig.height=3.3}
 #| out-width: "70%"
@@ -360,6 +592,13 @@ if (nrow(absgap_coefs) > 0) {
 }
 ```
 
+```{r fig-ppc-absgap, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=7}
+#| label: fig-ppc-absgap
+#| out-width: "100%"
+#| fig-cap: "Posterior predictive check for the absolute preference deviation model. The dark line shows the observed outcome density; light lines show 100 replicated datasets drawn from the posterior predictive distribution."
+ppc_plot("ppc_absgap_dens.csv", "Absolute preference deviation")
+```
+
 # Discussion and Conclusion
 
 The results of the present study suggest that the models trained here do develop binomial ordering preferences over the course of training, and that these preferences are at least partly driven by the distributional statistics of the training data. Beyond frequency, however, the picture is more nuanced. Smaller models (particularly the 125M models across both corpora) show the most consistent evidence of AbsPref effects, suggesting that they are sensitive to abstract ordering preferences over and above what relative frequency alone would predict. Larger models, by contrast, show weaker or absent AbsPref effects at the final checkpoint, though the trajectory results suggest that these models do show some sensitivity to AbsPref earlier in training, with the effect weakening as training progresses. This may reflect a tendency for larger models to gradually shift toward relying on distributional frequency as they accumulate more training experience, at the expense of abstract knowledge. Finally, as training progresses, models' preferences grow more extreme in a direction broadly consistent with relative frequency, but the absolute gap between model preferences and frequency-based predictions also grows, with the size of this gap modulated by both model size and overall frequency in a manner reminiscent of frequency-dependent preference extremity observed in humans.
@@ -375,7 +614,7 @@ Overall, the results demonstrate that both model size and data diversity play a 
 
 Consider the XOR problem, in which a model must output 1 for inputs (1,0) and (0,1), but 0 for inputs (0,0) and (1,1). Plotting these four points in two-dimensional input space reveals the difficulty: the two positive cases sit at diagonally opposite corners, with no straight line that separates them from the two negative cases (@fig-xor, Panel A). A hidden layer solves this by mapping the four input points into a new representational space defined by the hidden neurons' activations. Each hidden neuron draws its own linear boundary through the input space, assigning each input point a new position in a coordinate space defined by those activation values. To see this concretely, consider two hidden neurons applied to the XOR inputs. The first neuron might learn to fire for any input where $x_1 + x_2$ \> 0.5, drawing a diagonal boundary that separates (0,0) from the other three points. The second might learn to fire only when $x_1 + x_2$ \> 1.5, drawing a parallel boundary that separates (1,1) from the other three. Each of the four input points now has a pair of activation values, one from each hidden neuron, that describes which side of each boundary it falls on. The input (0,0) activates neither neuron; (1,0) and (0,1) activate the first but not the second; and (1,1) activates both. These three distinct activation signatures relocate the four points into a new space (@fig-xor, Panel B) where the positive cases (1,0) and (0,1) are cleanly separated from the negative cases by a single line, a separation that was geometrically impossible in the original input coordinates.
 
-```{r fig-xor, echo=FALSE, message=FALSE, warning=FALSE, fig.width=6, fig.height=2.8}
+```{r fig-xor, echo=FALSE, message=FALSE, warning=FALSE, fig.width=16, fig.height=3}
 #| label: fig-xor
 #| fig-cap: "The XOR problem illustrated. **A**: In the original input space, no straight line separates the positive cases (1,0) and (0,1) from the negative cases (0,0) and (1,1). **B**: After applying two hidden neurons (one that fires when $x_1 + x_2$ > 0.5, another when $x_1 + x_2$ > 1.5), the four input points are relocated in hidden activation space. The two positive inputs map to the same point (1, 0), and a single linear boundary (dashed line) now correctly separates positive from negative cases."
 
@@ -461,7 +700,7 @@ ppl |>
   mutate(Params = factor(Params, levels = c("125M", "350M", "1.3B"))) |>
   arrange(Corpus, Params) |>
   select(Corpus, Params, `Initial PPL`, `Final PPL`) |>
-  kable(align = c("l", "r", "r", "r"))
+  kable(align = c("l", "r", "r", "r"), booktabs = TRUE)
 ```
 
 ```{r}
@@ -498,11 +737,11 @@ ggplot(df, aes(x = tokens_seen / 1e9, y = loss, color = params)) +
 
 ## Preference {#sec-def-preference}
 
-For a binomial with alphabetically ordered token sequence $s_\alpha$ and non-alphabetically ordered sequence $s_n$, the model's **preference** is:
+For a binomial with alphabetically ordered token sequence $s_\alpha$ and non-alphabetically ordered sequence $s_n$, and a set of $K = 51$ prompt prefixes $\{c_k\}_{k=1}^{K}$, the model's **preference** is:
 
-$$\text{preference}_i = \log P_\theta(s_{\alpha,i}) - \log P_\theta(s_{n,i})$$
+$$\text{preference}_i = \frac{1}{K}\sum_{k=1}^{K}\Bigl[\log P_\theta(c_k \circ s_{\alpha,i}) - \log P_\theta(c_k \circ s_{n,i})\Bigr]$$
 
-where $\log P_\theta(s)$ is the summed log-probability of sequence $s$ under model parameters $\theta$.
+where $\log P_\theta(s)$ is the summed token log-probability of sequence $s$ under next-token prediction with model parameters $\theta$, and $\circ$ denotes concatenation.
 
 ## Relative Frequency {#sec-def-relfreq}
 
@@ -533,10 +772,10 @@ if (nrow(pref_coefs_final) > 0) {
            term = gsub("\u2212", "-", term),
            term = gsub("\u00d7", "$\\\\times$", term)) |>
     select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
            `$P(\\beta > 0)$` = p_gt0) |>
     arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE)
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
 }
 ```
 
@@ -551,10 +790,10 @@ if (nrow(pref_coefs_ckpt) > 0) {
            term = gsub("\u2212", "-", term),
            term = gsub("\u00d7", "$\\\\times$", term)) |>
     select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
            `$P(\\beta > 0)$` = p_gt0) |>
     arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE)
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
 }
 ```
 
@@ -569,10 +808,10 @@ if (nrow(sg_coefs_final) > 0) {
            term = gsub("\u2212", "-", term),
            term = gsub("\u00d7", "$\\\\times$", term)) |>
     select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
            `$P(\\beta > 0)$` = p_gt0) |>
     arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE)
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
 }
 ```
 
@@ -587,10 +826,10 @@ if (nrow(sg_coefs_ckpt) > 0) {
            term = gsub("\u2212", "-", term),
            term = gsub("\u00d7", "$\\\\times$", term)) |>
     select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
            `$P(\\beta > 0)$` = p_gt0) |>
     arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE)
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
 }
 ```
 
@@ -605,10 +844,10 @@ if (nrow(absgap_coefs) > 0) {
            term = gsub("\u2212", "-", term),
            term = gsub("\u00d7", "$\\\\times$", term)) |>
     select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
            `$P(\\beta > 0)$` = p_gt0) |>
     arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE)
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
 }
 ```
 

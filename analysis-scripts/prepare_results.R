@@ -25,7 +25,10 @@
 library(tidyverse)
 library(brms)
 library(duckdb)
-
+library(ggplot2)
+library(bayesplot)
+library(furrr)
+library(future)
 # ── Paths (resolved relative to this script, not the working directory) ───────
 SCRIPT_DIR <- if (interactive() && requireNamespace("rstudioapi", quietly = TRUE) &&
                   rstudioapi::isAvailable()) {
@@ -167,7 +170,7 @@ extract_and_save <- function(prefix, term_levels, term_labels, fname) {
     result <- extract_coefs(fit, slug, term_levels, term_labels)
     rm(fit); gc()
     result
-  })
+  }, .progress = sprintf("  %s", prefix))
   save_csv(coefs, fname)
 }
 
@@ -191,7 +194,7 @@ extract_traj_and_save <- function(prefix, term_levels, term_labels, fname) {
       mutate(tokens = ck_tokens)
     rm(fit); gc()
     result
-  })
+  }, .progress = sprintf("  %s", prefix))
   save_csv(coefs, fname)
 }
 
@@ -203,7 +206,7 @@ save_gap_summary <- function(traj_prefix, fname) {
     return(invisible(NULL))
   }
   message(sprintf("Computing gap summary for '%s'...", traj_prefix))
-  rows <- map_dfr(paths, function(path) {
+  rows <- map_dfr(paths, .progress = sprintf("  %s gap", traj_prefix), function(path) {
     fname_base      <- sub("\\.rds$", "", basename(path))
     fname_no_prefix <- sub(paste0("^", traj_prefix), "", fname_base)
     slug    <- sub("_ck[0-9]+$", "", fname_no_prefix)
@@ -246,5 +249,202 @@ extract_traj_and_save("pref_traj_", TERM_LEVELS, TERM_LABELS, "pref_traj_coefs.c
 extract_traj_and_save("sg_traj_",   TERM_LEVELS, TERM_LABELS, "sg_traj_coefs.csv")
 
 save_gap_summary("sg_traj_", "sg_gap_summary.csv")
+
+# ── Posterior predictive checks ───────────────────────────────────────────────
+# Save tidy data frames (observed y + yrep draws) rather than pre-rendered
+# figures, so the writeup can build ggplot2 plots with full aesthetic control.
+PPC_DIR <- file.path(OUT_DIR, "ppc")
+dir.create(PPC_DIR, showWarnings = FALSE, recursive = TRUE)
+
+save_ppc_data <- function(prefix, fname, ndraws = 100, overwrite = FALSE) {
+  out_path <- file.path(PPC_DIR, fname)
+  if (!overwrite && file.exists(out_path)) {
+    message(sprintf("  %s already exists; skipping (pass overwrite=TRUE to regenerate)", fname))
+    return(invisible(NULL))
+  }
+  paths <- list_fits(prefix)
+  if (length(paths) == 0) {
+    message(sprintf("  No .rds files for '%s'; skipping PPC", prefix))
+    return(invisible(NULL))
+  }
+  message(sprintf("Extracting PPC data for '%s' (%d models)...", prefix, length(paths)))
+
+  rows <- lapply(paths, function(path) {
+    slug   <- sub("\\.rds$", "", sub(paste0("^", prefix), "", basename(path)))
+    corpus <- parse_corpus(slug)
+    size   <- parse_size(slug)
+    fit    <- readRDS(path)
+
+    # Response variable name from the brms formula
+    resp_name <- as.character(fit$formula$formula[[2]])
+    y    <- fit$data[[resp_name]]
+    yrep <- posterior_predict(fit, ndraws = ndraws)
+    rm(fit); gc()
+
+    n_obs    <- length(y)
+    n_draws  <- nrow(yrep)
+
+    # Observed
+    obs_df <- data.frame(
+      corpus     = corpus,
+      model_size = size,
+      source     = "y",
+      draw       = NA_integer_,
+      value      = y,
+      stringsAsFactors = FALSE
+    )
+
+    # Replicated: yrep is ndraws × n_obs; unroll row-major
+    rep_df <- data.frame(
+      corpus     = corpus,
+      model_size = size,
+      source     = "yrep",
+      draw       = rep(seq_len(n_draws), each = n_obs),
+      value      = as.vector(t(yrep)),
+      stringsAsFactors = FALSE
+    )
+
+    rbind(obs_df, rep_df)
+  })
+
+  out <- do.call(rbind, rows)
+  out$model_size <- factor(out$model_size, levels = SIZE_LEVELS)
+  out_path <- file.path(PPC_DIR, fname)
+  saveRDS(out, out_path)
+  message(sprintf("  Saved %s  (%s rows)", out_path, format(nrow(out), big.mark = ",")))
+}
+
+save_ppc_data("pref_final_",  "ppc_pref_final.rds")
+save_ppc_data("sg_final_",    "ppc_sg_final.rds")
+# absgap is not saved as RDS — too many checkpoint models; densities written directly
+
+# ── PPC density CSVs (lightweight alternative to raw RDS files) ───────────────
+# Pre-compute density curves (512 x/y points per draw) so writeup.qmd can
+# plot PPCs with geom_line() on a tiny CSV rather than geom_density() on a
+# multi-million-row RDS.
+save_ppc_densities <- function(rds_fname, csv_fname, n_grid = 512, overwrite = FALSE) {
+  rds_path <- file.path(PPC_DIR, rds_fname)
+  csv_path <- file.path(PPC_DIR, csv_fname)
+  if (!file.exists(rds_path)) {
+    message(sprintf("  %s not found; skipping density CSV", rds_fname))
+    return(invisible(NULL))
+  }
+  if (!overwrite && file.exists(csv_path)) {
+    message(sprintf("  %s already exists; skipping (pass overwrite=TRUE to regenerate)", csv_fname))
+    return(invisible(NULL))
+  }
+  message(sprintf("  Computing densities from %s ...", rds_fname))
+  dat <- readRDS(rds_path)
+
+  groups <- unique(dat[, c("corpus", "model_size")])
+
+  rows <- lapply(seq_len(nrow(groups)), function(i) {
+    corp <- groups$corpus[i]
+    size <- groups$model_size[i]
+    sub  <- dat[dat$corpus == corp & dat$model_size == size, ]
+
+    # Observed density
+    y_vals <- sub$value[sub$source == "y"]
+    x_range <- range(c(y_vals, sub$value[sub$source == "yrep"]), na.rm = TRUE)
+    dens_y <- density(y_vals, n = n_grid, from = x_range[1], to = x_range[2])
+    obs_df <- data.frame(
+      corpus = corp, model_size = size,
+      source = "y", draw = NA_integer_,
+      x = dens_y$x, dens = dens_y$y,
+      stringsAsFactors = FALSE
+    )
+
+    # One density per replicated draw; reshape wide (n_obs × ndraws) then apply
+    draws    <- sort(unique(sub$draw[sub$source == "yrep"]))
+    yrep_mat <- matrix(sub$value[sub$source == "yrep"], ncol = length(draws))
+    dens_rep <- apply(yrep_mat, 2, function(col)
+      density(col, n = n_grid, from = x_range[1], to = x_range[2])$y)
+
+    rep_df <- data.frame(
+      corpus = corp, model_size = size,
+      source = "yrep",
+      draw   = rep(draws, each = n_grid),
+      x      = rep(dens_y$x, times = length(draws)),
+      dens   = as.vector(dens_rep),
+      stringsAsFactors = FALSE
+    )
+    rbind(obs_df, rep_df)
+  })
+
+  out <- do.call(rbind, rows)
+  out$model_size <- factor(out$model_size, levels = SIZE_LEVELS)
+  write_csv(out |> mutate(across(where(is.factor), as.character)), csv_path)
+  message(sprintf("  Saved %-35s (%s rows)", csv_fname, format(nrow(out), big.mark = ",")))
+}
+
+# ── Direct density CSV for absgap (no intermediate RDS) ──────────────────────
+# Loads each fitted model one at a time across 4 workers, draws
+# posterior_predict, computes densities immediately, then discards raw draws.
+save_ppc_densities_direct <- function(prefix, csv_fname,
+                                      ndraws = 100, n_grid = 512,
+                                      n_workers = 4, overwrite = FALSE) {
+  csv_path <- file.path(PPC_DIR, csv_fname)
+  if (!overwrite && file.exists(csv_path)) {
+    message(sprintf("  %s already exists; skipping (pass overwrite=TRUE to regenerate)", csv_fname))
+    return(invisible(NULL))
+  }
+  paths <- list_fits(prefix)
+  if (length(paths) == 0) {
+    message(sprintf("  No .rds files for '%s'; skipping", prefix))
+    return(invisible(NULL))
+  }
+  message(sprintf("  Computing PPC densities for '%s' (%d models, %d workers)...",
+                  prefix, length(paths), n_workers))
+
+  plan(multisession, workers = n_workers)
+  on.exit(plan(sequential))
+
+  all_rows <- future_map(
+    paths,
+    .progress = TRUE,
+    .options  = furrr_options(packages = c("brms"), seed = TRUE),
+    function(path) {
+      slug   <- sub("\\.rds$", "", sub(paste0("^", prefix), "", basename(path)))
+      corpus <- parse_corpus(slug)
+      size   <- parse_size(slug)
+      fit    <- readRDS(path)
+
+      resp_name <- as.character(fit$formula$formula[[2]])
+      y    <- fit$data[[resp_name]]
+      yrep <- posterior_predict(fit, ndraws = ndraws)
+      rm(fit); gc()
+
+      x_range  <- range(c(y, yrep), na.rm = TRUE)
+      dens_y   <- density(y, n = n_grid, from = x_range[1], to = x_range[2])
+      dens_rep <- apply(yrep, 1, function(row)
+        density(row, n = n_grid, from = x_range[1], to = x_range[2])$y)
+
+      obs_df <- data.frame(
+        corpus = corpus, model_size = size,
+        source = "y", draw = NA_integer_,
+        x = dens_y$x, dens = dens_y$y,
+        stringsAsFactors = FALSE
+      )
+      rep_df <- data.frame(
+        corpus = corpus, model_size = size,
+        source = "yrep",
+        draw   = rep(seq_len(ncol(dens_rep)), each = n_grid),
+        x      = rep(dens_y$x, times = ncol(dens_rep)),
+        dens   = as.vector(dens_rep),
+        stringsAsFactors = FALSE
+      )
+      rbind(obs_df, rep_df)
+    }
+  )
+
+  out <- do.call(rbind, all_rows)
+  out$model_size <- factor(out$model_size, levels = SIZE_LEVELS)
+  write_csv(out |> mutate(across(where(is.factor), as.character)), csv_path)
+  message(sprintf("  Saved %-35s (%s rows)", csv_fname, format(nrow(out), big.mark = ",")))
+}
+
+save_ppc_densities("ppc_pref_final.rds", "ppc_pref_final_dens.csv")
+save_ppc_densities("ppc_sg_final.rds",   "ppc_sg_final_dens.csv")
+save_ppc_densities_direct("absgap_ckpt_", "ppc_absgap_dens.csv")
 
 message("\nDone. All results saved to: ", normalizePath(OUT_DIR))

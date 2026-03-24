@@ -1009,3 +1009,68 @@ absgap_coefs_ckpt <- future_map_dfr(MODELS_LIST, function(m) {
   coefs
 }, .options = furrr_options(seed = TRUE))
 ```
+
+---
+
+# Part IV: Absolute Signed Gap — Log-Normal Replication
+
+Replication of Part III using a log-normal likelihood instead of Gaussian, to address the boundary issue: `abs_signed_gap` is bounded at ≥ 0 but Gaussian places mass below zero. Log-normal requires strictly positive values, so a small epsilon (1e-6) is added before fitting to handle the rare case where `abs_signed_gap = 0` exactly (i.e., preference perfectly matches the log frequency ratio).
+
+The intercept and slope priors (`normal(0, 1)`) are retained unchanged; on the log scale they imply a prior median `abs_signed_gap` of exp(0) = 1, with 68% of prior mass between exp(−1) ≈ 0.37 and exp(1) ≈ 2.72 — reasonable for this outcome.
+
+Formula: `abs_signed_gap_pos ~ tokens_c * log_total_c + (1 | binom), family = lognormal()`
+
+```{r absgap-lognormal-fit}
+absgap_ln_coefs_ckpt <- future_map_dfr(MODELS_LIST, function(m) {
+  slug <- tolower(gsub("[^a-z0-9]", "_", m))
+  message(sprintf("[%s] Fitting log-normal |signed gap| ~ tokens_c * log_total_c ...", m))
+
+  m_data <- load_absgap_data(m) %>%
+    mutate(abs_signed_gap_pos = abs_signed_gap + 1e-6)
+
+  fit <- brm(
+    abs_signed_gap_pos ~ tokens_c * log_total_c + (1 | binom),
+    data      = m_data,
+    family    = lognormal(),
+    prior     = BRMS_PRIORS,
+    iter      = BRMS_ITER,
+    warmup    = BRMS_WARMUP,
+    chains    = BRMS_CHAINS,
+    cores     = BRMS_CORES,
+    file      = file.path(MODELS_DIR, paste0("absgap_ln_ckpt_", slug)),
+    seed      = BRMS_SEED,
+    backend   = BRMS_BACKEND,
+    normalize = BRMS_NORMALIZE,
+    silent    = BRMS_SILENT
+  )
+
+  coefs <- extract_coefs(fit, m, TERM_LEVELS_ABSGAP, TERM_LABELS_ABSGAP)
+  rm(fit, m_data); gc()
+  coefs
+}, .options = furrr_options(seed = TRUE))
+```
+
+### Plot: Coefficients (Log-Normal)
+
+```{r absgap-lognormal-coefs, fig.width=13, fig.height=6}
+coef_plot(
+  absgap_ln_coefs_ckpt,
+  title    = "Predictors of |signed gap| — log-normal replication",
+  subtitle = "abs_signed_gap ~ tokens_c * log_total_c + (1|binom), family = lognormal()  |  * = CI excludes zero"
+)
+```
+
+### Table: Coefficient Summary (Log-Normal)
+
+```{r absgap-lognormal-table}
+absgap_ln_coefs_ckpt %>%
+  mutate(term = gsub("\n", " ", as.character(term))) %>%
+  select(corpus, model_size, term, estimate, se, lo, hi) %>%
+  rename(
+    Corpus = corpus, Size = model_size, Term = term,
+    Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi
+  ) %>%
+  arrange(Corpus, Size, Term) %>%
+  knitr::kable(digits = 3,
+               caption = "Log-normal replication — posterior fixed effects: abs_signed_gap ~ tokens_c * log_total_c + (1|binom). Coefficients are on the log scale.")
+```
