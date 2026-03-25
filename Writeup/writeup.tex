@@ -16,6 +16,7 @@
 \usepackage{microtype}
 \usepackage{url}
 \usepackage{placeins}
+\usepackage{float}
 
 % Math
 \usepackage{amsmath}
@@ -227,8 +228,8 @@ generalizations and item-specific stored knowledge within a single
 architecture. Neural networks enable this ability to capture both types
 of knowledge through hidden layers, which project the input into a new
 representational space where previously intractable classification
-boundaries become linearly separable (see Section~\ref{sec-xor} for a
-concrete illustration).
+boundaries become linearly separable (see Appendix Section~\ref{sec-xor}
+for a concrete illustration).
 
 Multi-layer neural networks underlie a great deal of success behind the
 transformer architecture \citep{vaswaniAttentionAllYou2017}, which is
@@ -315,21 +316,11 @@ a function of experience.
 For each model and checkpoint, we computed the model's ordering
 preference along with the model's preference deviation which captures
 the degree to which the model's preferences deviate from what relative
-frequency alone would predict. We then fit mixed-effects regression
-models with fixed-effects for relative frequency (RelFreq; the
-proportion of times a binomial occurs in alphabetical ordering) and
-abstract preference (AbsPref; various phonological, semantic, and
-metrical constraints combined into a single variable demonstrated to
-predict binomial ordering preferences in humans). If models behave like
-humans, AbsPref should predict ordering preferences more strongly for
-lower-frequency binomials, with relative frequency playing a larger role
-for higher-frequency items. By examining ordering preferences at the
-final checkpoint and across the full learning trajectory we assess not
-only whether this human-like abstract-storage trade-off emerges, but
-when and how it develops. If the null results found in
-\citet{houghton2025roleabstractrepresentations} reflect memorization due
-to a combination of training data and model size, then this should be
-clear in the learning trajectories.
+frequency alone would predict. We then examine how these change as a
+function of model's experience with binomials across training. By
+examining ordering preferences across training, we assess not only
+whether this human-like abstract-storage trade-off emerges, but when and
+how it develops.
 
 \section{Model Training}\label{model-training}
 
@@ -363,7 +354,7 @@ model's learning trajectory. All models and checkpoints will be made
 publicly available.\footnote{The huggingface account would reveal the
   identity of one of the authors and is thus omitted from the
   double-blind review phase.} Key training parameters for each model are
-summarized in Table~\ref{tbl-models} (Appendix).
+summarized in the Appendix (Table~\ref{tbl-models}).
 
 All six models showed smooth convergence in training loss throughout
 training, starting near the theoretical random baseline
@@ -387,26 +378,26 @@ attested English binomial expressions annotated for various
 phonological, semantic, and metrical constraints identified by
 \citet{benorChickenEggProbabilistic2006}. For each binomial, the corpus
 provides an abstract preference score (AbsPref), derived from a logistic
-regression model fit to these constraint values
-\citep{morgan2016abstractknowledgedirect}, which captures the degree to
-which abstract constraints favor one ordering over the other
-independently of corpus experience. This is the same set of items used
-in \citet{houghton2025roleabstractrepresentations}.
+regression model fit these phonological, semantic, and metric
+constraints \citep{morgan2016abstractknowledgedirect}. Abstract
+Preferences capture the degree to which these constraints favor one
+ordering over the other independently of corpus experience. This is the
+same set of items used in
+\citet{houghton2025roleabstractrepresentations}.
 
 Frequency statistics for each binomial were estimated directly from the
 two training corpora rather than from an external source. Crucially,
-because we train our models from scratch and checkpoint them throughout
-training, we can compute the exact number of times each model has seen
-each binomial in each ordering at every checkpoint (as opposed to an
-approximation based on corpus statistics). For each binomial and
-checkpoint, we computed the total number of exposures across both
-orderings. We eliminated binomials that occurred 0 times in both
-orderings.\footnote{This yielded significantly fewer binomials in the
-  BabyLM corpus due to it being a small corpus.} Note that this resulted
-in a different number of items for the babyLM analyses vs the C4
-analyses given the differences in binomials present in each corpus.
-Table~\ref{tbl-corpus-stats} summarizes the coverage of the attested
-binomials in each corpus.
+training from scratch with intermediate checkpoints allows us to compute
+the exact counts for all binomial orderings at every stage of training,
+for each model separately, rather than relying on approximations derived
+from corpus statistics. For each binomial and checkpoint, we computed
+the total number of exposures across both orderings. We eliminated
+binomials that occurred 0 times in both orderings.\footnote{This yielded
+  significantly fewer binomials in the BabyLM corpus due to it being a
+  small corpus.} Note that this resulted in a different number of items
+for the babyLM analyses vs the C4 analyses given the differences in
+binomials present in each corpus. Table~\ref{tbl-corpus-stats}
+summarizes the coverage of the attested binomials in each corpus.
 
 \begin{table}
 
@@ -437,11 +428,7 @@ statistics are calculated after applying this exclusion.}
 
 In this section we present two complementary analyses examining how our
 models represent binomial ordering preferences over the course of
-training.\footnote{All code, including code for model training,
-  analyses, and results, will be made publicly available upon acceptance
-  since the code for model training (which pushes to huggingface) would
-  reveal one of the authors' identities and thus violate the double
-  blind policy.} The first examines model \textbf{preference} and
+training. The first examines model \textbf{preference} and
 \textbf{preference deviation} at the end of training, asking what
 factors predict each measure at the final checkpoint. The second
 examines how these preferences develop over the course of training,
@@ -453,34 +440,33 @@ evolves as training progresses.
 Checkpoint}\label{ordering-preferences-at-the-final-checkpoint}
 
 We consider two complementary outcome measures. The first is model
-\textbf{preference}: for each model checkpoint and binomial pair, we
-computed the preference by prepending each of 51 diverse prompt prefixes
-(e.g., a single space, \emph{Well,}, \emph{A friend once described the})
-to both orderings, computing the difference in summed token
-log-probability between the alphabetically ordered form (e.g.,
-\emph{bread and butter}) and the non-alphabetically ordered form (e.g.,
-\emph{butter and bread}) within each prompt context, and averaging those
-per-prompt differences. Positive values indicate a stronger preference
-for the alphabetically ordered form (see
-Section~\ref{sec-def-preference} for a formal definition). The second
-outcome is the \textbf{preference deviation}: the difference between the
-model's preference score and the log relative frequency ratio for that
-binomial (see Section~\ref{sec-def-prefdev} for a formal definition).
-Because we train our models from scratch and checkpoint them throughout
-training, we can compute the exact number of times each model has seen
-each ordering of each binomial at every checkpoint. A preference
-deviation of zero means the model's preference exactly matches what
-relative frequency predicts; positive values indicate a stronger
-preference for the alpha-ordered form than corpus statistics alone would
-suggest, and negative values the reverse. Figure~\ref{fig-scoring}
-illustrates both measures for five example binomials from the C4 125M
-model at the final checkpoint.
+\textbf{preference}: for each model, we computed the preference for a
+given binomial by prepending each of 51 diverse prompt prefixes (e.g., a
+single space, \emph{Well,}, \emph{A friend once described the}) to both
+orderings, computing the difference in summed token log-probability
+between the alphabetically ordered form (e.g., \emph{bread and butter})
+and the non-alphabetically ordered form (e.g., \emph{butter and bread})
+within each prompt context, and averaging those per-prompt differences.
+Positive values indicate a stronger preference for the alphabetically
+ordered form (see Section~\ref{sec-def-preference} for a formal
+definition). The second outcome is the \textbf{preference deviation}:
+the difference between the model's preference score and the log relative
+frequency ratio for that binomial (see Section~\ref{sec-def-prefdev} for
+a formal definition). Because we train our models from scratch and
+checkpoint them throughout training, we can compute the exact number of
+times each model has seen each ordering of each binomial at every
+checkpoint. A preference deviation of zero means the model's preference
+exactly matches what relative frequency predicts; positive values
+indicate a stronger preference for the alpha-ordered form than corpus
+statistics alone would suggest, and negative values the reverse.
+Figure~\ref{fig-scoring} illustrates both measures for five example
+binomials from the C4 125M model at the final checkpoint.
 
 \begin{figure}[htbp]
 
 \centering{
 
-\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-scoring-1.pdf}
+\includegraphics[width=0.95\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-scoring-1.pdf}
 
 }
 
@@ -515,7 +501,12 @@ logged and centered. The interaction terms allow us to test whether the
 influence of abstract constraints and relative frequency varies with
 overall binomial frequency:
 
-\[\{\text{preference},\ \text{pref. deviation}\} \sim \text{AbsPref} \times \ln(\text{OverallFreq}) + \text{RelFreq} \times \ln(\text{OverallFreq}) + (1 \mid \text{binomial})\]
+\begin{equation}\phantomsection\label{eq-main-model}{
+\begin{aligned}
+\{\text{preference},\ \text{pref. deviation}\} &\sim \text{AbsPref} \times \ln(\text{OverallFreq}) \\
+  &\quad + \text{RelFreq} \times \ln(\text{OverallFreq}) + (1 \mid \text{binomial})
+\end{aligned}
+}\end{equation}
 
 \paragraph{Results}\label{results}
 
@@ -527,45 +518,44 @@ the final checkpoint are visualized in Figure~\ref{fig-final-coefs}
 results suggest that there is an effect of relative frequency on
 ordering preferences across all six models, which is consistent with
 models' ordering preferences being at least partly driven by the
-distributional statistics of their training data. Interestingly, the
+distributional statistics of their training data. Interestingly, all
+models except the C4 1.3B parameter model show an effect of AbsPref (CIs
+for the other 5 models are \textgreater89\%). More specifically, the
 effect of AbsPref shows a graded pattern across model sizes, with the
-125M parameter models showing a positive effect, the 350M models showing
-a somewhat weaker effect, and the 1.3B models showing little evidence of
-an effect.
+125M parameter models showing a clear positive effect with the two
+smaller models for both datasets showing a qualitatively (and in the
+case of the C4 1.3B model, quantitatively) weaker effect.
 
 \subparagraph{Preference Deviation}\label{preference-deviation}
 
 The results of the Bayesian mixed-effects regression for preference
 deviation at the final checkpoint are visualized in
 Figure~\ref{fig-final-coefs} (bottom; for full results, see
-Table~\ref{tbl-sg-final}, Appendix). Recall that because the preference
-deviation removes the contribution of relative frequency from the
-preference score, an effect of AbsPref here would suggest that models
-develop abstract ordering preferences over and above what the training
-data would predict. A positive effect of relative frequency would
-indicate that the model's ordering preference for the alphabetically
-ordered form is more extreme than the training data alone would predict,
-while a negative effect would indicate the opposite.
-
-The results for relative frequency are quite mixed across model sizes
-and corpora. Among the BabyLM models, the 350M model shows a negative
-effect of relative frequency, while the two other models (125M and 1.3B)
-show little to no effect. Among the C4 models, the pattern is slightly
-different: the two smaller models show a negative effect of relative
-frequency, while the largest shows little evidence of an effect. In
-terms of abstract preferences, the 125M BabyLM model shows a weak
-positive effect of AbsPref, while the two larger BabyLM models show
-little evidence of an effect. For the C4 models, the pattern is similar:
-the C4 125M model shows a weak effect of AbsPref (approximately 89\% of
-posterior samples were greater than zero), while the two larger C4
-models show little evidence of an effect.
+Table~\ref{tbl-sg-final}, Appendix). The results for relative frequency
+are quite mixed across model sizes and corpora. Among the BabyLM models,
+the 350M model shows a negative effect of relative frequency, while the
+two other models (125M and 1.3B) show little to no effect, suggesting
+that the smaller model's ordering preferences are less extreme than
+training would suggest (i.e., for binomials that occur more in one
+ordering over the other, the model underestimates the strength of the
+ordering preference expected by training data). Among the C4 models, the
+pattern is slightly different: the two smaller models show a negative
+effect of relative frequency, while the largest shows little evidence of
+an effect, suggesting that the two smaller models similarly
+underestimate the strength of the ordering preference. In terms of
+abstract preferences, the 125M BabyLM model shows a weak positive effect
+of AbsPref, while the two larger BabyLM models show no evidence of an
+effect. For the C4 models, the pattern is similar: the C4 125M model
+shows a weak effect of AbsPref (approximately 89\% of posterior samples
+were greater than zero), while the two larger C4 models show little
+evidence of an effect.
 
 Taken together, the preference deviation results suggest that while
 models' ordering preferences are broadly consistent with what their
-training data, some models' preferences are also driven by abstract
-preferences, mainly concentrated in the smaller models. These results
-suggest that smaller models may be more sensitive to abstract ordering
-preferences even when controlling for frequency.
+training data, the smaller models' preferences are also driven by
+abstract preferences. These results suggest that smaller models may be
+more sensitive to abstract ordering preferences even when controlling
+for frequency.
 
 \begin{figure}
 
@@ -585,63 +575,53 @@ training checkpoint for preference (top) and preference deviation
 Training}\label{development-of-preferences-across-training}
 
 To examine how ordering preferences develop over the course of training,
-we fit the regression model described above for both preference and
-preference deviation separately at 20 evenly-spaced checkpoints
-throughout training, and additionally fit a checkpoint-interacted model
-for each outcome in which training stage (tokens encountered, scaled and
-centered) is included as a predictor to test whether effects grow or
-shrink linearly over training:
+we fit the regression model in Equation~\ref{eq-main-model} separately
+at 20 evenly-spaced checkpoints throughout training. Notably, the values
+for overall frequency and relative frequency are calculated at the
+respective checkpoint. We additionally examine how the overall magnitude
+of preference deviations changes by computing the \textbf{mean absolute
+preference deviation} across all binomials at each checkpoint, modeled
+with a log-normal mixed-effects regression predicting absolute
+preference deviation from training stage interacted with log overall
+frequency (for full results, see Table~\ref{tbl-absgap-ln}, Appendix).
 
-\[\{\text{preference},\ \text{pref. deviation}\} \sim (\text{AbsPref} + \text{RelFreq} + \ln(\text{OverallFreq})) \times \text{tokens} + (1 \mid \text{binomial})\]
+\paragraph{Preference and Preference
+Deviation}\label{preference-and-preference-deviation}
 
-Full coefficient tables and plots from the checkpoint-interacted models
-are reported in the Appendix (Table~\ref{tbl-pref-ckpt} and
-Table~\ref{tbl-sg-ckpt}; Figure~\ref{fig-ckpt-coefs}). We additionally
-examine how the overall magnitude of preference deviations changes over
-training by computing the \textbf{mean absolute preference deviation}
-across all binomials at each checkpoint; lower values indicate that
-models' preferences are closer to what relative frequency predicts on
-average. In order to examine this, we fit a Bayesian mixed-effects model
-predicting absolute preference deviation from training stage (scaled and
-centered) interacted with log overall frequency, to test whether models
-become more or less corpus-like over training and whether this depends
-on item frequency (Figure~\ref{fig-absgap-ln-coefs}; for full results,
-see Table~\ref{tbl-absgap-ln}, Appendix). Because absolute preference
-deviation is bounded at zero, we modeled it using a log-normal
-distribution.
-
-\paragraph{Results}\label{results-1}
-
-Across all six models, relative frequency effects grow stronger as
-training progresses for both outcomes. For preference, the
-checkpoint-interacted model suggests that the 125M BabyLM develops a
-growing AbsPref effect over training, while C4 models show effects of
-AbsPref at the training midpoint for all three sizes. The pattern for
-preference deviation is similar: the 125M BabyLM shows a growing AbsPref
-effect with relative frequency effects narrowing toward corpus
-predictions over time, and at the midpoint of training both the C4 125M
-and 1.3B models show an effect of AbsPref. These AbsPref trajectories
-for both outcomes are shown in Figure~\ref{fig-absp-traj}; preference
-deviation trajectories largely mirror those for preference, with the
-largest C4 model showing a U-shaped pattern in both.
+AbsPref trajectories across training checkpoints are shown in
+Figure~\ref{fig-absp-traj}. Both the smallest and largest babyLM model
+seem to show an effect of abstract preference which emerges mid-training
+and remains throughout. Similarly, the smallest C4 model also shows an
+effect of abstract preference that remains throughout training.
+Interestingly, the larger C4 model shows a U-shaped effect: an effect of
+abstract preference emerges early on, but is subsequently reduced by
+further training. The effect of abstract preference on preference
+deviation is qualitatively similar, for the BabyLM 1.3B model which
+shows no evidence of an effect of abstract preference. However, the
+U-shaped curve is present for the 1.3B C4 model for preference deviation
+as well. The lack of a U-shaped curve for the BabyLMs suggest that
+training data diversity may also play a role in the learning of abstract
+preferences.
 
 \begin{figure}
 
 \centering{
 
-\includegraphics[width=0.75\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-absp-traj-1.pdf}
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-absp-traj-1.pdf}
 
 }
 
 \caption{\label{fig-absp-traj}AbsPref coefficient estimates (and 95\%
 CI) at each of 20 sampled training checkpoints for raw preference (top)
 and preference deviation (bottom) models. Point fill encodes P(\(\beta\)
-\textgreater{} 0): green indicates the posterior is predominantly
-positive, gold predominantly negative, grey uncertain.}
+\textgreater{} 0).}
 
 \end{figure}%
 
-Beyond the direction of preferences, we also examined how the overall
+\paragraph{Mean Absolute Preference
+Deviation}\label{mean-absolute-preference-deviation}
+
+Beyond the direction of preferences, we examined how the overall
 magnitude of preference deviations changes over training. The mean
 absolute preference deviation grows throughout training for all six
 models (Figure~\ref{fig-corpus-tracking}), indicating that models'
@@ -694,7 +674,7 @@ frequency alone would predict.}
 
 \centering{
 
-\includegraphics[width=0.55\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-absgap-ln-coefs-1.pdf}
+\includegraphics[width=0.6\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-absgap-ln-coefs-1.pdf}
 
 }
 
@@ -717,15 +697,17 @@ and above what relative frequency alone would predict. Larger models, by
 contrast, show weaker or absent AbsPref effects at the final checkpoint,
 though the trajectory results suggest that these models do show some
 sensitivity to AbsPref earlier in training, with the effect weakening as
-training progresses. This may reflect a tendency for larger models to
-gradually shift toward relying on distributional frequency as they
-accumulate more training experience, at the expense of abstract
-knowledge. Finally, as training progresses, models' preferences grow
-more extreme in a direction broadly consistent with relative frequency,
-but the absolute gap between model preferences and frequency-based
-predictions also grows, with the size of this gap modulated by both
-model size and overall frequency in a manner reminiscent of
-frequency-dependent preference extremity observed in humans.
+training progresses. This effect is more clear in the C4 models,
+suggesting that data diversity may play a role in this. These results
+may reflect a tendency for larger models to gradually shift toward
+relying on distributional frequency as they accumulate more training
+experience (and diversity), at the expense of abstract knowledge.
+Finally, as training progresses, models' preferences grow more extreme
+in a direction broadly consistent with relative frequency, but the
+absolute gap between model preferences and frequency-based predictions
+also grows, with the size of this gap modulated by both model size and
+overall frequency in a manner reminiscent of frequency-dependent
+preference extremity observed in humans.
 
 Overall, the results demonstrate that both model size and data diversity
 play a role in the learning of abstract preferences, with evidence that
@@ -733,13 +715,14 @@ larger models learn abstract preferences early on, but these diminish
 over further training. On the other hand, smaller models learn the
 preferences and seem to maintain that knowledge, perhaps due to lacking
 the parameters to represent each of the binomials distinctly. These
-results suggest that the lack of generative preferences found in
+results suggest that the lack of abstract preferences found in
 \citet{houghton2025roleabstractrepresentations} may be due to training
 dynamics rather than an architectural limitation.
 
 \bibliography{references,r-references}
 \bibliographystyle{colm2026_conference}
 
+\clearpage
 \appendix
 
 \FloatBarrier
@@ -793,10 +776,11 @@ cases.}
 \end{figure}%
 
 \FloatBarrier
+\clearpage
 
 \section{Training Configuration}\label{sec-training-config}
 
-\begin{table}
+\begin{table}[H]
 
 \centering{
 
@@ -827,7 +811,7 @@ schedule with 4,000 warmup steps.}
 
 \section{Training Quality}\label{sec-training-quality}
 
-\begin{table}
+\begin{table}[H]
 
 \centering{
 
@@ -857,7 +841,7 @@ models). The BabyLM 1.3B model's elevated final perplexity relative to
 
 \end{table}%
 
-\begin{figure}
+\begin{figure}[H]
 
 \centering{
 
@@ -874,6 +858,7 @@ corpora.}
 \end{figure}%
 
 \FloatBarrier
+\clearpage
 
 \section{Mathematical Definitions}\label{sec-math-defs}
 
@@ -886,9 +871,13 @@ is:
 
 \[\text{preference}_i = \frac{1}{K}\sum_{k=1}^{K}\Bigl[\log P_\theta(c_k \circ s_{\alpha,i}) - \log P_\theta(c_k \circ s_{n,i})\Bigr]\]
 
+\[= \frac{1}{K}\sum_{k=1}^{K}\Bigl[\log P_\theta(s_{\alpha,i} \mid c_k) - \log P_\theta(s_{n,i} \mid c_k)\Bigr]\]
+
 where \(\log P_\theta(s)\) is the summed token log-probability of
 sequence \(s\) under next-token prediction with model parameters
-\(\theta\), and \(\circ\) denotes concatenation.
+\(\theta\), \(\circ\) denotes string concatenation, and the equality
+follows from the chain rule of probability since \(\log P_\theta(c_k)\)
+cancels across the difference.
 
 \subsection{Preference Deviation}\label{sec-def-prefdev}
 
@@ -897,9 +886,12 @@ preference and the log relative frequency ratio:
 
 \[\text{preference deviation}_i = \text{preference}_i - \ln\frac{c_{\alpha,i}}{c_{n,i}}\]
 
-A value of zero indicates that the model's preference exactly matches
-what relative frequency predicts; positive values indicate a stronger
-preference for the alpha-ordered form than the corpus would suggest.
+where \(c_{\alpha,i}\) and \(c_{n,i}\) are the corpus counts of the
+alphabetically ordered and non-alphabetically ordered forms of binomial
+\(i\), respectively. A value of zero indicates that the model's
+preference exactly matches what relative frequency predicts; positive
+values indicate a stronger preference for the alpha-ordered form than
+the corpus would suggest.
 
 \subsection{Relative Frequency}\label{sec-def-relfreq}
 
@@ -912,10 +904,11 @@ where \(c_{\alpha,i}\) and \(c_{n,i}\) are corpus counts of the
 alpha-ordered and non-alphabetical forms of binomial \(i\).
 
 \FloatBarrier
+\clearpage
 
 \section{Posterior Predictive Checks}\label{sec-ppc}
 
-\begin{figure}
+\begin{figure}[H]
 
 \centering{
 
@@ -931,7 +924,7 @@ posterior predictive distribution.}
 
 \end{figure}%
 
-\begin{figure}
+\begin{figure}[H]
 
 \centering{
 
@@ -950,16 +943,15 @@ drawn from the posterior predictive distribution.}
 \end{figure}%
 
 \FloatBarrier
+\clearpage
 
 \section{Posterior Coefficient
 Tables}\label{posterior-coefficient-tables}
 
-\clearpage
-
 \subsection{Preference: Final
 Checkpoint}\label{preference-final-checkpoint}
 
-\begin{table}
+\begin{table}[H]
 
 \centering{
 
@@ -1015,83 +1007,10 @@ the final checkpoint. Mean = posterior mean; SD = posterior SD;
 
 \clearpage
 
-\subsection{Preference: Checkpoint-Interacted
-Model}\label{preference-checkpoint-interacted-model}
-
-\begin{table}
-
-\centering{
-
-\begin{tabular}{lllrrrrr}
-\toprule
-Corpus & Size & Term & Mean & SD & 2.5\% & 97.5\% & $P(\beta > 0)$\\
-\midrule
-BabyLM & 125M & AbsPref & 1.360 & 0.618 & 0.069 & 2.492 & 0.986\\
-BabyLM & 125M & AbsPref $\times$ Checkpoint & 0.999 & 0.021 & 0.958 & 1.040 & 1.000\\
-BabyLM & 125M & Checkpoint (tokens, z) & -0.164 & 0.006 & -0.177 & -0.152 & 0.000\\
-BabyLM & 125M & Overall freq $\times$ Checkpoint & 0.034 & 0.003 & 0.028 & 0.040 & 1.000\\
-BabyLM & 125M & Overall freq (ln total) & 0.229 & 0.013 & 0.204 & 0.254 & 1.000\\
-\addlinespace
-BabyLM & 125M & RelFreq $\times$ Checkpoint & 1.945 & 0.012 & 1.922 & 1.968 & 1.000\\
-BabyLM & 125M & RelFreq (P(alpha)-0.5) & 3.932 & 0.183 & 3.574 & 4.282 & 1.000\\
-BabyLM & 350M & AbsPref & 0.474 & 0.522 & -0.545 & 1.486 & 0.818\\
-BabyLM & 350M & AbsPref $\times$ Checkpoint & 0.126 & 0.016 & 0.095 & 0.157 & 1.000\\
-BabyLM & 350M & Checkpoint (tokens, z) & -0.004 & 0.005 & -0.013 & 0.005 & 0.209\\
-\addlinespace
-BabyLM & 350M & Overall freq $\times$ Checkpoint & 0.035 & 0.002 & 0.030 & 0.039 & 1.000\\
-BabyLM & 350M & Overall freq (ln total) & 0.155 & 0.010 & 0.136 & 0.174 & 1.000\\
-BabyLM & 350M & RelFreq $\times$ Checkpoint & 1.593 & 0.009 & 1.576 & 1.611 & 1.000\\
-BabyLM & 350M & RelFreq (P(alpha)-0.5) & 1.851 & 0.146 & 1.572 & 2.152 & 1.000\\
-BabyLM & 1.3B & AbsPref & 0.319 & 0.662 & -1.008 & 1.552 & 0.685\\
-\addlinespace
-BabyLM & 1.3B & AbsPref $\times$ Checkpoint & 0.278 & 0.023 & 0.232 & 0.323 & 1.000\\
-BabyLM & 1.3B & Checkpoint (tokens, z) & -0.002 & 0.007 & -0.016 & 0.012 & 0.372\\
-BabyLM & 1.3B & Overall freq $\times$ Checkpoint & 0.051 & 0.003 & 0.044 & 0.058 & 1.000\\
-BabyLM & 1.3B & Overall freq (ln total) & 0.254 & 0.014 & 0.225 & 0.282 & 1.000\\
-BabyLM & 1.3B & RelFreq $\times$ Checkpoint & 1.901 & 0.013 & 1.873 & 1.926 & 1.000\\
-\addlinespace
-BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & 4.030 & 0.201 & 3.646 & 4.457 & 1.000\\
-C4 & 125M & AbsPref & 2.925 & 0.373 & 2.165 & 3.558 & 1.000\\
-C4 & 125M & AbsPref $\times$ Checkpoint & 0.085 & 0.010 & 0.066 & 0.105 & 1.000\\
-C4 & 125M & Checkpoint (tokens, z) & -0.060 & 0.003 & -0.066 & -0.053 & 0.000\\
-C4 & 125M & Overall freq $\times$ Checkpoint & -0.014 & 0.001 & -0.017 & -0.011 & 0.000\\
-\addlinespace
-C4 & 125M & Overall freq (ln total) & 0.234 & 0.008 & 0.217 & 0.249 & 1.000\\
-C4 & 125M & RelFreq $\times$ Checkpoint & 2.079 & 0.006 & 2.066 & 2.091 & 1.000\\
-C4 & 125M & RelFreq (P(alpha)-0.5) & 1.557 & 0.028 & 1.503 & 1.613 & 1.000\\
-C4 & 350M & AbsPref & 1.340 & 0.335 & 0.742 & 2.002 & 1.000\\
-C4 & 350M & AbsPref $\times$ Checkpoint & 0.390 & 0.009 & 0.372 & 0.407 & 1.000\\
-\addlinespace
-C4 & 350M & Checkpoint (tokens, z) & -0.031 & 0.003 & -0.037 & -0.026 & 0.000\\
-C4 & 350M & Overall freq $\times$ Checkpoint & 0.033 & 0.001 & 0.030 & 0.035 & 1.000\\
-C4 & 350M & Overall freq (ln total) & 0.170 & 0.007 & 0.156 & 0.184 & 1.000\\
-C4 & 350M & RelFreq $\times$ Checkpoint & 1.622 & 0.006 & 1.611 & 1.633 & 1.000\\
-C4 & 350M & RelFreq (P(alpha)-0.5) & 1.148 & 0.024 & 1.101 & 1.195 & 1.000\\
-\addlinespace
-C4 & 1.3B & AbsPref & 3.097 & 0.446 & 2.196 & 3.993 & 1.000\\
-C4 & 1.3B & AbsPref $\times$ Checkpoint & 0.032 & 0.011 & 0.010 & 0.054 & 0.997\\
-C4 & 1.3B & Checkpoint (tokens, z) & -0.066 & 0.004 & -0.073 & -0.060 & 0.000\\
-C4 & 1.3B & Overall freq $\times$ Checkpoint & -0.018 & 0.002 & -0.021 & -0.015 & 0.000\\
-C4 & 1.3B & Overall freq (ln total) & 0.251 & 0.009 & 0.233 & 0.268 & 1.000\\
-\addlinespace
-C4 & 1.3B & RelFreq $\times$ Checkpoint & 2.475 & 0.007 & 2.461 & 2.489 & 1.000\\
-C4 & 1.3B & RelFreq (P(alpha)-0.5) & 1.467 & 0.031 & 1.407 & 1.526 & 1.000\\
-\bottomrule
-\end{tabular}
-
-}
-
-\caption{\label{tbl-pref-ckpt}Coefficient estimates from the
-checkpoint-interacted preference model.}
-
-\end{table}%
-
-\clearpage
-
 \subsection{Preference Deviation: Final
 Checkpoint}\label{preference-deviation-final-checkpoint}
 
-\begin{table}
+\begin{table}[H]
 
 \centering{
 
@@ -1146,83 +1065,10 @@ deviation at the final checkpoint.}
 
 \clearpage
 
-\subsection{Preference Deviation: Checkpoint-Interacted
-Model}\label{preference-deviation-checkpoint-interacted-model}
-
-\begin{table}
-
-\centering{
-
-\begin{tabular}{lllrrrrr}
-\toprule
-Corpus & Size & Term & Mean & SD & 2.5\% & 97.5\% & $P(\beta > 0)$\\
-\midrule
-BabyLM & 125M & AbsPref & 0.851 & 0.596 & -0.294 & 1.941 & 0.923\\
-BabyLM & 125M & AbsPref $\times$ Checkpoint & 0.999 & 0.021 & 0.958 & 1.040 & 1.000\\
-BabyLM & 125M & Checkpoint (tokens, z) & -0.161 & 0.006 & -0.174 & -0.149 & 0.000\\
-BabyLM & 125M & Overall freq $\times$ Checkpoint & 0.033 & 0.003 & 0.027 & 0.039 & 1.000\\
-BabyLM & 125M & Overall freq (ln total) & 0.222 & 0.013 & 0.197 & 0.247 & 1.000\\
-\addlinespace
-BabyLM & 125M & RelFreq $\times$ Checkpoint & 1.945 & 0.012 & 1.921 & 1.968 & 1.000\\
-BabyLM & 125M & RelFreq (P(alpha)-0.5) & -0.919 & 0.190 & -1.279 & -0.549 & 0.000\\
-BabyLM & 350M & AbsPref & -0.140 & 0.500 & -1.097 & 0.909 & 0.390\\
-BabyLM & 350M & AbsPref $\times$ Checkpoint & 0.127 & 0.016 & 0.097 & 0.158 & 1.000\\
-BabyLM & 350M & Checkpoint (tokens, z) & -0.001 & 0.005 & -0.011 & 0.008 & 0.392\\
-\addlinespace
-BabyLM & 350M & Overall freq $\times$ Checkpoint & 0.034 & 0.002 & 0.030 & 0.039 & 1.000\\
-BabyLM & 350M & Overall freq (ln total) & 0.148 & 0.010 & 0.129 & 0.167 & 1.000\\
-BabyLM & 350M & RelFreq $\times$ Checkpoint & 1.592 & 0.009 & 1.575 & 1.609 & 1.000\\
-BabyLM & 350M & RelFreq (P(alpha)-0.5) & -3.071 & 0.151 & -3.387 & -2.784 & 0.000\\
-BabyLM & 1.3B & AbsPref & -0.028 & 0.633 & -1.158 & 1.299 & 0.483\\
-\addlinespace
-BabyLM & 1.3B & AbsPref $\times$ Checkpoint & 0.277 & 0.024 & 0.230 & 0.323 & 1.000\\
-BabyLM & 1.3B & Checkpoint (tokens, z) & 0.001 & 0.007 & -0.013 & 0.015 & 0.543\\
-BabyLM & 1.3B & Overall freq $\times$ Checkpoint & 0.051 & 0.003 & 0.044 & 0.057 & 1.000\\
-BabyLM & 1.3B & Overall freq (ln total) & 0.247 & 0.014 & 0.218 & 0.275 & 1.000\\
-BabyLM & 1.3B & RelFreq $\times$ Checkpoint & 1.900 & 0.014 & 1.874 & 1.927 & 1.000\\
-\addlinespace
-BabyLM & 1.3B & RelFreq (P(alpha)-0.5) & -0.757 & 0.202 & -1.157 & -0.366 & 0.000\\
-C4 & 125M & AbsPref & 1.762 & 0.360 & 1.123 & 2.442 & 1.000\\
-C4 & 125M & AbsPref $\times$ Checkpoint & 0.079 & 0.010 & 0.059 & 0.098 & 1.000\\
-C4 & 125M & Checkpoint (tokens, z) & -0.057 & 0.003 & -0.063 & -0.051 & 0.000\\
-C4 & 125M & Overall freq $\times$ Checkpoint & -0.014 & 0.001 & -0.017 & -0.011 & 0.000\\
-\addlinespace
-C4 & 125M & Overall freq (ln total) & 0.217 & 0.009 & 0.200 & 0.234 & 1.000\\
-C4 & 125M & RelFreq $\times$ Checkpoint & 2.073 & 0.006 & 2.060 & 2.085 & 1.000\\
-C4 & 125M & RelFreq (P(alpha)-0.5) & -3.176 & 0.027 & -3.229 & -3.124 & 0.000\\
-C4 & 350M & AbsPref & 0.268 & 0.385 & -0.494 & 0.934 & 0.757\\
-C4 & 350M & AbsPref $\times$ Checkpoint & 0.383 & 0.009 & 0.365 & 0.401 & 1.000\\
-\addlinespace
-C4 & 350M & Checkpoint (tokens, z) & -0.029 & 0.003 & -0.034 & -0.024 & 0.000\\
-C4 & 350M & Overall freq $\times$ Checkpoint & 0.033 & 0.001 & 0.031 & 0.036 & 1.000\\
-C4 & 350M & Overall freq (ln total) & 0.154 & 0.007 & 0.141 & 0.168 & 1.000\\
-C4 & 350M & RelFreq $\times$ Checkpoint & 1.616 & 0.006 & 1.605 & 1.628 & 1.000\\
-C4 & 350M & RelFreq (P(alpha)-0.5) & -3.590 & 0.026 & -3.639 & -3.539 & 0.000\\
-\addlinespace
-C4 & 1.3B & AbsPref & 2.162 & 0.345 & 1.553 & 2.834 & 1.000\\
-C4 & 1.3B & AbsPref $\times$ Checkpoint & 0.025 & 0.011 & 0.003 & 0.048 & 0.987\\
-C4 & 1.3B & Checkpoint (tokens, z) & -0.064 & 0.004 & -0.071 & -0.057 & 0.000\\
-C4 & 1.3B & Overall freq $\times$ Checkpoint & -0.018 & 0.002 & -0.021 & -0.014 & 0.000\\
-C4 & 1.3B & Overall freq (ln total) & 0.235 & 0.009 & 0.217 & 0.253 & 1.000\\
-\addlinespace
-C4 & 1.3B & RelFreq $\times$ Checkpoint & 2.469 & 0.007 & 2.455 & 2.483 & 1.000\\
-C4 & 1.3B & RelFreq (P(alpha)-0.5) & -3.261 & 0.031 & -3.321 & -3.199 & 0.000\\
-\bottomrule
-\end{tabular}
-
-}
-
-\caption{\label{tbl-sg-ckpt}Coefficient estimates from the
-checkpoint-interacted preference deviation model.}
-
-\end{table}%
-
-\clearpage
-
 \subsection{Absolute Preference Deviation
 (Log-Normal)}\label{absolute-preference-deviation-log-normal}
 
-\begin{table}
+\begin{table}[H]
 
 \centering{
 
@@ -1262,26 +1108,6 @@ log scale. Mean = posterior mean; SD = posterior SD; 2.5\%/97.5\% = 95\%
 credible interval bounds.}
 
 \end{table}%
-
-\FloatBarrier
-
-\section{Checkpoint-Interacted Coefficient Plots}\label{sec-ckpt-coefs}
-
-\begin{figure}
-
-\centering{
-
-\pandocbounded{\includegraphics[keepaspectratio]{writeup_files/figure-pdf/fig-ckpt-coefs-1.pdf}}
-
-}
-
-\caption{\label{fig-ckpt-coefs}Coefficient estimates for the
-checkpoint-interacted preference model (top) and preference deviation
-model (bottom). Interactions with training stage (tokens, scaled and
-centered) test whether each predictor's effect changes linearly over the
-course of training.}
-
-\end{figure}%
 
 \FloatBarrier
 
