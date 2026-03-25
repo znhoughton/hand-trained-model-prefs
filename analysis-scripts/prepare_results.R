@@ -19,7 +19,8 @@
 #   sg_traj_coefs.csv      signed-gap model, 20-checkpoint trajectory
 #   sg_ckpt_coefs.csv      signed-gap model, checkpoint-interacted
 #   sg_gap_summary.csv     per-checkpoint mean |gap| and freq-tracking r
-#   absgap_coefs.csv       absolute signed-gap model, checkpoint-interacted
+#   absgap_coefs.csv       absolute signed-gap model, checkpoint-interacted (Gaussian)
+#   absgap_ln_coefs.csv    absolute signed-gap model, checkpoint-interacted (log-normal)
 # ─────────────────────────────────────────────────────────────────────────────
 
 library(tidyverse)
@@ -243,7 +244,8 @@ extract_and_save("pref_final_",  TERM_LEVELS,        TERM_LABELS,        "pref_f
 extract_and_save("pref_ckpt_",   TERM_LEVELS_CK,     TERM_LABELS_CK,     "pref_ckpt_coefs.csv")
 extract_and_save("sg_final_",    TERM_LEVELS,        TERM_LABELS,        "sg_final_coefs.csv")
 extract_and_save("sg_ckpt_",     TERM_LEVELS_CK,     TERM_LABELS_CK,     "sg_ckpt_coefs.csv")
-extract_and_save("absgap_ckpt_", TERM_LEVELS_ABSGAP, TERM_LABELS_ABSGAP, "absgap_coefs.csv")
+extract_and_save("absgap_ckpt_",    TERM_LEVELS_ABSGAP, TERM_LABELS_ABSGAP, "absgap_coefs.csv")
+extract_and_save("absgap_ln_ckpt_", TERM_LEVELS_ABSGAP, TERM_LABELS_ABSGAP, "absgap_ln_coefs.csv")
 
 extract_traj_and_save("pref_traj_", TERM_LEVELS, TERM_LABELS, "pref_traj_coefs.csv")
 extract_traj_and_save("sg_traj_",   TERM_LEVELS, TERM_LABELS, "sg_traj_coefs.csv")
@@ -382,25 +384,46 @@ save_ppc_densities <- function(rds_fname, csv_fname, n_grid = 512, overwrite = F
 # posterior_predict, computes densities immediately, then discards raw draws.
 save_ppc_densities_direct <- function(prefix, csv_fname,
                                       ndraws = 100, n_grid = 512,
-                                      n_workers = 4, overwrite = FALSE) {
+                                      n_workers = 4, overwrite = FALSE,
+                                      log_transform = FALSE) {
   csv_path <- file.path(PPC_DIR, csv_fname)
+
+  # Load existing data and determine which models are already done
+  existing <- NULL
+  done_keys <- character(0)
   if (!overwrite && file.exists(csv_path)) {
-    message(sprintf("  %s already exists; skipping (pass overwrite=TRUE to regenerate)", csv_fname))
-    return(invisible(NULL))
+    existing   <- read_csv(csv_path, show_col_types = FALSE)
+    done_keys  <- unique(paste(existing$corpus, existing$model_size, sep = "|"))
+    message(sprintf("  %s exists with %d model(s) already computed; checking for new ones...",
+                    csv_fname, length(done_keys)))
   }
+
   paths <- list_fits(prefix)
   if (length(paths) == 0) {
     message(sprintf("  No .rds files for '%s'; skipping", prefix))
     return(invisible(NULL))
   }
-  message(sprintf("  Computing PPC densities for '%s' (%d models, %d workers)...",
-                  prefix, length(paths), n_workers))
+
+  # Filter to paths not yet in the CSV
+  paths_todo <- Filter(function(path) {
+    slug   <- sub("\\.rds$", "", sub(paste0("^", prefix), "", basename(path)))
+    key    <- paste(parse_corpus(slug), parse_size(slug), sep = "|")
+    !key %in% done_keys
+  }, paths)
+
+  if (length(paths_todo) == 0) {
+    message(sprintf("  All models already in %s; nothing to do.", csv_fname))
+    return(invisible(NULL))
+  }
+
+  message(sprintf("  Computing PPC densities for '%s' (%d new model(s), %d workers)...",
+                  prefix, length(paths_todo), n_workers))
 
   plan(multisession, workers = n_workers)
   on.exit(plan(sequential))
 
-  all_rows <- future_map(
-    paths,
+  new_rows <- future_map(
+    paths_todo,
     .progress = TRUE,
     .options  = furrr_options(packages = c("brms"), seed = TRUE),
     function(path) {
@@ -413,6 +436,11 @@ save_ppc_densities_direct <- function(prefix, csv_fname,
       y    <- fit$data[[resp_name]]
       yrep <- posterior_predict(fit, ndraws = ndraws)
       rm(fit); gc()
+
+      if (log_transform) {
+        y    <- log(pmax(y,    1e-10))
+        yrep <- log(pmax(yrep, 1e-10))
+      }
 
       x_range  <- range(c(y, yrep), na.rm = TRUE)
       dens_y   <- density(y, n = n_grid, from = x_range[1], to = x_range[2])
@@ -437,7 +465,8 @@ save_ppc_densities_direct <- function(prefix, csv_fname,
     }
   )
 
-  out <- do.call(rbind, all_rows)
+  new_data <- do.call(rbind, new_rows)
+  out <- if (!is.null(existing)) rbind(existing, new_data) else new_data
   out$model_size <- factor(out$model_size, levels = SIZE_LEVELS)
   write_csv(out |> mutate(across(where(is.factor), as.character)), csv_path)
   message(sprintf("  Saved %-35s (%s rows)", csv_fname, format(nrow(out), big.mark = ",")))
@@ -445,6 +474,8 @@ save_ppc_densities_direct <- function(prefix, csv_fname,
 
 save_ppc_densities("ppc_pref_final.rds", "ppc_pref_final_dens.csv")
 save_ppc_densities("ppc_sg_final.rds",   "ppc_sg_final_dens.csv")
-save_ppc_densities_direct("absgap_ckpt_", "ppc_absgap_dens.csv")
+save_ppc_densities_direct("absgap_ckpt_",    "ppc_absgap_dens.csv")
+save_ppc_densities_direct("absgap_ln_ckpt_", "ppc_absgap_ln_dens.csv")
+save_ppc_densities_direct("absgap_ln_ckpt_", "ppc_absgap_ln_log_dens.csv", log_transform = TRUE)
 
 message("\nDone. All results saved to: ", normalizePath(OUT_DIR))
