@@ -257,6 +257,38 @@ if (file.exists(AGG_CSV)) {
 }
 ```
 
+```{r plot-cor-freq, fig.height=7}
+if (exists("agg_sampled")) {
+  cor_by_freq <- agg_sampled |>
+    group_by(corpus, model_size, tokens, freq_quintile) |>
+    summarise(r = cor(preference, hum_pref, use = "complete.obs"),
+              .groups = "drop")
+
+  ggplot(cor_by_freq, aes(x = freq_quintile, y = r,
+                           colour = tokens / 1e6, group = tokens)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_line(linewidth = 0.6, alpha = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_gradient(low = "#c7e9b4", high = "#154733",
+                          name = "Training tokens\n(millions)") +
+    scale_y_continuous("Pearson r (model pref ~ human pref)", limits = c(-0.5, 1)) +
+    scale_x_discrete("Overall frequency quintile") +
+    facet_grid(corpus ~ model_size) +
+    labs(title = "Correlation with human preference by overall frequency quintile") +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title   = element_text(face = "bold", size = 14),
+          strip.text   = element_text(face = "bold", size = 13),
+          axis.text.x  = element_text(size = 10),
+          axis.text.y  = element_text(colour = "black", size = 11),
+          axis.title   = element_text(colour = "black", size = 13),
+          legend.text  = element_text(size = 11),
+          legend.title = element_text(size = 12))
+} else {
+  message("attested_agg.csv not found — run prepare_data.py first.")
+}
+```
+
 ---
 
 ## 2a raw data: correlation between model preference and human preference over training
@@ -348,6 +380,8 @@ if (!"binom" %in% names(human)) {
 human <- select(human, binom, resp_binary)
 
 MODELS_LIST <- sort(unique(train$model))
+MODELS_LIST <- MODELS_LIST[!is.na(parse_corpus(MODELS_LIST))]
+message(sprintf("Fitting %d models: %s", length(MODELS_LIST), paste(MODELS_LIST, collapse = ", ")))
 ```
 
 ```{r setup-parallel}
