@@ -252,6 +252,28 @@ extract_traj_and_save("sg_traj_",   TERM_LEVELS, TERM_LABELS, "sg_traj_coefs.csv
 
 save_gap_summary("sg_traj_", "sg_gap_summary.csv")
 
+# ── Analysis 2: human pref ~ model preference (logistic trajectory) ───────────
+TERM_LEVELS_HUM <- "preference"
+TERM_LABELS_HUM <- "Model preference"
+extract_traj_and_save("humfit_traj_", TERM_LEVELS_HUM, TERM_LABELS_HUM, "humfit_traj_coefs.csv")
+
+# ── Analysis 2: model pref ~ individual constraints (trajectory) ──────────────
+CONSTRAINT_COLS <- c("Form", "Percept", "Culture", "Power", "Intense",
+                     "Icon", "Freq", "Len", "Lapse", "BStress")
+TERM_LEVELS_CONSTR <- c(
+  CONSTRAINT_COLS,
+  "log_total_c", "freq_prob_c",
+  paste0(CONSTRAINT_COLS, ":log_total_c"),
+  "freq_prob_c:log_total_c"
+)
+TERM_LABELS_CONSTR <- c(
+  CONSTRAINT_COLS,
+  "Overall freq\n(ln total)", "RelFreq\n(P(alpha)\u22120.5)",
+  paste0(CONSTRAINT_COLS, " \u00d7\nOverall freq"),
+  "RelFreq \u00d7\nOverall freq"
+)
+extract_traj_and_save("constr_traj_", TERM_LEVELS_CONSTR, TERM_LABELS_CONSTR, "constr_traj_coefs.csv")
+
 # ── Posterior predictive checks ───────────────────────────────────────────────
 # Save tidy data frames (observed y + yrep draws) rather than pre-rendered
 # figures, so the writeup can build ggplot2 plots with full aesthetic control.

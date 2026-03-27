@@ -1,0 +1,605 @@
+---
+title: "Analysis 2: Human Preferences and Individual Constraints"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 12, fig.height = 7, dpi = 150,
+                      out.width = "100%")
+```
+
+## Overview
+
+**Before running this script**, make sure `prepare_data.py` has been run to
+generate `training_attested.csv`, `human_responses_attested.csv`, and
+`attested_agg.csv` in `../Data/processed/`.
+
+After the fitting section finishes, run `prepare_results.R` to extract
+coefficients into CSVs for use in `writeup.qmd`.
+
+---
+
+**Analysis 2a — Human ordering preference ~ model preference**
+
+For each model × checkpoint, a Bernoulli logistic regression tests whether the
+model's preference score for a binomial predicts whether a human participant
+chose the alphabetical ordering:
+
+$$\text{resp\_binary} \sim \text{preference} + (1 \mid \text{binom}), \quad
+\text{family} = \text{Bernoulli}$$
+
+**Analysis 2b — Model preference ~ individual constraints**
+
+For each model × checkpoint, the single `AbsPref` predictor from the main
+analysis is replaced by all ten individual phonological/semantic constraints
+simultaneously:
+
+$$\text{preference} \sim (\text{Form} + \text{Percept} + \cdots + \text{BStress})
+\times \ln(\text{OverallFreq}) + \text{RelFreq} \times \ln(\text{OverallFreq})
++ (1 \mid \text{binom})$$
+
+**Analysis 2c — Prediction accuracy by overall frequency**
+
+No model fitting required. Accuracy (model preference sign matches human
+majority sign) is computed from `attested_agg.csv` for each model × checkpoint
+× frequency quintile.
+
+---
+
+```{r libraries}
+library(tidyverse)
+library(brms)
+library(patchwork)
+library(future)
+library(furrr)
+```
+
+```{r config}
+SCRIPT_DIR <- {
+  knitr_input <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  if (!is.null(knitr_input) && nchar(knitr_input) > 0) {
+    dirname(normalizePath(knitr_input, mustWork = FALSE))
+  } else if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    dirname(normalizePath(rstudioapi::getActiveDocumentContext()$path, mustWork = FALSE))
+  } else {
+    normalizePath(".", mustWork = FALSE)
+  }
+}
+
+MODELS_DIR  <- file.path(SCRIPT_DIR, "models")
+DATA_DIR    <- normalizePath(file.path(SCRIPT_DIR, "../Data/processed"), mustWork = FALSE)
+TRAIN_CSV   <- file.path(DATA_DIR, "training_attested.csv")
+HUMAN_CSV   <- file.path(DATA_DIR, "human_responses_attested.csv")
+AGG_CSV     <- file.path(DATA_DIR, "attested_agg.csv")
+
+dir.create(MODELS_DIR, showWarnings = FALSE, recursive = TRUE)
+
+N_TRAJ_CHECKPOINTS <- 20
+
+CONSTRAINT_COLS <- c("Form", "Percept", "Culture", "Power", "Intense",
+                     "Icon", "Freq", "Len", "Lapse", "BStress")
+
+SIZE_LEVELS  <- c("125M", "350M", "1.3B")
+SIZE_COLOURS <- c("125M" = "#F0B323", "350M" = "#007030", "1.3B" = "#154733")
+
+PRIORS_GAUSSIAN <- c(
+  prior(normal(0, 1), class = b),
+  prior(normal(0, 1), class = Intercept),
+  prior(exponential(1), class = sd),
+  prior(exponential(1), class = sigma)
+)
+PRIORS_BERNOULLI <- c(
+  prior(normal(0, 1), class = b),
+  prior(normal(0, 1), class = Intercept),
+  prior(exponential(1), class = sd)
+)
+
+ITER   <- 6000
+WARMUP <- 3000
+
+N_CORES           <- parallel::detectCores(logical = FALSE)
+USABLE_CORES      <- floor(N_CORES * 3 / 4)
+N_PARALLEL_MODELS <- 6
+CHAINS            <- min(floor(USABLE_CORES / N_PARALLEL_MODELS), 8)
+CORES             <- CHAINS
+
+message(sprintf(
+  "Cores: %d total | %d usable (3/4) | %d parallel models | %d chains/cores per model",
+  N_CORES, USABLE_CORES, N_PARALLEL_MODELS, CHAINS
+))
+```
+
+```{r helpers}
+make_slug <- function(x) tolower(gsub("[^a-z0-9]", "_", x))
+
+parse_corpus <- function(x) case_when(
+  grepl("babylm", x, TRUE) ~ "BabyLM",
+  grepl("opt.c4", x, TRUE) ~ "C4",
+  TRUE ~ NA_character_
+)
+parse_size <- function(x) case_when(
+  grepl("125m",    x, TRUE) ~ "125M",
+  grepl("350m",    x, TRUE) ~ "350M",
+  grepl("1[._]3b", x, TRUE) ~ "1.3B",
+  TRUE ~ NA_character_
+)
+
+sample_steps <- function(model_df, n = N_TRAJ_CHECKPOINTS) {
+  steps <- sort(unique(model_df$step))
+  idx   <- unique(round(seq(1, length(steps), length.out = min(n, length(steps)))))
+  steps[idx]
+}
+
+list_fits <- function(prefix) {
+  pat <- paste0("^", prefix, ".+\\.rds$")
+  list.files(MODELS_DIR, pattern = pat, full.names = TRUE)
+}
+
+extract_coefs <- function(fit, model_name, term_levels, term_labels) {
+  fe <- as.data.frame(fixef(fit))
+  fe$term <- rownames(fe)
+  fe |>
+    as_tibble() |>
+    rename(estimate = Estimate, se = Est.Error, lo = Q2.5, hi = Q97.5) |>
+    filter(term != "Intercept") |>
+    mutate(
+      term       = factor(term, levels = term_levels, labels = term_labels),
+      p_gt0      = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+      model_name = model_name,
+      corpus     = parse_corpus(model_name),
+      model_size = factor(parse_size(model_name), levels = SIZE_LEVELS)
+    )
+}
+
+# Load trajectory results from fitted .rds files, attaching token counts from TRAJ_META
+load_traj_coefs <- function(prefix, term_levels, term_labels) {
+  paths <- list_fits(prefix)
+  if (length(paths) == 0) {
+    warning(sprintf("No .rds files for prefix '%s'", prefix))
+    return(tibble())
+  }
+  map_dfr(paths, function(path) {
+    fname_base <- sub("\\.rds$", "", basename(path))
+    slug       <- sub(paste0("^", prefix), "", fname_base)
+    slug       <- sub("_ck[0-9]+$", "", slug)
+    ck_idx     <- as.integer(sub("^.*_ck([0-9]+)$", "\\1", fname_base))
+    row        <- if (!is.null(TRAJ_META)) {
+      filter(TRAJ_META, .data$slug == slug, .data$ck_idx == !!ck_idx)
+    } else tibble()
+    ck_tokens  <- if (nrow(row) == 1) row$tokens else NA_real_
+    fit        <- readRDS(path)
+    result     <- extract_coefs(fit, slug, term_levels, term_labels) |>
+      mutate(tokens = ck_tokens)
+    rm(fit); gc()
+    result
+  })
+}
+```
+
+```{r traj-meta}
+# Recover token counts for x-axes (mirrors prepare_results.R logic)
+if (file.exists(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"))) {
+  library(duckdb)
+  CSV_FWD <- gsub("\\\\", "/",
+    normalizePath(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv")))
+  con <- dbConnect(duckdb::duckdb())
+  dbExecute(con, sprintf("CREATE VIEW ckpt AS SELECT * FROM read_csv_auto('%s')", CSV_FWD))
+  models_meta <- sort(dbGetQuery(con, "SELECT DISTINCT model FROM ckpt")$model)
+  TRAJ_META <- bind_rows(lapply(models_meta, function(m) {
+    slug      <- make_slug(m)
+    all_ckpts <- dbGetQuery(con, sprintf(
+      "SELECT DISTINCT tokens FROM ckpt WHERE model = '%s' ORDER BY tokens",
+      gsub("'", "''", m)))$tokens
+    n   <- min(N_TRAJ_CHECKPOINTS, length(all_ckpts))
+    idx <- unique(round(seq(1, length(all_ckpts), length.out = n)))
+    tibble(slug = slug, ck_idx = seq_along(idx), tokens = all_ckpts[idx])
+  }))
+  dbDisconnect(con, shutdown = TRUE)
+} else {
+  TRAJ_META <- NULL
+  warning("checkpoint_results_with_exposures.csv not found — trajectory x-axis will be NA")
+}
+```
+
+---
+
+# Results
+
+## 2c: Prediction accuracy by overall frequency
+
+```{r plot-acc-freq, fig.height=7}
+if (file.exists(AGG_CSV)) {
+  agg <- read_csv(AGG_CSV, show_col_types = FALSE) |>
+    mutate(
+      correct       = (preference > 0) == (hum_pref > 0.5),
+      corpus        = parse_corpus(model),
+      model_size    = factor(parse_size(model), levels = SIZE_LEVELS),
+      freq_quintile = cut(log(OverallFreq), breaks = 5,
+                          labels = c("Q1 (lowest)", "Q2", "Q3", "Q4", "Q5 (highest)"))
+    ) |>
+    filter(!is.na(corpus), !is.na(model_size), !is.na(freq_quintile))
+
+  agg_sampled <- agg |>
+    group_by(model) |>
+    mutate(step_rank = dense_rank(tokens)) |>
+    filter(step_rank %in% unique(round(seq(1, max(step_rank), length.out = 20)))) |>
+    ungroup()
+
+  acc_by_freq <- agg_sampled |>
+    group_by(corpus, model_size, tokens, freq_quintile) |>
+    summarise(accuracy = mean(correct, na.rm = TRUE), .groups = "drop")
+
+  ggplot(acc_by_freq, aes(x = freq_quintile, y = accuracy,
+                           colour = tokens / 1e6, group = tokens)) +
+    geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey60") +
+    geom_line(linewidth = 0.6, alpha = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_gradient(low = "#c7e9b4", high = "#154733",
+                          name = "Training tokens\n(millions)") +
+    scale_y_continuous("Accuracy", limits = c(0.3, 1),
+                       labels = scales::percent_format()) +
+    scale_x_discrete("Overall frequency quintile") +
+    facet_grid(corpus ~ model_size) +
+    labs(title = "Prediction accuracy by overall frequency quintile") +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title   = element_text(face = "bold", size = 14),
+          strip.text   = element_text(face = "bold", size = 13),
+          axis.text.x  = element_text(size = 10),
+          axis.text.y  = element_text(colour = "black", size = 11),
+          axis.title   = element_text(colour = "black", size = 13),
+          legend.text  = element_text(size = 11),
+          legend.title = element_text(size = 12))
+} else {
+  message("attested_agg.csv not found — run prepare_data.py first.")
+}
+```
+
+---
+
+## 2a raw data: correlation between model preference and human preference over training
+
+```{r plot-2a-raw, fig.height=7}
+if (exists("agg_sampled")) {
+  cor_traj_2a <- agg_sampled |>
+    group_by(corpus, model_size, tokens) |>
+    summarise(r = cor(preference, hum_pref, use = "complete.obs"),
+              .groups = "drop")
+
+  ggplot(cor_traj_2a, aes(x = tokens / 1e6, y = r, colour = model_size)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Pearson r (model pref ~ human pref)", limits = c(-0.1, 1)) +
+    facet_wrap(~ corpus) +
+    labs(title = "Raw trajectory: correlation of model preference with human preference") +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title      = element_text(face = "bold", size = 14),
+          strip.text      = element_text(face = "bold", size = 13),
+          axis.text       = element_text(colour = "black", size = 11),
+          axis.title      = element_text(colour = "black", size = 13),
+          legend.position = "bottom")
+} else {
+  message("Run the 2c chunk first to load agg_sampled.")
+}
+```
+
+---
+
+## 2b raw data: correlation between model preference and each constraint over training
+
+```{r plot-2b-raw, fig.height=10}
+if (exists("agg_sampled")) {
+  cor_traj_2b <- agg_sampled |>
+    group_by(corpus, model_size, tokens) |>
+    summarise(across(all_of(c(CONSTRAINT_COLS, "RelFreq")),
+                     ~ cor(preference, .x, use = "complete.obs")),
+              .groups = "drop") |>
+    pivot_longer(cols = all_of(c(CONSTRAINT_COLS, "RelFreq")),
+                 names_to = "constraint", values_to = "r") |>
+    mutate(constraint = factor(constraint, levels = c(CONSTRAINT_COLS, "RelFreq")))
+
+  ggplot(cor_traj_2b, aes(x = tokens / 1e6, y = r, colour = model_size)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 1.5) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Pearson r (model pref ~ constraint)") +
+    facet_grid(constraint ~ corpus, scales = "free_y") +
+    labs(title = "Raw trajectories: correlation of model preference with each constraint") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title      = element_text(face = "bold", size = 12),
+          strip.text.x    = element_text(face = "bold", size = 11),
+          strip.text.y    = element_text(size = 9),
+          axis.text       = element_text(colour = "black", size = 9),
+          axis.title      = element_text(colour = "black", size = 11),
+          legend.position = "bottom")
+} else {
+  message("Run the 2c chunk first to load agg_sampled.")
+}
+```
+
+---
+
+# Fitting
+
+Cells below fit models and save `.rds` files. Already-fitted models are
+skipped automatically — re-run at any time to fill in missing checkpoints.
+After fitting, run `prepare_results.R` to extract coefficients into CSVs.
+
+```{r load-data}
+message("Loading training data...")
+train <- read_csv(TRAIN_CSV, show_col_types = FALSE)
+
+message("Loading human responses...")
+human <- read_csv(HUMAN_CSV, show_col_types = FALSE)
+
+MODELS_LIST <- sort(unique(train$model))
+```
+
+```{r setup-parallel}
+# multicore uses fork — workers inherit globals. Falls back to sequential on Windows.
+plan(multicore, workers = N_PARALLEL_MODELS)
+message(sprintf("furrr plan: %s with %d workers", class(plan())[1], N_PARALLEL_MODELS))
+```
+
+## 2a: `resp_binary ~ preference + (1 | binom)` (Bernoulli)
+
+```{r fit-2a}
+future_map(MODELS_LIST, function(model_name) {
+  slug  <- make_slug(model_name)
+  mdata <- filter(train, model == model_name)
+  steps <- sample_steps(mdata)
+  message(sprintf("\n=== [2a] %s (%d checkpoints) ===", slug, length(steps)))
+
+  for (ck_idx in seq_along(steps)) {
+    s        <- steps[ck_idx]
+    ck       <- sprintf("ck%02d", ck_idx)
+    cdat     <- filter(mdata, step == s)
+    hum_path <- file.path(MODELS_DIR, sprintf("humfit_traj_%s_%s.rds", slug, ck))
+
+    if (!file.exists(hum_path)) {
+      hfit_data <- inner_join(human, select(cdat, binom, preference), by = "binom") |>
+        filter(!is.na(preference))
+      if (nrow(hfit_data) < 20) {
+        warning(sprintf("Skipping %s %s — only %d rows", slug, ck, nrow(hfit_data)))
+      } else {
+        message(sprintf("  %s %s  step=%d  n=%d", slug, ck, s, nrow(hfit_data)))
+        fit <- brm(
+          resp_binary ~ preference + (1 | binom),
+          data    = hfit_data,
+          family  = bernoulli(link = "logit"),
+          prior   = PRIORS_BERNOULLI,
+          iter    = ITER, warmup = WARMUP, chains = CHAINS, cores = CORES,
+          backend = "cmdstanr", silent = 2, refresh = 0
+        )
+        saveRDS(fit, hum_path); rm(fit); gc()
+        message(sprintf("    Saved: %s", basename(hum_path)))
+      }
+    } else {
+      message(sprintf("  %s %s — exists, skipping", slug, ck))
+    }
+  }
+}, .options = furrr_options(seed = TRUE))
+message("\n2a fitting done.")
+```
+
+## 2b: `preference ~ (constraints) * log_total_c + RelFreq * log_total_c + (1 | binom)` (Gaussian)
+
+```{r fit-2b}
+constraint_terms <- paste(CONSTRAINT_COLS, collapse = " + ")
+formula_2b <- as.formula(sprintf(
+  "preference ~ (%s) * log_total_c + freq_prob_c * log_total_c + (1 | binom)",
+  constraint_terms
+))
+
+future_map(MODELS_LIST, function(model_name) {
+  slug  <- make_slug(model_name)
+  mdata <- filter(train, model == model_name)
+  steps <- sample_steps(mdata)
+  message(sprintf("\n=== [2b] %s (%d checkpoints) ===", slug, length(steps)))
+
+  for (ck_idx in seq_along(steps)) {
+    s        <- steps[ck_idx]
+    ck       <- sprintf("ck%02d", ck_idx)
+    cdat     <- filter(mdata, step == s)
+    con_path <- file.path(MODELS_DIR, sprintf("constr_traj_%s_%s.rds", slug, ck))
+
+    if (!file.exists(con_path)) {
+      message(sprintf("  %s %s  step=%d", slug, ck, s))
+      con_data <- cdat |>
+        mutate(freq_prob_c = RelFreq - 0.5,
+               log_total_c = as.numeric(scale(OverallFreq_log))) |>
+        filter(!is.na(preference), !if_any(all_of(CONSTRAINT_COLS), is.na))
+      fit <- brm(
+        formula = formula_2b,
+        data    = con_data,
+        family  = gaussian(),
+        prior   = PRIORS_GAUSSIAN,
+        iter    = ITER, warmup = WARMUP, chains = CHAINS, cores = CORES,
+        backend = "cmdstanr", silent = 2, refresh = 0
+      )
+      saveRDS(fit, con_path); rm(fit); gc()
+      message(sprintf("    Saved: %s", basename(con_path)))
+    } else {
+      message(sprintf("  %s %s — exists, skipping", slug, ck))
+    }
+  }
+}, .options = furrr_options(seed = TRUE))
+message("\n2b fitting done.")
+```
+
+---
+
+# Results (brms models)
+
+## 2a: Human preference ~ model preference
+
+```{r load-humfit}
+TERM_LEVELS_HUM <- "preference"
+TERM_LABELS_HUM <- "Model preference"
+humfit_coefs <- load_traj_coefs("humfit_traj_", TERM_LEVELS_HUM, TERM_LABELS_HUM)
+```
+
+```{r plot-humfit-traj, fig.height=9}
+if (nrow(humfit_coefs) > 0 && !all(is.na(humfit_coefs$tokens))) {
+  df <- humfit_coefs |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100)) |>
+    group_by(corpus, model_size) |>
+    arrange(tokens, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  df_labels <- filter(df, pt_idx %% 2 == 1)
+
+  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                   linewidth = 0.7, alpha = 0.7) +
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.2, colour = "grey25", stroke = 0.35) +
+    geom_text(data = df_labels, aes(label = pct_label, y = hi),
+              size = 2.8, vjust = -0.5, colour = "black") +
+    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Model preference coefficient (95% CI)",
+                       expand = expansion(mult = c(0.05, 0.2))) +
+    facet_grid(corpus ~ model_size) +
+    coord_cartesian(clip = "off") +
+    labs(title = "Human ordering choice ~ model preference (logistic)") +
+    theme_bw(base_size = 13) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          plot.title   = element_text(face = "bold", size = 14),
+          axis.text    = element_text(colour = "black", size = 13),
+          axis.title   = element_text(colour = "black", size = 15),
+          strip.text   = element_text(colour = "black", face = "bold", size = 14))
+} else {
+  message("No humfit_traj data — fit models first.")
+}
+```
+
+---
+
+## 2b: Model preference ~ individual constraints
+
+```{r load-constr}
+TERM_LEVELS_CONSTR <- c(
+  CONSTRAINT_COLS, "log_total_c", "freq_prob_c",
+  paste0(CONSTRAINT_COLS, ":log_total_c"), "freq_prob_c:log_total_c"
+)
+TERM_LABELS_CONSTR <- c(
+  CONSTRAINT_COLS, "Overall freq\n(ln total)", "RelFreq\n(P(\u03b1)\u22120.5)",
+  paste0(CONSTRAINT_COLS, " \u00d7\nOverall freq"), "RelFreq \u00d7\nOverall freq"
+)
+constr_coefs <- load_traj_coefs("constr_traj_", TERM_LEVELS_CONSTR, TERM_LABELS_CONSTR)
+```
+
+```{r plot-constr-main, fig.height=14}
+# Main effects only — one panel per constraint
+if (nrow(constr_coefs) > 0 && !all(is.na(constr_coefs$tokens))) {
+  constr_main <- constr_coefs |>
+    filter(as.character(term) %in% CONSTRAINT_COLS)
+
+  df <- constr_main |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100)) |>
+    group_by(corpus, model_size, term) |>
+    arrange(tokens, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  df_labels <- filter(df, pt_idx %% 2 == 1)
+
+  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                   linewidth = 0.7, alpha = 0.7) +
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.0, colour = "grey25", stroke = 0.35) +
+    geom_text(data = df_labels, aes(label = pct_label, y = hi),
+              size = 2.5, vjust = -0.5, colour = "black") +
+    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Coefficient (95% CI)",
+                       expand = expansion(mult = c(0.05, 0.2))) +
+    facet_grid(term ~ corpus, scales = "free_y") +
+    coord_cartesian(clip = "off") +
+    labs(title = "Individual constraint main effects across training") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          plot.title   = element_text(face = "bold", size = 13),
+          axis.text    = element_text(colour = "black", size = 11),
+          axis.title   = element_text(colour = "black", size = 13),
+          strip.text.x = element_text(colour = "black", face = "bold", size = 12),
+          strip.text.y = element_text(colour = "black", size = 10))
+} else {
+  message("No constr_traj data — fit models first.")
+}
+```
+
+```{r plot-constr-interactions, fig.height=14}
+# Constraint × OverallFreq interactions
+if (nrow(constr_coefs) > 0 && !all(is.na(constr_coefs$tokens))) {
+  interaction_labels <- paste0(CONSTRAINT_COLS, " \u00d7\nOverall freq")
+  constr_int <- constr_coefs |>
+    filter(as.character(term) %in% interaction_labels) |>
+    mutate(term = gsub(" \u00d7\nOverall freq", "", as.character(term)),
+           term = factor(term, levels = CONSTRAINT_COLS))
+
+  df <- constr_int |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100)) |>
+    group_by(corpus, model_size, term) |>
+    arrange(tokens, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  df_labels <- filter(df, pt_idx %% 2 == 1)
+
+  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                   linewidth = 0.7, alpha = 0.7) +
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.0, colour = "grey25", stroke = 0.35) +
+    geom_text(data = df_labels, aes(label = pct_label, y = hi),
+              size = 2.5, vjust = -0.5, colour = "black") +
+    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Coefficient (95% CI)",
+                       expand = expansion(mult = c(0.05, 0.2))) +
+    facet_grid(term ~ corpus, scales = "free_y") +
+    coord_cartesian(clip = "off") +
+    labs(title = "Constraint \u00d7 Overall frequency interactions across training") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          plot.title   = element_text(face = "bold", size = 13),
+          axis.text    = element_text(colour = "black", size = 11),
+          axis.title   = element_text(colour = "black", size = 13),
+          strip.text.x = element_text(colour = "black", face = "bold", size = 12),
+          strip.text.y = element_text(colour = "black", size = 10))
+} else {
+  message("No constr_traj data — fit models first.")
+}
+```
+

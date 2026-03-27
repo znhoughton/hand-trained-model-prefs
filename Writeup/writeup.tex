@@ -76,8 +76,23 @@ Preferences in Language Models}
 \author{
   \textbf{Zachary Houghton} \\
       Vail Systems, Inc., University of Oregon \\
-        \texttt{znhoughton@ucdavis.edu}
-    }
+        \texttt{znh@uoregon.edu}
+     \And
+  \textbf{Qing Yao} \\
+      The University of Texas at Austin \\
+       \And
+  \textbf{Kanishka Misra} \\
+      The University of Texas at Austin \\
+       \And
+  \textbf{Emily Morgan} \\
+      University of California, Davis \\
+       \And
+  \textbf{Kenji Sagae} \\
+      University of California, Davis \\
+       \And
+  \textbf{Kyle Mahowald} \\
+      The University of Texas at Austin \\
+      }
 
 \begin{document}
 
@@ -201,7 +216,7 @@ abstract preferences for lower-frequency items.
 
 The trade-off between abstract and stored knowledge as a function of
 language usage has a long history in the literature
-\citep[e.g.,][]{bybee1999usagebasedphonology, kapatsinski2010frequencyuseleads, stembergerAreInflectedForms2004, stembergerFrequencyLexicalStorage1986, houghton2025multiwordrepresentationsminds, morgan2016abstractknowledgedirect, morganFrequencydependentRegularizationIterated2016a, morganModelingIdiosyncraticPreferences2015}.
+\citep[e.g.,][]{bybee1999usagebasedphonology, kapatsinski2010frequencyuseleads, kapatsinskiFrequencyEmergencePrefabs2009, stembergerAreInflectedForms2004, stembergerFrequencyLexicalStorage1986, houghton2025multiwordrepresentationsminds, morgan2016abstractknowledgedirect, morganFrequencydependentRegularizationIterated2016a, morganModelingIdiosyncraticPreferences2015}.
 For example, \citet{stembergerAreInflectedForms2004} demonstrated that
 inflection errors are less common for high-frequency words than
 low-frequency words. Similarly, \citet{bybee1999usagebasedphonology}
@@ -209,7 +224,7 @@ showed that \emph{don't} is more phonetically reduced in high-frequency
 phrases (e.g., \emph{I don't know}) than in low-frequency ones (e.g.,
 \emph{I don't go}). Processing measures have provided convergent
 evidence: recognition of constituent words is harder in high-frequency
-\citep{kapatsinski2010frequencyuseleads} and high-predictability
+\citep{kapatsinskiFrequencyEmergencePrefabs2009} and high-predictability
 \citep{houghton2025multiwordrepresentationsminds} phrases (e.g.,
 recognizing \emph{up} in \emph{pick up}), consistent with holistic
 storage of these sequences. Despite this broad empirical support,
@@ -378,7 +393,7 @@ attested English binomial expressions annotated for various
 phonological, semantic, and metrical constraints identified by
 \citet{benorChickenEggProbabilistic2006}. For each binomial, the corpus
 provides an abstract preference score (AbsPref), derived from a logistic
-regression model fit these phonological, semantic, and metric
+regression model combining these phonological, semantic, and metric
 constraints \citep{morgan2016abstractknowledgedirect}. Abstract
 Preferences capture the degree to which these constraints favor one
 ordering over the other independently of corpus experience. This is the
@@ -441,8 +456,7 @@ Checkpoint}\label{ordering-preferences-at-the-final-checkpoint}
 
 We consider two complementary outcome measures. The first is model
 \textbf{preference}: for each model, we computed the preference for a
-given binomial by prepending each of 51 diverse prompt prefixes (e.g., a
-single space, \emph{Well,}, \emph{A friend once described the}) to both
+given binomial by prepending each of 51 diverse prompt prefixes to both
 orderings, computing the difference in summed token log-probability
 between the alphabetically ordered form (e.g., \emph{bread and butter})
 and the non-alphabetically ordered form (e.g., \emph{butter and bread})
@@ -459,8 +473,26 @@ checkpoint. A preference deviation of zero means the model's preference
 exactly matches what relative frequency predicts; positive values
 indicate a stronger preference for the alpha-ordered form than corpus
 statistics alone would suggest, and negative values the reverse.
+
+To help build an intuition for these measurements,
 Figure~\ref{fig-scoring} illustrates both measures for five example
-binomials from the C4 125M model at the final checkpoint.
+binomials from the C4 125M model at the final checkpoint. For example,
+\emph{crannies and nooks} is strongly preferred in the non-alphabetical
+ordering (i.e., \emph{nooks and crannies} is strongly preferred), while
+\emph{bride and groom} is strongly preferred in the alphabetical
+ordering. Moreover, \emph{nooks and crannies} is preferred even more
+strongly than would be expected by the the model's training data, while
+there is little difference between the expected preference and model's
+preference for the binomial \emph{authority and force}. Interestingly,
+Figure~\ref{fig-scoring} demonstrates that there can be quite large
+difference between the training data and the model's preference. As a
+case in point, while the expected preference of \emph{heir and son} and
+\emph{crannies and nooks} is quite similar, the model learns a rather
+extreme preference for the non-alphabetical ordering of \emph{crannies
+and nooks}, but has very little preference for \emph{heir and son} in
+either ordering (despite \emph{heir and son} occurring more than 300
+times more in the nonalphabetical ordering (\emph{son and heir}) than in
+the alphabetical ordering.
 
 \begin{figure}[htbp]
 
@@ -476,10 +508,14 @@ to both orderings; per-prompt log-probability differences
 (\(\Delta \log P\)) are averaged to yield a single preference score.
 \textbf{(b)} Example preference scores. Positive values indicate
 preference for the alphabetically ordered form; negative values indicate
-preference for the reverse. \textbf{(c)} Preference deviation. Values
-near zero indicate that the model's preference matches what training
-data predicts; positive values indicate stronger preference for the
-alphabetical order than training predicts.}
+preference for the reverse. \textbf{(c)} Preference deviation. Open
+circles show the frequency-based prediction (log relative frequency
+ratio); filled circles and arrows are coloured green if the model's
+preference exceeds the frequency prediction and gold if it falls below;
+the arrow connects the two points and the annotated value is the
+preference deviation. Values near zero indicate that the model's
+preference matches what training data predicts; positive values indicate
+stronger preference for the alphabetical order than training predicts.}
 
 \end{figure}%
 
@@ -519,12 +555,13 @@ results suggest that there is an effect of relative frequency on
 ordering preferences across all six models, which is consistent with
 models' ordering preferences being at least partly driven by the
 distributional statistics of their training data. Interestingly, all
-models except the C4 1.3B parameter model show an effect of AbsPref (CIs
-for the other 5 models are \textgreater89\%). More specifically, the
-effect of AbsPref shows a graded pattern across model sizes, with the
-125M parameter models showing a clear positive effect with the two
-smaller models for both datasets showing a qualitatively (and in the
-case of the C4 1.3B model, quantitatively) weaker effect.
+models except the C4 1.3B parameter model show an effect of AbsPref
+(More than 89\% of posterior samples are greater than zero for the other
+5 models). More specifically, the effect of AbsPref shows a graded
+pattern across model sizes, with the 125M parameter models showing a
+clear positive effect with the two smaller models for both datasets
+showing a qualitatively (and in the case of the C4 1.3B model,
+quantitatively) weaker effect.
 
 \subparagraph{Preference Deviation}\label{preference-deviation}
 
@@ -551,11 +588,11 @@ were greater than zero), while the two larger C4 models show little
 evidence of an effect.
 
 Taken together, the preference deviation results suggest that while
-models' ordering preferences are broadly consistent with what their
-training data, the smaller models' preferences are also driven by
-abstract preferences. These results suggest that smaller models may be
-more sensitive to abstract ordering preferences even when controlling
-for frequency.
+models' ordering preferences are broadly consistent with their training
+data, the smaller models' preferences are also driven by abstract
+preferences. These results suggest that smaller models may be more
+sensitive to abstract ordering preferences even when controlling for
+frequency.
 
 \begin{figure}
 
@@ -589,7 +626,9 @@ frequency (for full results, see Table~\ref{tbl-absgap-ln}, Appendix).
 Deviation}\label{preference-and-preference-deviation}
 
 AbsPref trajectories across training checkpoints are shown in
-Figure~\ref{fig-absp-traj}. Both the smallest and largest babyLM model
+Figure~\ref{fig-absp-traj} (For a visualization of the other coefficient
+estimates as a function of training, see Appendix section
+Section~\ref{sec-traj-all}). Both the smallest and largest babyLM model
 seem to show an effect of abstract preference which emerges mid-training
 and remains throughout. Similarly, the smallest C4 model also shows an
 effect of abstract preference that remains throughout training.
@@ -601,7 +640,19 @@ shows no evidence of an effect of abstract preference. However, the
 U-shaped curve is present for the 1.3B C4 model for preference deviation
 as well. The lack of a U-shaped curve for the BabyLMs suggest that
 training data diversity may also play a role in the learning of abstract
-preferences.
+preferences. The coefficient values for the other variables (See
+Appendix Section Section~\ref{sec-traj-all}) were not particularly
+surprising: the effect of relative frequency rises throughout training,
+and for most models that effect is stronger for high-frequency binomials
+than low-frequency binomials (an effect that emerges throughout
+training). The only notable exception is the 1.3B parameter model of
+babyLM, where the effect of relative frequency is stronger for
+high-frequency binomials in the mid-point of training, but this effect
+is reduced throughout training, likely due to slight overfitting of the
+model. Notably, there is no interaction effect between AbsPref and
+overall frequency, suggesting that models are not relying more on
+abstract preferences for low-frequency binomials compared to
+high-frequency binomials.
 
 \begin{figure}
 
@@ -697,7 +748,7 @@ and above what relative frequency alone would predict. Larger models, by
 contrast, show weaker or absent AbsPref effects at the final checkpoint,
 though the trajectory results suggest that these models do show some
 sensitivity to AbsPref earlier in training, with the effect weakening as
-training progresses. This effect is more clear in the C4 models,
+training progresses. This trend is more clear in the C4 models,
 suggesting that data diversity may play a role in this. These results
 may reflect a tendency for larger models to gradually shift toward
 relying on distributional frequency as they accumulate more training
@@ -721,7 +772,6 @@ dynamics rather than an architectural limitation.
 
 \bibliography{references,r-references}
 \bibliographystyle{colm2026_conference}
-
 \clearpage
 \appendix
 
@@ -939,6 +989,84 @@ log-transforming the outcome, which spreads out the distribution and
 makes fit easier to assess. In both cases the dark line shows the
 observed outcome density and light lines show 100 replicated datasets
 drawn from the posterior predictive distribution.}
+
+\end{figure}%
+
+\FloatBarrier
+\clearpage
+
+\section{Coefficient Trajectories Across Training}\label{sec-traj-all}
+
+Each figure below follows the same format as Figure~\ref{fig-absp-traj}.
+Point fill encodes P(\(\beta\) \textgreater{} 0); gold indicates
+P(\(\beta\) \textgreater{} 0) \(<\) 0.5 (evidence against a positive
+effect) and green indicates P(\(\beta\) \textgreater{} 0) \(>\) 0.5
+(evidence for a positive effect).
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-relfreq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-relfreq}RelFreq coefficient trajectory across
+training checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-abspref-1.pdf}
+
+}
+
+\caption{\label{fig-traj-abspref}AbsPref coefficient trajectory across
+training checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-overallfreq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-overallfreq}Overall frequency coefficient
+trajectory across training checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-relfreq-x-freq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-relfreq-x-freq}RelFreq \(\times\) Overall
+frequency interaction coefficient trajectory across training
+checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-abspref-x-freq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-abspref-x-freq}AbsPref \(\times\) Overall
+frequency interaction coefficient trajectory across training
+checkpoints.}
 
 \end{figure}%
 
