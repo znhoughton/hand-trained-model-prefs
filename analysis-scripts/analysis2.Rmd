@@ -12,29 +12,22 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
 
 ## Overview
 
-**Before running this script**, make sure `prepare_data.py` has been run to
-generate `training_attested.csv`, `human_responses_attested.csv`, and
-`attested_agg.csv` in `../Data/processed/`.
+**Before running this script**, make sure `prepare_data.py` has been run to generate `training_attested.csv`, `human_responses_attested.csv`, and `attested_agg.csv` in `../Data/processed/`.
 
-After the fitting section finishes, run `prepare_results.R` to extract
-coefficients into CSVs for use in `writeup.qmd`.
+After the fitting section finishes, run `prepare_results.R` to extract coefficients into CSVs for use in `writeup.qmd`.
 
----
+------------------------------------------------------------------------
 
-**Analysis 2a — Human ordering preference ~ model preference**
+**Analysis 2a — Human ordering preference \~ model preference**
 
-For each model × checkpoint, a Bernoulli logistic regression tests whether the
-model's preference score for a binomial predicts whether a human participant
-chose the alphabetical ordering:
+For each model × checkpoint, a Bernoulli logistic regression tests whether the model's preference score for a binomial predicts whether a human participant chose the alphabetical ordering:
 
 $$\text{resp\_binary} \sim \text{preference} + (1 \mid \text{binom}), \quad
 \text{family} = \text{Bernoulli}$$
 
-**Analysis 2b — Model preference ~ individual constraints**
+**Analysis 2b — Model preference \~ individual constraints**
 
-For each model × checkpoint, the single `AbsPref` predictor from the main
-analysis is replaced by all ten individual phonological/semantic constraints
-simultaneously:
+For each model × checkpoint, the single `AbsPref` predictor from the main analysis is replaced by all ten individual phonological/semantic constraints simultaneously:
 
 $$\text{preference} \sim (\text{Form} + \text{Percept} + \cdots + \text{BStress})
 \times \ln(\text{OverallFreq}) + \text{RelFreq} \times \ln(\text{OverallFreq})
@@ -42,11 +35,9 @@ $$\text{preference} \sim (\text{Form} + \text{Percept} + \cdots + \text{BStress}
 
 **Analysis 2c — Prediction accuracy by overall frequency**
 
-No model fitting required. Accuracy (model preference sign matches human
-majority sign) is computed from `attested_agg.csv` for each model × checkpoint
-× frequency quintile.
+No model fitting required. Accuracy (model preference sign matches human majority sign) is computed from `attested_agg.csv` for each model × checkpoint × frequency quintile.
 
----
+------------------------------------------------------------------------
 
 ```{r libraries}
 library(tidyverse)
@@ -171,7 +162,7 @@ load_traj_coefs <- function(prefix, term_levels, term_labels) {
     ck_tokens  <- if (nrow(row) == 1) row$tokens else NA_real_
     fit        <- readRDS(path)
     result     <- extract_coefs(fit, slug, term_levels, term_labels) |>
-      mutate(tokens = ck_tokens)
+      mutate(tokens = ck_tokens, ck_idx = ck_idx)
     rm(fit); gc()
     result
   })
@@ -179,8 +170,15 @@ load_traj_coefs <- function(prefix, term_levels, term_labels) {
 ```
 
 ```{r traj-meta}
-# Recover token counts for x-axes (mirrors prepare_results.R logic)
-if (file.exists(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"))) {
+# Recover token counts for x-axes.
+# Prefer the pre-computed traj_meta.csv from prepare_results.R (fast);
+# fall back to querying DuckDB directly only if that CSV doesn't exist.
+traj_meta_csv <- file.path(DATA_DIR, "results", "traj_meta.csv")
+if (file.exists(traj_meta_csv)) {
+  TRAJ_META <- read_csv(traj_meta_csv, show_col_types = FALSE)
+  message(sprintf("Loaded traj_meta.csv (%d rows)", nrow(TRAJ_META)))
+} else if (file.exists(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"))) {
+  message("traj_meta.csv not found — querying DuckDB (slow)...")
   library(duckdb)
   CSV_FWD <- gsub("\\\\", "/",
     normalizePath(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv")))
@@ -199,11 +197,11 @@ if (file.exists(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"))) {
   dbDisconnect(con, shutdown = TRUE)
 } else {
   TRAJ_META <- NULL
-  warning("checkpoint_results_with_exposures.csv not found — trajectory x-axis will be NA")
+  warning("Neither traj_meta.csv nor checkpoint_results_with_exposures.csv found — x-axis will be NA")
 }
 ```
 
----
+------------------------------------------------------------------------
 
 # Results
 
@@ -289,7 +287,71 @@ if (exists("agg_sampled")) {
 }
 ```
 
----
+------------------------------------------------------------------------
+
+## Correlation between model preference and relative frequency over training
+
+```{r plot-cor-relfreq-traj, fig.height=5}
+if (exists("agg_sampled")) {
+  cor_traj_freq <- agg_sampled |>
+    group_by(corpus, model_size, tokens) |>
+    summarise(r = cor(preference, RelFreq, use = "complete.obs"),
+              .groups = "drop")
+
+  ggplot(cor_traj_freq, aes(x = tokens / 1e6, y = r, colour = model_size)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Pearson r (model pref ~ relative freq)", limits = c(-1, 1)) +
+    facet_wrap(~ corpus) +
+    labs(title = "Correlation of model preference with relative frequency over training") +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title      = element_text(face = "bold", size = 14),
+          strip.text      = element_text(face = "bold", size = 13),
+          axis.text       = element_text(colour = "black", size = 11),
+          axis.title      = element_text(colour = "black", size = 13),
+          legend.position = "bottom")
+} else {
+  message("Run the 2c chunk first to load agg_sampled.")
+}
+```
+
+```{r plot-cor-relfreq-by-freq, fig.height=7}
+if (exists("agg_sampled")) {
+  cor_relfreq_by_freq <- agg_sampled |>
+    group_by(corpus, model_size, tokens, freq_quintile) |>
+    summarise(r = cor(preference, RelFreq, use = "complete.obs"),
+              .groups = "drop")
+
+  ggplot(cor_relfreq_by_freq, aes(x = freq_quintile, y = r,
+                                   colour = tokens / 1e6, group = tokens)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_line(linewidth = 0.6, alpha = 0.8) +
+    geom_point(size = 1.8) +
+    scale_colour_gradient(low = "#c7e9b4", high = "#154733",
+                          name = "Training tokens\n(millions)") +
+    scale_y_continuous("Pearson r (model pref ~ relative freq)", limits = c(-1, 1)) +
+    scale_x_discrete("Overall frequency quintile") +
+    facet_grid(corpus ~ model_size) +
+    labs(title = "Correlation of model preference with relative frequency by overall frequency quintile") +
+    theme_bw(base_size = 13) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title   = element_text(face = "bold", size = 14),
+          strip.text   = element_text(face = "bold", size = 13),
+          axis.text.x  = element_text(size = 10),
+          axis.text.y  = element_text(colour = "black", size = 11),
+          axis.title   = element_text(colour = "black", size = 13),
+          legend.text  = element_text(size = 11),
+          legend.title = element_text(size = 12))
+} else {
+  message("Run the 2c chunk first to load agg_sampled.")
+}
+```
+
+------------------------------------------------------------------------
 
 ## 2a raw data: correlation between model preference and human preference over training
 
@@ -321,7 +383,7 @@ if (exists("agg_sampled")) {
 }
 ```
 
----
+------------------------------------------------------------------------
 
 ## 2b raw data: correlation between model preference and each constraint over training
 
@@ -358,13 +420,51 @@ if (exists("agg_sampled")) {
 }
 ```
 
----
+------------------------------------------------------------------------
+
+## 2b raw data: correlation between preference deviation and each constraint over training
+
+```{r plot-2b-raw-prefdev, fig.height=10}
+if (exists("agg_sampled")) {
+  cor_traj_prefdev <- agg_sampled |>
+    mutate(pref_dev = preference - RelFreq) |>
+    group_by(corpus, model_size, tokens) |>
+    summarise(across(all_of(CONSTRAINT_COLS),
+                     ~ cor(pref_dev, .x, use = "complete.obs")),
+              .groups = "drop") |>
+    pivot_longer(cols = all_of(CONSTRAINT_COLS),
+                 names_to = "constraint", values_to = "r") |>
+    mutate(constraint = factor(constraint, levels = CONSTRAINT_COLS))
+
+  ggplot(cor_traj_prefdev, aes(x = tokens / 1e6, y = r, colour = model_size)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 1.5) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Pearson r (pref deviation ~ constraint)", limits = c(-1, 1)) +
+    facet_grid(constraint ~ corpus) +
+    labs(title = "Raw trajectories: correlation of preference deviation with each constraint",
+         subtitle = "Preference deviation = model preference \u2212 RelFreq") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank(),
+          plot.title      = element_text(face = "bold", size = 12),
+          plot.subtitle   = element_text(size = 10, colour = "grey40"),
+          strip.text.x    = element_text(face = "bold", size = 11),
+          strip.text.y    = element_text(size = 9),
+          axis.text       = element_text(colour = "black", size = 9),
+          axis.title      = element_text(colour = "black", size = 11),
+          legend.position = "bottom")
+} else {
+  message("Run the 2c chunk first to load agg_sampled.")
+}
+```
+
+------------------------------------------------------------------------
 
 # Fitting
 
-Cells below fit models and save `.rds` files. Already-fitted models are
-skipped automatically — re-run at any time to fill in missing checkpoints.
-After fitting, run `prepare_results.R` to extract coefficients into CSVs.
+Cells below fit models and save `.rds` files. Already-fitted models are skipped automatically — re-run at any time to fill in missing checkpoints. After fitting, run `prepare_results.R` to extract coefficients into CSVs.
 
 ```{r load-data}
 message("Loading training data...")
@@ -477,11 +577,11 @@ future_map(MODELS_LIST, function(model_name) {
 message("\n2b fitting done.")
 ```
 
----
+------------------------------------------------------------------------
 
 # Results (brms models)
 
-## 2a: Human preference ~ model preference
+## 2a: Human preference \~ model preference
 
 ```{r load-humfit}
 TERM_LEVELS_HUM <- "preference"
@@ -490,17 +590,20 @@ humfit_coefs <- load_traj_coefs("humfit_traj_", TERM_LEVELS_HUM, TERM_LABELS_HUM
 ```
 
 ```{r plot-humfit-traj, fig.height=9}
-if (nrow(humfit_coefs) > 0 && !all(is.na(humfit_coefs$tokens))) {
+if (nrow(humfit_coefs) > 0) {
+  use_tokens <- !all(is.na(humfit_coefs$tokens))
   df <- humfit_coefs |>
     mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
-           pct_label = sprintf("%.0f%%", p_gt0 * 100)) |>
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e6 else ck_idx) |>
     group_by(corpus, model_size) |>
-    arrange(tokens, .by_group = TRUE) |>
+    arrange(x_val, .by_group = TRUE) |>
     mutate(pt_idx = row_number()) |>
     ungroup()
   df_labels <- filter(df, pt_idx %% 2 == 1)
+  x_label <- if (use_tokens) "Training tokens (millions)" else "Checkpoint index"
 
-  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
+  ggplot(df, aes(x = x_val, y = estimate)) +
     geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
     geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
                    linewidth = 0.7, alpha = 0.7) +
@@ -514,7 +617,7 @@ if (nrow(humfit_coefs) > 0 && !all(is.na(humfit_coefs$tokens))) {
                          midpoint = 0.5, limits = c(0, 1),
                          name = "P(\u03b2 > 0)",
                          labels = scales::percent_format(accuracy = 1)) +
-    scale_x_continuous("Training tokens (millions)") +
+    scale_x_continuous(x_label) +
     scale_y_continuous("Model preference coefficient (95% CI)",
                        expand = expansion(mult = c(0.05, 0.2))) +
     facet_grid(corpus ~ model_size) +
@@ -531,9 +634,9 @@ if (nrow(humfit_coefs) > 0 && !all(is.na(humfit_coefs$tokens))) {
 }
 ```
 
----
+------------------------------------------------------------------------
 
-## 2b: Model preference ~ individual constraints
+## 2b: Model preference \~ individual constraints
 
 ```{r load-constr}
 TERM_LEVELS_CONSTR <- c(
@@ -547,56 +650,66 @@ TERM_LABELS_CONSTR <- c(
 constr_coefs <- load_traj_coefs("constr_traj_", TERM_LEVELS_CONSTR, TERM_LABELS_CONSTR)
 ```
 
-```{r plot-constr-main, fig.height=14}
-# Main effects only — one panel per constraint
-if (nrow(constr_coefs) > 0 && !all(is.na(constr_coefs$tokens))) {
+```{r plot-constr-main, fig.height=10}
+# Main effects only — one plot per model
+if (nrow(constr_coefs) > 0) {
+  use_tokens <- !all(is.na(constr_coefs$tokens))
   constr_main <- constr_coefs |>
     filter(as.character(term) %in% CONSTRAINT_COLS)
 
   df <- constr_main |>
     mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
-           pct_label = sprintf("%.0f%%", p_gt0 * 100)) |>
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e6 else ck_idx) |>
     group_by(corpus, model_size, term) |>
-    arrange(tokens, .by_group = TRUE) |>
+    arrange(x_val, .by_group = TRUE) |>
     mutate(pt_idx = row_number()) |>
     ungroup()
-  df_labels <- filter(df, pt_idx %% 2 == 1)
+  x_label <- if (use_tokens) "Training tokens (millions)" else "Checkpoint index"
 
-  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
-    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
-                   linewidth = 0.7, alpha = 0.7) +
-    geom_point(aes(fill = p_gt0), shape = 21,
-               size = 3.0, colour = "grey25", stroke = 0.35) +
-    geom_text(data = df_labels, aes(label = pct_label, y = hi),
-              size = 2.5, vjust = -0.5, colour = "black") +
-    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
-                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
-    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
-                         midpoint = 0.5, limits = c(0, 1),
-                         name = "P(\u03b2 > 0)",
-                         labels = scales::percent_format(accuracy = 1)) +
-    scale_x_continuous("Training tokens (millions)") +
-    scale_y_continuous("Coefficient (95% CI)",
-                       expand = expansion(mult = c(0.05, 0.2))) +
-    facet_grid(term ~ corpus) +
-    coord_cartesian(clip = "off") +
-    labs(title = "Individual constraint main effects across training") +
-    theme_bw(base_size = 12) +
-    theme(legend.position = "right", panel.grid.minor = element_blank(),
-          plot.title   = element_text(face = "bold", size = 13),
-          axis.text    = element_text(colour = "black", size = 11),
-          axis.title   = element_text(colour = "black", size = 13),
-          strip.text.x = element_text(colour = "black", face = "bold", size = 12),
-          strip.text.y = element_text(colour = "black", size = 10))
+  models_list <- df |> distinct(corpus, model_size) |> arrange(corpus, model_size)
+  for (i in seq_len(nrow(models_list))) {
+    corp <- models_list$corpus[i]
+    msize <- models_list$model_size[i]
+    df_mod <- filter(df, corpus == corp, model_size == msize)
+    df_labels <- filter(df_mod, pt_idx %% 2 == 1)
+    p <- ggplot(df_mod, aes(x = x_val, y = estimate)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                     linewidth = 0.7, alpha = 0.7) +
+      geom_point(aes(fill = p_gt0), shape = 21,
+                 size = 3.0, colour = "grey25", stroke = 0.35) +
+      geom_text(data = df_labels, aes(label = pct_label, y = hi),
+                size = 2.5, vjust = -0.5, colour = "black") +
+      scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                             midpoint = 0.5, limits = c(0, 1), guide = "none") +
+      scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1),
+                           name = "P(\u03b2 > 0)",
+                           labels = scales::percent_format(accuracy = 1)) +
+      scale_x_continuous(x_label) +
+      scale_y_continuous("Coefficient (95% CI)",
+                         expand = expansion(mult = c(0.05, 0.2))) +
+      facet_wrap(~ term, ncol = 3) +
+      coord_cartesian(clip = "off") +
+      labs(title = sprintf("Constraint main effects — %s %s", corp, msize)) +
+      theme_bw(base_size = 12) +
+      theme(legend.position = "right", panel.grid.minor = element_blank(),
+            plot.title   = element_text(face = "bold", size = 13),
+            axis.text    = element_text(colour = "black", size = 11),
+            axis.title   = element_text(colour = "black", size = 13),
+            strip.text   = element_text(colour = "black", face = "bold", size = 11))
+    print(p)
+  }
 } else {
   message("No constr_traj data — fit models first.")
 }
 ```
 
-```{r plot-constr-interactions, fig.height=14}
-# Constraint × OverallFreq interactions
-if (nrow(constr_coefs) > 0 && !all(is.na(constr_coefs$tokens))) {
+```{r plot-constr-interactions, fig.height=10}
+# Constraint × OverallFreq interactions — one plot per model
+if (nrow(constr_coefs) > 0) {
+  use_tokens <- !all(is.na(constr_coefs$tokens))
   interaction_labels <- paste0(CONSTRAINT_COLS, " \u00d7\nOverall freq")
   constr_int <- constr_coefs |>
     filter(as.character(term) %in% interaction_labels) |>
@@ -605,42 +718,49 @@ if (nrow(constr_coefs) > 0 && !all(is.na(constr_coefs$tokens))) {
 
   df <- constr_int |>
     mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
-           pct_label = sprintf("%.0f%%", p_gt0 * 100)) |>
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e6 else ck_idx) |>
     group_by(corpus, model_size, term) |>
-    arrange(tokens, .by_group = TRUE) |>
+    arrange(x_val, .by_group = TRUE) |>
     mutate(pt_idx = row_number()) |>
     ungroup()
-  df_labels <- filter(df, pt_idx %% 2 == 1)
+  x_label <- if (use_tokens) "Training tokens (millions)" else "Checkpoint index"
 
-  ggplot(df, aes(x = tokens / 1e6, y = estimate)) +
-    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
-    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
-                   linewidth = 0.7, alpha = 0.7) +
-    geom_point(aes(fill = p_gt0), shape = 21,
-               size = 3.0, colour = "grey25", stroke = 0.35) +
-    geom_text(data = df_labels, aes(label = pct_label, y = hi),
-              size = 2.5, vjust = -0.5, colour = "black") +
-    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
-                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
-    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
-                         midpoint = 0.5, limits = c(0, 1),
-                         name = "P(\u03b2 > 0)",
-                         labels = scales::percent_format(accuracy = 1)) +
-    scale_x_continuous("Training tokens (millions)") +
-    scale_y_continuous("Coefficient (95% CI)",
-                       expand = expansion(mult = c(0.05, 0.2))) +
-    facet_grid(term ~ corpus) +
-    coord_cartesian(clip = "off") +
-    labs(title = "Constraint \u00d7 Overall frequency interactions across training") +
-    theme_bw(base_size = 12) +
-    theme(legend.position = "right", panel.grid.minor = element_blank(),
-          plot.title   = element_text(face = "bold", size = 13),
-          axis.text    = element_text(colour = "black", size = 11),
-          axis.title   = element_text(colour = "black", size = 13),
-          strip.text.x = element_text(colour = "black", face = "bold", size = 12),
-          strip.text.y = element_text(colour = "black", size = 10))
+  models_list <- df |> distinct(corpus, model_size) |> arrange(corpus, model_size)
+  for (i in seq_len(nrow(models_list))) {
+    corp <- models_list$corpus[i]
+    msize <- models_list$model_size[i]
+    df_mod <- filter(df, corpus == corp, model_size == msize)
+    df_labels <- filter(df_mod, pt_idx %% 2 == 1)
+    p <- ggplot(df_mod, aes(x = x_val, y = estimate)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                     linewidth = 0.7, alpha = 0.7) +
+      geom_point(aes(fill = p_gt0), shape = 21,
+                 size = 3.0, colour = "grey25", stroke = 0.35) +
+      geom_text(data = df_labels, aes(label = pct_label, y = hi),
+                size = 2.5, vjust = -0.5, colour = "black") +
+      scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                             midpoint = 0.5, limits = c(0, 1), guide = "none") +
+      scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1),
+                           name = "P(\u03b2 > 0)",
+                           labels = scales::percent_format(accuracy = 1)) +
+      scale_x_continuous(x_label) +
+      scale_y_continuous("Coefficient (95% CI)",
+                         expand = expansion(mult = c(0.05, 0.2))) +
+      facet_wrap(~ term, ncol = 3) +
+      coord_cartesian(clip = "off") +
+      labs(title = sprintf("Constraint \u00d7 Overall freq interactions — %s %s", corp, msize)) +
+      theme_bw(base_size = 12) +
+      theme(legend.position = "right", panel.grid.minor = element_blank(),
+            plot.title   = element_text(face = "bold", size = 13),
+            axis.text    = element_text(colour = "black", size = 11),
+            axis.title   = element_text(colour = "black", size = 13),
+            strip.text   = element_text(colour = "black", face = "bold", size = 11))
+    print(p)
+  }
 } else {
   message("No constr_traj data — fit models first.")
 }
 ```
-

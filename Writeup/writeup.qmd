@@ -1,5 +1,5 @@
 ---
-title: "Learning to Prefer: The Development of Binomial Ordering Preferences in Language Models"
+title: "Learning to Prefer: The Development of Abstract Binomial Ordering Preferences in Language Models"
 colm-mode: submission  # submission (anonymous + line numbers) | preprint (non-anonymous) | final (camera-ready)
 format:
   colm-pdf:
