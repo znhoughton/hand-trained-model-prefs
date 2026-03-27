@@ -75,7 +75,7 @@ Preferences in Language Models}
 % "Anonymous authors / Paper under double-blind review" automatically.
 \author{
   \textbf{Zachary Houghton} \\
-      Vail Systems, Inc., University of Oregon \\
+      University of Oregon, Vail Systems, Inc. \\
         \texttt{znh@uoregon.edu}
      \And
   \textbf{Qing Yao} \\
@@ -83,12 +83,6 @@ Preferences in Language Models}
        \And
   \textbf{Kanishka Misra} \\
       The University of Texas at Austin \\
-       \And
-  \textbf{Emily Morgan} \\
-      University of California, Davis \\
-       \And
-  \textbf{Kenji Sagae} \\
-      University of California, Davis \\
        \And
   \textbf{Kyle Mahowald} \\
       The University of Texas at Austin \\
@@ -503,19 +497,14 @@ the alphabetical ordering.
 }
 
 \caption{\label{fig-scoring}Illustration of our outcome variables.
-\textbf{(a)} For each binomial, 51 diverse prompt prefixes are prepended
-to both orderings; per-prompt log-probability differences
-(\(\Delta \log P\)) are averaged to yield a single preference score.
-\textbf{(b)} Example preference scores. Positive values indicate
-preference for the alphabetically ordered form; negative values indicate
-preference for the reverse. \textbf{(c)} Preference deviation. Open
-circles show the frequency-based prediction (log relative frequency
-ratio); filled circles and arrows are coloured green if the model's
-preference exceeds the frequency prediction and gold if it falls below;
-the arrow connects the two points and the annotated value is the
-preference deviation. Values near zero indicate that the model's
-preference matches what training data predicts; positive values indicate
-stronger preference for the alphabetical order than training predicts.}
+\textbf{(a)} Preference scores are computed by averaging per-prompt
+log-probability differences (\(\Delta \log P\)) across 51 prompt
+prefixes. \textbf{(b)} Example preference scores; positive = preference
+for alphabetical ordering. \textbf{(c)} Preference deviation: arrow
+connects the frequency-based prediction (open circle) to the model
+preference (filled circle); green = model exceeds frequency prediction,
+gold = model falls below. The annotated value is the preference
+deviation.}
 
 \end{figure}%
 
@@ -527,15 +516,15 @@ model in R \citep{R-base} using the brms package
 RelFreq with overall frequency, and random intercepts for
 binomial.\footnote{For each statistical analysis, posterior predictive
   checks suggested adequate model fit. These are presented in the
-  appendix, section Section~\ref{sec-ppc}.} AbsPref captures the degree
-to which abstract phonological and semantic constraints favor one
-ordering over the other \citep{morgan2016abstractknowledgedirect};
-RelFreq is the proportion of corpus occurrences in the alphabetically
-ordered form, centered (see Section~\ref{sec-def-relfreq}); and overall
-frequency is the natural log of total occurrences in either ordering,
-logged and centered. The interaction terms allow us to test whether the
-influence of abstract constraints and relative frequency varies with
-overall binomial frequency. All models used uninformative priors.
+  appendix, Section~\ref{sec-ppc}.} AbsPref captures the degree to which
+abstract phonological and semantic constraints favor one ordering over
+the other \citep{morgan2016abstractknowledgedirect}; RelFreq is the
+proportion of corpus occurrences in the alphabetically ordered form,
+centered (see Section~\ref{sec-def-relfreq}); and overall frequency is
+the natural log of total occurrences in either ordering, logged and
+centered. The interaction terms allow us to test whether the influence
+of abstract constraints and relative frequency varies with overall
+binomial frequency. All models used uninformative priors.
 
 \begin{equation}\phantomsection\label{eq-main-model}{
 \begin{aligned}
@@ -550,7 +539,7 @@ overall binomial frequency. All models used uninformative priors.
 
 The results of the Bayesian mixed-effects regression for preference at
 the final checkpoint are visualized in Figure~\ref{fig-final-coefs}
-(top; for full results, see Table~\ref{tbl-pref-final}, Appendix). The
+(left; for full results, see Table~\ref{tbl-pref-final}, Appendix). The
 results suggest that there is an effect of relative frequency on
 ordering preferences across all six models, which is consistent with
 models' ordering preferences being at least partly driven by the
@@ -567,7 +556,7 @@ quantitatively) weaker effect.
 
 The results of the Bayesian mixed-effects regression for preference
 deviation at the final checkpoint are visualized in
-Figure~\ref{fig-final-coefs} (bottom; for full results, see
+Figure~\ref{fig-final-coefs} (right; for full results, see
 Table~\ref{tbl-sg-final}, Appendix). The results for relative frequency
 are quite mixed across model sizes and corpora. Among the BabyLM models,
 the 350M model shows a negative effect of relative frequency, while the
@@ -598,13 +587,13 @@ frequency.
 
 \centering{
 
-\includegraphics[width=0.75\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-final-coefs-1.pdf}
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-final-coefs-1.pdf}
 
 }
 
 \caption{\label{fig-final-coefs}Coefficient estimates at the final
-training checkpoint for preference (top) and preference deviation
-(bottom). Error bars show 95\% credible intervals.}
+training checkpoint for preference (left) and preference deviation
+(right). Error bars show 95\% credible intervals.}
 
 \end{figure}%
 
@@ -626,46 +615,30 @@ frequency (for full results, see Table~\ref{tbl-absgap-ln}, Appendix).
 Deviation}\label{preference-and-preference-deviation}
 
 AbsPref trajectories across training checkpoints are shown in
-Figure~\ref{fig-absp-traj} (For a visualization of the other coefficient
-estimates as a function of training, see Appendix section
-Section~\ref{sec-traj-all}). Both the smallest and largest babyLM model
-seem to show an effect of abstract preference which emerges mid-training
-and remains throughout. Similarly, the smallest C4 model also shows an
-effect of abstract preference that remains throughout training.
-Interestingly, the larger C4 model shows a U-shaped effect: an effect of
-abstract preference emerges early on, but is subsequently reduced by
+Figure~\ref{fig-absp-traj} (for trajectories of other coefficients, see
+Appendix Section~\ref{sec-traj-all}). Both the smallest and largest
+BabyLM models show an effect of abstract preference that emerges
+mid-training and persists. Similarly, the smallest C4 model shows a
+persistent AbsPref effect, while the larger C4 models show a U-shaped
+trajectory: an effect emerges early but is subsequently reduced by
 further training. The effect of abstract preference on preference
-deviation is qualitatively similar, for the BabyLM 1.3B model which
-shows no evidence of an effect of abstract preference. However, the
-U-shaped curve is present for the 1.3B C4 model for preference deviation
-as well. The lack of a U-shaped curve for the BabyLMs suggest that
+deviation is qualitatively similar, with the exception of the BabyLM
+1.3B model, which shows no evidence of an AbsPref effect on deviation.
+The absence of a U-shaped curve for the BabyLM models suggests that
 training data diversity may also play a role in the learning of abstract
-preferences. The coefficient values for the other variables (See
-Appendix Section Section~\ref{sec-traj-all}) were not particularly
-surprising: the effect of relative frequency rises throughout training,
-and for most models that effect is stronger for high-frequency binomials
-than low-frequency binomials (an effect that emerges throughout
-training). The only notable exception is the 1.3B parameter model of
-babyLM, where the effect of relative frequency is stronger for
-high-frequency binomials in the mid-point of training, but this effect
-is reduced throughout training, likely due to slight overfitting of the
-model. Notably, there is no interaction effect between AbsPref and
-overall frequency, suggesting that models are not relying more on
-abstract preferences for low-frequency binomials compared to
-high-frequency binomials.
+preferences.
 
 \begin{figure}
 
 \centering{
 
-\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-absp-traj-1.pdf}
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-absp-traj-1.pdf}
 
 }
 
 \caption{\label{fig-absp-traj}AbsPref coefficient estimates (and 95\%
-CI) at each of 20 sampled training checkpoints for raw preference (top)
-and preference deviation (bottom) models. Point fill encodes P(\(\beta\)
-\textgreater{} 0).}
+CI) at each of 20 sampled training checkpoints for raw preference (left)
+and preference deviation (right) models.}
 
 \end{figure}%
 
@@ -675,24 +648,25 @@ Deviation}\label{mean-absolute-preference-deviation}
 Beyond the direction of preferences, we examined how the overall
 magnitude of preference deviations changes over training. The mean
 absolute preference deviation grows throughout training for all six
-models (Figure~\ref{fig-corpus-tracking}), indicating that models'
+models (Figure~\ref{fig-corpus-tracking}, left), indicating that models'
 preferences deviate increasingly from what relative frequency alone
 would predict. Among the BabyLM models, this growth is most pronounced
 for the 1.3B model and weakest for the 350M model. Among the C4 models,
 all three follow a broadly similar trajectory.
 
 The results of the Bayesian mixed-effects regression for absolute
-preference deviation are visualized in Figure~\ref{fig-absgap-ln-coefs}
-(for full results, see Table~\ref{tbl-absgap-ln}, Appendix). The effect
-of training stage is quite mixed across models. Among the BabyLM models,
-the 125M and 1.3B models show a positive effect, while the 350M model
-shows a negative effect. Among the C4 models, the two smaller models
-show a slightly negative effect while the largest shows a slightly
-positive effect. In general, the effect of checkpoint appears weaker for
-the C4 models than for the BabyLM models, suggesting that training data
-diversity may dampen the growth of preference magnitude \citep[indeed,
-this is expected following evidence of adaptive partial pooling in
-transformer models,][]{kapatsinski2026transformersperformadaptive}.
+preference deviation are visualized in Figure~\ref{fig-corpus-tracking}
+(right; for full results, see Table~\ref{tbl-absgap-ln}, Appendix). The
+effect of training stage is quite mixed across models. Among the BabyLM
+models, the 125M and 1.3B models show a positive effect, while the 350M
+model shows a negative effect. Among the C4 models, the two smaller
+models show a slightly negative effect while the largest shows a
+slightly positive effect. In general, the effect of checkpoint appears
+weaker for the C4 models than for the BabyLM models, suggesting that
+training data diversity may dampen the growth of preference magnitude
+\citep[indeed, this is expected following evidence of adaptive partial
+pooling in transformer
+models,][]{kapatsinski2026transformersperformadaptive}.
 
 The effect of overall frequency is much clearer. All six models show a
 strong positive effect of overall frequency, indicating that the gap
@@ -710,28 +684,62 @@ question is left for future research.
 
 \centering{
 
-\includegraphics[width=0.7\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-corpus-tracking-1.pdf}
+\includegraphics[width=0.95\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-corpus-tracking-1.pdf}
 
 }
 
-\caption{\label{fig-corpus-tracking}Mean absolute preference deviation
-across items at each of 20 sampled training checkpoints. Higher values
-indicate that model preferences deviate more from what relative
-frequency alone would predict.}
+\caption{\label{fig-corpus-tracking}Left: Mean absolute preference
+deviation across items at each of 20 sampled training checkpoints.
+Higher values indicate that model preferences deviate more from what
+relative frequency alone would predict. Right: Coefficient estimates for
+predictors of absolute preference deviation (log-normal likelihood);
+coefficients are on the log scale.}
 
 \end{figure}%
+
+\subsection{Human Judgments}\label{sec-human}
+
+To confirm that the ordering preferences learned by our models bear a
+meaningful relationship to human behavior, we compared model preferences
+to human ordering judgments collected for the same attested binomials.
+Judgments were elicited using a two-alternative forced-choice (2AFC)
+task: on each trial, participants were shown both orderings of a
+binomial pair (e.g., ``bread and butter'' and ``butter and bread'') and
+asked to select whichever felt more natural. Item order and choice
+position (whether the binomial appeared on the left-side or right-side
+of the screen) were randomized. 116 participants were recruited online
+via Prolific.
+
+At the final training checkpoint, model preferences correlated
+positively with mean human preferences across all six models. Among the
+BabyLM models, correlations were \(r = .59\) (125M), \(r = .45\) (350M),
+and \(r = .47\) (1.3B). Among the C4 models, correlations were
+\(r = .68\) (125M), \(r = .55\) (350M), and \(r = .66\) (1.3B). The full
+trajectory of these correlations across training --- broken down by
+overall frequency quintile --- is shown in
+Figure~\ref{fig-human-model-cor} (top). For reference, the same figure
+also shows the correlation between model preferences and relative
+frequency across frequency quintiles (bottom), illustrating the degree
+to which model preferences track corpus statistics. Together, these
+results confirm that model preferences are meaningfully related to human
+ordering judgments, providing a human baseline against which the
+analyses below can be interpreted. For a more detailed exploration of
+the human results, including supplementary statistical analyses, see
+Appendix Section~\ref{sec-human-full}.
 
 \begin{figure}
 
 \centering{
 
-\includegraphics[width=0.6\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-absgap-ln-coefs-1.pdf}
+\includegraphics[width=1\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-human-model-cor-1.pdf}
 
 }
 
-\caption{\label{fig-absgap-ln-coefs}Coefficient estimates for predictors
-of absolute preference deviation (log-normal likelihood). Coefficients
-are on the log scale.}
+\caption{\label{fig-human-model-cor}Pearson correlation of model
+preference with human preference (left) and with relative frequency
+(right), by overall frequency quintile. Lines connect sampled training
+checkpoints and are coloured by training stage (light = early, dark =
+late). Facets are corpus (rows) × model size (columns).}
 
 \end{figure}%
 
@@ -743,32 +751,23 @@ that these preferences are at least partly driven by the distributional
 statistics of the training data. Beyond frequency, however, the picture
 is more nuanced. Smaller models (particularly the 125M models across
 both corpora) show the most consistent evidence of AbsPref effects,
-suggesting that they are sensitive to abstract ordering preferences over
-and above what relative frequency alone would predict. Larger models, by
-contrast, show weaker or absent AbsPref effects at the final checkpoint,
-though the trajectory results suggest that these models do show some
-sensitivity to AbsPref earlier in training, with the effect weakening as
-training progresses. This trend is more clear in the C4 models,
-suggesting that data diversity may play a role in this. These results
-may reflect a tendency for larger models to gradually shift toward
-relying on distributional frequency as they accumulate more training
-experience (and diversity), at the expense of abstract knowledge.
+suggesting sensitivity to abstract ordering preferences over and above
+what relative frequency alone would predict. Larger models show weaker
+or absent AbsPref effects at the final checkpoint, though trajectory
+results indicate sensitivity to AbsPref earlier in training, with the
+effect weakening as training progresses --- a pattern more pronounced in
+the C4 models, implicating data diversity. Smaller models, by contrast,
+appear to maintain abstract preferences throughout training, perhaps
+because they lack sufficient parameters to represent each binomial
+distinctly. Together, these results suggest that the absence of abstract
+preferences found in \citet{houghton2025roleabstractrepresentations} may
+reflect training dynamics rather than an architectural limitation.
 Finally, as training progresses, models' preferences grow more extreme
 in a direction broadly consistent with relative frequency, but the
 absolute gap between model preferences and frequency-based predictions
-also grows, with the size of this gap modulated by both model size and
-overall frequency in a manner reminiscent of frequency-dependent
-preference extremity observed in humans.
-
-Overall, the results demonstrate that both model size and data diversity
-play a role in the learning of abstract preferences, with evidence that
-larger models learn abstract preferences early on, but these diminish
-over further training. On the other hand, smaller models learn the
-preferences and seem to maintain that knowledge, perhaps due to lacking
-the parameters to represent each of the binomials distinctly. These
-results suggest that the lack of abstract preferences found in
-\citet{houghton2025roleabstractrepresentations} may be due to training
-dynamics rather than an architectural limitation.
+also grows --- modulated by model size and overall frequency --- in a
+manner reminiscent of frequency-dependent preference extremity observed
+in humans.
 
 \bibliography{references,r-references}
 \bibliographystyle{colm2026_conference}
@@ -1238,5 +1237,66 @@ credible interval bounds.}
 \end{table}%
 
 \FloatBarrier
+
+or r
+
+\clearpage
+
+\section{Human Judgment Results}\label{sec-human-full}
+
+This appendix reports full results from the human judgment study
+described in Section~\ref{sec-human}. We fit a Bayesian logistic
+regression model using \texttt{brms} \citep{R-brms} predicting
+participants' binary ordering responses (1 = \(\alpha\) ordering
+chosen). The model used weakly informative priors (student\_t(3, 0, 0.1)
+on the intercept; student\_t(3, 0, 0.05) on fixed effects and
+random-effect standard deviations) and was run with 4 chains, 10,000
+warmup iterations, and 10,000 sampling iterations.
+
+The model examined the effects of abstract preference (AbsPref, centered
+at 0) and relative frequency (RelFreq, centered at 0.5), each interacted
+with log overall corpus frequency (OverallFreq, logged and centered).
+Random slopes for all predictors were included by participant; random
+intercepts were included by binomial item. The model equation is:
+
+\[
+\begin{aligned}
+\text{resp} &\sim \text{AbsPref} * \text{OverallFreq} + \text{RelFreq} * \text{OverallFreq} \\
+            &\quad + (\text{AbsPref} * \text{OverallFreq} + \text{RelFreq} * \text{OverallFreq} \mid \text{participant}) \\
+            &\quad + (1 \mid \text{item})
+\end{aligned}
+\]
+
+Full coefficient estimates are shown in Table~\ref{tbl-human-m1}.
+
+\begin{table}[H]
+
+\centering{
+
+\begin{tabular}{lrrrr}
+\toprule
+Term & Estimate & Est.Error & 2.5\% & 97.5\%\\
+\midrule
+Intercept & 0.057 & 0.032 & -0.006 & 0.120\\
+AbsPref & 1.171 & 0.291 & 0.568 & 1.716\\
+RelFreq & 2.995 & 0.212 & 2.584 & 3.415\\
+OverallFreq & 0.033 & 0.029 & -0.021 & 0.091\\
+AbsPref $\times$ OverallFreq & 0.015 & 0.073 & -0.119 & 0.179\\
+\addlinespace
+RelFreq $\times$ OverallFreq & 0.859 & 0.136 & 0.592 & 1.122\\
+\bottomrule
+\end{tabular}
+
+}
+
+\caption{\label{tbl-human-m1}Coefficient estimates for the analysis of
+human 2AFC preferences. AbsPref = abstract preference (centered);
+RelFreq = relative frequency (centered); OverallFreq = corpus frequency,
+logged and centered.}
+
+\end{table}%
+
+The results confirm that human ordering preferences are driven by
+abstract preferences.
 
 \end{document}
