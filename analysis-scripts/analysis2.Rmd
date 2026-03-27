@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
                       out.width = "100%")
 ```
 
-## Overview
+# Overview
 
 **Before running this script**, make sure `prepare_data.py` has been run to generate `training_attested.csv`, `human_responses_attested.csv`, and `attested_agg.csv` in `../Data/processed/`.
 
@@ -39,7 +39,13 @@ No model fitting required. Accuracy (model preference sign matches human majorit
 
 **Analysis 2g — Model preference \~ VIF-filtered individual constraints**
 
-Model selection variant of 2b. `Lapse` and `Percept` are dropped a priori, then a per-corpus VIF analysis (using a plain OLS on item-level data) removes any remaining predictor with VIF \> 5. Because BabyLM and C4 use different binomial sets, VIF is computed once per corpus; the resulting formula is applied to all models within that corpus across 20 checkpoints.
+Model selection variant of 2b. `Lapse` and `Percept` are dropped a priori, then a per-corpus VIF analysis (using a plain OLS on item-level data) removes any remaining predictor with VIF \> 3. Because BabyLM and C4 use different binomial sets, VIF is computed once per corpus; the resulting formula is applied to all models within that corpus across 20 checkpoints.
+
+**Analysis 2h — Preference deviation \~ relative frequency + bigram log-odds**
+
+Analogous to 2f but for preference deviation (signed gap): does bigram positional tendency predict deviation from frequency-predicted ordering above and beyond relative frequency?
+
+$$\text{signed\_gap} \sim \text{freq\_prob\_c} + \text{bigram\_logodds\_c} + (1 \mid \text{binom})$$
 
 ------------------------------------------------------------------------
 
@@ -587,7 +593,7 @@ message("\n2b fitting done.")
 
 ## 2g: VIF-filtered individual constraints trajectory
 
-Model selection variant of 2b: remove `Lapse` and `Percept` a priori, then drop any remaining constraint with a variance inflation factor (VIF) \> 5. Because BabyLM and C4 use different sets of binomials, the VIF analysis is run once per corpus (items are shared across model sizes within each corpus, so repeating it per model is unnecessary). The selected predictors are then used in the same per-checkpoint trajectory formula as 2b.
+Model selection variant of 2b: remove `Lapse` and `Percept` a priori, then drop any remaining constraint with a variance inflation factor (VIF) \> 3. Because BabyLM and C4 use different sets of binomials, the VIF analysis is run once per corpus (items are shared across model sizes within each corpus, so repeating it per model is unnecessary). The selected predictors are then used in the same per-checkpoint trajectory formula as 2b.
 
 ```{r vif-selection}
 library(car)
@@ -926,6 +932,46 @@ if (!has_bigram) {
     }
   }, .options = furrr_options(seed = TRUE))
   message("\n2f fitting done.")
+}
+```
+
+```{r fit-2h}
+# 2h: signed_gap ~ freq_prob_c + bigram_logodds_c + (1 | binom)
+# Analogous to 2f but for preference deviation: does bigram positional tendency
+# predict deviation from frequency-predicted ordering above and beyond RelFreq?
+if (!has_bigram) {
+  message("Skipping 2h — no bigram exposure files found.")
+} else {
+  formula_sg_bigrel <- signed_gap ~ freq_prob_c + bigram_logodds_c + (1 | binom)
+
+  future_map(MODELS_LIST, function(model_name) {
+    slug   <- make_slug(model_name)
+    corpus <- parse_corpus(model_name)
+    mdata  <- filter(train, model == model_name)
+    steps  <- sample_steps(mdata)
+    message(sprintf("\n=== [2h] %s (%d checkpoints) ===", slug, length(steps)))
+
+    for (ck_idx in seq_along(steps)) {
+      s        <- steps[ck_idx]
+      ck       <- sprintf("ck%02d", ck_idx)
+      out_path <- file.path(MODELS_DIR, sprintf("sg_brel_traj_%s_%s.rds", slug, ck))
+      if (file.exists(out_path)) {
+        message(sprintf("  %s %s — exists, skipping", slug, ck)); next
+      }
+      fit_data <- make_bigram_fitdata(filter(mdata, step == s), corpus)
+      if (is.null(fit_data) || nrow(fit_data) < 20) {
+        warning(sprintf("Skipping %s %s — insufficient data", slug, ck)); next
+      }
+      message(sprintf("  %s %s  step=%d  n=%d", slug, ck, s, nrow(fit_data)))
+      fit <- brm(formula = formula_sg_bigrel, data = fit_data,
+                 family = gaussian(), prior = PRIORS_GAUSSIAN,
+                 iter = ITER, warmup = WARMUP, chains = CHAINS, cores = CORES,
+                 backend = "cmdstanr", silent = 2, refresh = 0)
+      saveRDS(fit, out_path); rm(fit); gc()
+      message(sprintf("    Saved: %s", basename(out_path)))
+    }
+  }, .options = furrr_options(seed = TRUE))
+  message("\n2h fitting done.")
 }
 ```
 
@@ -1360,6 +1406,94 @@ if (nrow(pref_brel_coefs) > 0) {
           strip.text  = element_text(colour = "black", face = "bold", size = 11))
 } else {
   message("No pref_brel_traj data — fit models first (fit-2f chunk).")
+}
+```
+
+```{r tbl-pref-brel-traj, results="asis"}
+if (nrow(pref_brel_coefs) > 0) {
+  pref_brel_coefs |>
+    mutate(p_gt0 = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE)) |>
+    select(Corpus = corpus, Size = model_size, Checkpoint = ck_idx,
+           `Tokens` = tokens, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `P(β>0)` = p_gt0) |>
+    arrange(Corpus, Size, Checkpoint, Term) |>
+    mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+    knitr::kable(format = "markdown")
+} else {
+  message("No pref_brel_traj data.")
+}
+```
+
+------------------------------------------------------------------------
+
+## 2h: Preference deviation \~ relative frequency + bigram log-odds
+
+Analogous to 2f but for preference deviation: does bigram positional tendency predict deviation from frequency-predicted ordering above and beyond RelFreq?
+
+$$\text{signed\_gap} \sim \text{freq\_prob\_c} + \text{bigram\_logodds\_c} + (1 \mid \text{binom})$$
+
+```{r load-sg-brel-traj}
+sg_brel_coefs <- load_traj_coefs("sg_brel_traj_", TERM_LEVELS_BREL, TERM_LABELS_BREL)
+```
+
+```{r plot-sg-brel-traj, fig.width=12, fig.height=7}
+if (nrow(sg_brel_coefs) > 0) {
+  use_tokens <- !all(is.na(sg_brel_coefs$tokens))
+  df <- sg_brel_coefs |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e9 else ck_idx) |>
+    group_by(corpus, model_size, term) |>
+    arrange(x_val, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  df_labels <- filter(df, pt_idx %% 4 == 1, pt_idx > 1)
+  x_label <- if (use_tokens) "Training tokens (billions)" else "Checkpoint index"
+
+  ggplot(df, aes(x = x_val, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                   linewidth = 0.7, alpha = 0.7) +
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.0, colour = "grey25", stroke = 0.35) +
+    geom_text(data = df_labels, aes(label = pct_label, y = hi),
+              size = 2.8, vjust = -0.5, colour = "black") +
+    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous(x_label) +
+    scale_y_continuous("Coefficient (95% CI)", expand = expansion(mult = c(0.05, 0.2))) +
+    facet_grid(corpus ~ model_size + term) +
+    coord_cartesian(clip = "off") +
+    labs(title = "Preference deviation ~ RelFreq + BigramLogOdds — per-checkpoint trajectories") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          plot.title  = element_text(face = "bold", size = 13),
+          axis.text   = element_text(colour = "black", size = 11),
+          axis.title  = element_text(colour = "black", size = 13),
+          strip.text  = element_text(colour = "black", face = "bold", size = 11))
+} else {
+  message("No sg_brel_traj data — fit models first (fit-2h chunk).")
+}
+```
+
+```{r tbl-sg-brel-traj, results="asis"}
+if (nrow(sg_brel_coefs) > 0) {
+  sg_brel_coefs |>
+    mutate(p_gt0 = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE)) |>
+    select(Corpus = corpus, Size = model_size, Checkpoint = ck_idx,
+           `Tokens` = tokens, Term = term,
+           Mean = estimate, SD = se, `2.5%` = lo, `97.5%` = hi,
+           `P(β>0)` = p_gt0) |>
+    arrange(Corpus, Size, Checkpoint, Term) |>
+    mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+    knitr::kable(format = "markdown")
+} else {
+  message("No sg_brel_traj data.")
 }
 ```
 
