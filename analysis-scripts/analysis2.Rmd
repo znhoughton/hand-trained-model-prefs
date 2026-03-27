@@ -407,7 +407,8 @@ future_map(MODELS_LIST, function(model_name) {
 
     if (!file.exists(hum_path)) {
       hfit_data <- inner_join(human, select(cdat, binom, preference), by = "binom") |>
-        filter(!is.na(preference))
+        filter(!is.na(preference)) |>
+        mutate(preference = as.numeric(scale(preference)))
       if (nrow(hfit_data) < 20) {
         warning(sprintf("Skipping %s %s — only %d rows", slug, ck, nrow(hfit_data)))
       } else {
