@@ -213,7 +213,7 @@ if (file.exists(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"))) {
 if (file.exists(AGG_CSV)) {
   agg <- read_csv(AGG_CSV, show_col_types = FALSE) |>
     mutate(
-      correct       = (preference > 0) == (hum_pref > 0.5),
+      correct       = (preference > 0.5) == (hum_pref > 0.5),
       corpus        = parse_corpus(model),
       model_size    = factor(parse_size(model), levels = SIZE_LEVELS),
       freq_quintile = cut(log(OverallFreq), breaks = 5,
@@ -340,6 +340,12 @@ train <- read_csv(TRAIN_CSV, show_col_types = FALSE)
 
 message("Loading human responses...")
 human <- read_csv(HUMAN_CSV, show_col_types = FALSE)
+# Fix: old CSV generation produced duplicate 'binom' column headers;
+# readr renames them to binom...1, binom...2 etc. Normalise to just binom + resp_binary.
+if (!"binom" %in% names(human)) {
+  names(human)[1] <- "binom"
+}
+human <- select(human, binom, resp_binary)
 
 MODELS_LIST <- sort(unique(train$model))
 ```

@@ -237,9 +237,8 @@ save_csv(get_training_subset(attested), "training_attested")
 # ── 8. Raw human binary responses for logistic regression (Analysis 2) ───────
 print("Preparing human responses for logistic regression...")
 attested_binoms = set(avg_human_pref.loc[avg_human_pref["Attested"], "binom"])
-human_att = human_data[human_data["Alpha"].isin(attested_binoms)].copy()
+human_att = human_data[human_data["binom"].isin(attested_binoms)].copy()
 human_att["resp_binary"] = (human_att["resp"] == "alpha").astype(int)
-human_att = human_att.rename(columns={"Alpha": "binom"})
 save_csv(human_att[["binom", "resp_binary"]], "human_responses_attested")
 
 print(f"\nAll done. Files written to {out_path.resolve()}")
