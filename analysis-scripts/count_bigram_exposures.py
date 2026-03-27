@@ -124,15 +124,25 @@ _strip = re.compile(r"[^a-z]")
 
 def scan_text(text):
     """
-    For a decoded text block, return two dicts:
-        w_and  : {word_idx: count}  — word appeared immediately BEFORE "and"
-        and_w  : {word_idx: count}  — word appeared immediately AFTER  "and"
+    For a decoded text block, return three dicts:
+        w_and   : {word_idx: count}  — word appeared immediately BEFORE "and"
+        and_w   : {word_idx: count}  — word appeared immediately AFTER  "and"
+        w_total : {word_idx: count}  — word appeared anywhere in the text
     Only words in our target set (word_to_idx) are counted.
+    w_total is needed for the properly-normalised bigram log-odds:
+        log[P(and|W1) * P(W2|and)] - log[P(and|W2) * P(W1|and)]
+      = log(w1_and) + log(and_w2) - log(w2_and) - log(and_w1)
+        + log(W2_total) - log(W1_total)
     """
     words = [_strip.sub("", w) for w in text.lower().split()]
     words = [w for w in words if w]
-    w_and_counts = {}
-    and_w_counts = {}
+    w_and_counts   = {}
+    and_w_counts   = {}
+    w_total_counts = {}
+    for word in words:
+        if word in word_to_idx:
+            idx = word_to_idx[word]
+            w_total_counts[idx] = w_total_counts.get(idx, 0) + 1
     for j in range(len(words) - 2):
         if words[j + 1] != "and":
             continue
@@ -143,7 +153,7 @@ def scan_text(text):
         if right in word_to_idx:
             idx = word_to_idx[right]
             and_w_counts[idx] = and_w_counts.get(idx, 0) + 1
-    return w_and_counts, and_w_counts
+    return w_and_counts, and_w_counts, w_total_counts
 
 
 print(f"\nLoading tokenizer from '{args.babylm_tokenizer}'...")
@@ -157,27 +167,32 @@ def group_texts(examples):
             for k, t in concatenated.items()}
 
 
-def build_output_df(sorted_T, w_and_arr, and_w_arr):
+def build_output_df(sorted_T, w_and_arr, and_w_arr, w_total_arr):
     """
     Convert word-level count arrays into a per-binomial DataFrame.
 
-    w_and_arr : shape (n_ckpts, n_words)
-    and_w_arr : shape (n_ckpts, n_words)
+    w_and_arr   : shape (n_ckpts, n_words)
+    and_w_arr   : shape (n_ckpts, n_words)
+    w_total_arr : shape (n_ckpts, n_words)  — total corpus count of each word
     """
     n_ckpts = len(sorted_T)
-    rows_tokens  = np.repeat(sorted_T, n_binoms)
-    rows_binom   = np.tile(alpha_list, n_ckpts)
-    rows_w1_and  = w_and_arr[:, w1_idx].ravel()
-    rows_and_w1  = and_w_arr[:, w1_idx].ravel()
-    rows_w2_and  = w_and_arr[:, w2_idx].ravel()
-    rows_and_w2  = and_w_arr[:, w2_idx].ravel()
+    rows_tokens   = np.repeat(sorted_T, n_binoms)
+    rows_binom    = np.tile(alpha_list, n_ckpts)
+    rows_w1_and   = w_and_arr[:,   w1_idx].ravel()
+    rows_and_w1   = and_w_arr[:,   w1_idx].ravel()
+    rows_w2_and   = w_and_arr[:,   w2_idx].ravel()
+    rows_and_w2   = and_w_arr[:,   w2_idx].ravel()
+    rows_w1_total = w_total_arr[:, w1_idx].ravel()
+    rows_w2_total = w_total_arr[:, w2_idx].ravel()
     return pd.DataFrame({
-        "tokens":  rows_tokens,
-        "binom":   rows_binom,
-        "w1_and":  rows_w1_and,
-        "and_w1":  rows_and_w1,
-        "w2_and":  rows_w2_and,
-        "and_w2":  rows_and_w2,
+        "tokens":   rows_tokens,
+        "binom":    rows_binom,
+        "w1_and":   rows_w1_and,
+        "and_w1":   rows_and_w1,
+        "w2_and":   rows_w2_and,
+        "and_w2":   rows_and_w2,
+        "w1_total": rows_w1_total,
+        "w2_total": rows_w2_total,
     })
 
 
@@ -200,8 +215,9 @@ print(f"  {N:,} blocks × {BLOCK_SIZE} tokens = {N * BLOCK_SIZE:,} tokens per ep
 
 # Pre-compute per-block bigram counts for all target words.
 print(f"  Scanning {N:,} blocks for bigram counts (may take 5–15 min)...")
-block_w_and = np.zeros((N, n_words), dtype=np.int16)
-block_and_w = np.zeros((N, n_words), dtype=np.int16)
+block_w_and   = np.zeros((N, n_words), dtype=np.int16)
+block_and_w   = np.zeros((N, n_words), dtype=np.int16)
+block_w_total = np.zeros((N, n_words), dtype=np.int32)
 
 SCAN_BATCH = 500
 for batch_start in range(0, N, SCAN_BATCH):
@@ -212,14 +228,17 @@ for batch_start in range(0, N, SCAN_BATCH):
     texts = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
     for local_i, text in enumerate(texts):
         gi = batch_start + local_i
-        wa, aw = scan_text(text)
+        wa, aw, wt = scan_text(text)
         for idx, cnt in wa.items():
             block_w_and[gi, idx] = min(cnt, 32767)
         for idx, cnt in aw.items():
             block_and_w[gi, idx] = min(cnt, 32767)
+        for idx, cnt in wt.items():
+            block_w_total[gi, idx] = min(cnt, 2147483647)
 
-total_w_and_epoch = block_w_and.sum(axis=0).astype(np.float64)
-total_and_w_epoch = block_and_w.sum(axis=0).astype(np.float64)
+total_w_and_epoch   = block_w_and.sum(axis=0).astype(np.float64)
+total_and_w_epoch   = block_and_w.sum(axis=0).astype(np.float64)
+total_w_total_epoch = block_w_total.sum(axis=0).astype(np.float64)
 print(f"  Done. {(total_w_and_epoch > 0).sum()} / {n_words} words found before 'and'; "
       f"{(total_and_w_epoch > 0).sum()} found after 'and'.")
 
@@ -237,12 +256,14 @@ sorted_blm_T = sorted(babylm_steps["tokens"].tolist())
 n_blm_ckpts  = len(sorted_blm_T)
 blm_w_and    = np.zeros((n_blm_ckpts, n_words), dtype=np.float64)
 blm_and_w    = np.zeros((n_blm_ckpts, n_words), dtype=np.float64)
+blm_w_total  = np.zeros((n_blm_ckpts, n_words), dtype=np.float64)
 
-current_epoch       = -1
-epoch_shuffle       = None
-epoch_partial_w_and = np.zeros(n_words, dtype=np.float64)
-epoch_partial_and_w = np.zeros(n_words, dtype=np.float64)
-prev_partial        = 0
+current_epoch         = -1
+epoch_shuffle         = None
+epoch_partial_w_and   = np.zeros(n_words, dtype=np.float64)
+epoch_partial_and_w   = np.zeros(n_words, dtype=np.float64)
+epoch_partial_w_total = np.zeros(n_words, dtype=np.float64)
+prev_partial          = 0
 
 for ci, T in enumerate(sorted_blm_T):
     total_blocks = int(T) // BLOCK_SIZE
@@ -250,8 +271,9 @@ for ci, T in enumerate(sorted_blm_T):
     partial      = total_blocks % N
 
     if full_epochs != current_epoch:
-        epoch_partial_w_and[:] = 0.0
-        epoch_partial_and_w[:] = 0.0
+        epoch_partial_w_and[:]   = 0.0
+        epoch_partial_and_w[:]   = 0.0
+        epoch_partial_w_total[:] = 0.0
         prev_partial  = 0
         current_epoch = full_epochs
         epoch_shuffle = None
@@ -260,14 +282,16 @@ for ci, T in enumerate(sorted_blm_T):
         if epoch_shuffle is None:
             epoch_shuffle = get_epoch_shuffle(current_epoch)
         new_idxs = epoch_shuffle[prev_partial:partial]
-        epoch_partial_w_and += block_w_and[new_idxs].sum(axis=0)
-        epoch_partial_and_w += block_and_w[new_idxs].sum(axis=0)
+        epoch_partial_w_and   += block_w_and[new_idxs].sum(axis=0)
+        epoch_partial_and_w   += block_and_w[new_idxs].sum(axis=0)
+        epoch_partial_w_total += block_w_total[new_idxs].sum(axis=0)
         prev_partial = partial
 
-    blm_w_and[ci] = full_epochs * total_w_and_epoch + epoch_partial_w_and
-    blm_and_w[ci] = full_epochs * total_and_w_epoch + epoch_partial_and_w
+    blm_w_and[ci]   = full_epochs * total_w_and_epoch   + epoch_partial_w_and
+    blm_and_w[ci]   = full_epochs * total_and_w_epoch   + epoch_partial_and_w
+    blm_w_total[ci] = full_epochs * total_w_total_epoch + epoch_partial_w_total
 
-babylm_exp = build_output_df(sorted_blm_T, blm_w_and, blm_and_w)
+babylm_exp = build_output_df(sorted_blm_T, blm_w_and, blm_and_w, blm_w_total)
 babylm_exp.to_csv(OUT_BABYLM, index=False)
 print(f"  Saved {OUT_BABYLM.name}  ({len(babylm_exp):,} rows)")
 
@@ -277,6 +301,7 @@ sorted_c4_T = sorted(c4_steps["tokens"].tolist())
 n_c4_ckpts  = len(sorted_c4_T)
 c4_w_and    = np.zeros((n_c4_ckpts, n_words), dtype=np.float64)
 c4_and_w    = np.zeros((n_c4_ckpts, n_words), dtype=np.float64)
+c4_w_total  = np.zeros((n_c4_ckpts, n_words), dtype=np.float64)
 
 if args.skip_c4:
     print("\n--skip-c4: C4 counts set to 0.")
@@ -296,21 +321,24 @@ else:
     ckpt_blocks = {int(T) // BLOCK_SIZE: ci for ci, T in enumerate(sorted_c4_T)}
     max_block   = max(ckpt_blocks)
 
-    cumulative_w_and = np.zeros(n_words, dtype=np.float64)
-    cumulative_and_w = np.zeros(n_words, dtype=np.float64)
+    cumulative_w_and   = np.zeros(n_words, dtype=np.float64)
+    cumulative_and_w   = np.zeros(n_words, dtype=np.float64)
+    cumulative_w_total = np.zeros(n_words, dtype=np.float64)
     block_count = 0
 
     for block in c4_lm:
         block_count += 1
         text = tokenizer.decode(block["input_ids"], skip_special_tokens=True)
-        wa, aw = scan_text(text)
-        for idx, cnt in wa.items(): cumulative_w_and[idx] += cnt
-        for idx, cnt in aw.items(): cumulative_and_w[idx] += cnt
+        wa, aw, wt = scan_text(text)
+        for idx, cnt in wa.items(): cumulative_w_and[idx]   += cnt
+        for idx, cnt in aw.items(): cumulative_and_w[idx]   += cnt
+        for idx, cnt in wt.items(): cumulative_w_total[idx] += cnt
 
         if block_count in ckpt_blocks:
             ci = ckpt_blocks[block_count]
-            c4_w_and[ci] = cumulative_w_and.copy()
-            c4_and_w[ci] = cumulative_and_w.copy()
+            c4_w_and[ci]   = cumulative_w_and.copy()
+            c4_and_w[ci]   = cumulative_and_w.copy()
+            c4_w_total[ci] = cumulative_w_total.copy()
 
         if block_count % 500_000 == 0:
             print(f"  {block_count:,} blocks | "
@@ -324,7 +352,7 @@ else:
     print(f"  {(cumulative_w_and > 0).sum()} / {n_words} words found before 'and'; "
           f"{(cumulative_and_w > 0).sum()} found after 'and'.")
 
-c4_exp = build_output_df(sorted_c4_T, c4_w_and, c4_and_w)
+c4_exp = build_output_df(sorted_c4_T, c4_w_and, c4_and_w, c4_w_total)
 c4_exp.to_csv(OUT_C4, index=False)
 print(f"  Saved {OUT_C4.name}  ({len(c4_exp):,} rows)")
 
@@ -333,10 +361,11 @@ print(f"  Saved {OUT_C4.name}  ({len(c4_exp):,} rows)")
 print("\n=== Sanity check: top 5 binomials by w1_and at final checkpoint ===")
 for label, exp_df in [("BabyLM", babylm_exp), ("C4", c4_exp)]:
     final = exp_df[exp_df["tokens"] == exp_df["tokens"].max()]
-    top   = final.nlargest(5, "w1_and")[["binom", "w1_and", "and_w1", "w2_and", "and_w2"]]
+    top   = final.nlargest(5, "w1_and")[["binom", "w1_and", "and_w1", "w2_and", "and_w2", "w1_total", "w2_total"]]
     print(f"\n{label}:")
     print(top.to_string(index=False))
 
 print("\nAll done.")
 print("Next: update analysis2.Rmd to join babylm_bigram_exposures.csv / c4_bigram_exposures.csv")
-print("      and compute bigram_logodds = log(w1_and * and_w2) - log(w2_and * and_w1).")
+print("      and compute bigram_logodds = log(w1_and) + log(and_w2) - log(w2_and) - log(and_w1)")
+print("                                  + log(w2_total) - log(w1_total)")
