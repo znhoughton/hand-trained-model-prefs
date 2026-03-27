@@ -37,6 +37,10 @@ $$\text{preference} \sim (\text{Form} + \text{Percept} + \cdots + \text{BStress}
 
 No model fitting required. Accuracy (model preference sign matches human majority sign) is computed from `attested_agg.csv` for each model × checkpoint × frequency quintile.
 
+**Analysis 2g — Model preference \~ VIF-filtered individual constraints**
+
+Model selection variant of 2b. `Lapse` and `Percept` are dropped a priori, then a per-corpus VIF analysis (using a plain OLS on item-level data) removes any remaining predictor with VIF \> 5. Because BabyLM and C4 use different binomial sets, VIF is computed once per corpus; the resulting formula is applied to all models within that corpus across 20 checkpoints.
+
 ------------------------------------------------------------------------
 
 ```{r libraries}
@@ -581,6 +585,135 @@ message("\n2b fitting done.")
 
 ------------------------------------------------------------------------
 
+## 2g: VIF-filtered individual constraints trajectory
+
+Model selection variant of 2b: remove `Lapse` and `Percept` a priori, then drop any remaining constraint with a variance inflation factor (VIF) \> 5. Because BabyLM and C4 use different sets of binomials, the VIF analysis is run once per corpus (items are shared across model sizes within each corpus, so repeating it per model is unnecessary). The selected predictors are then used in the same per-checkpoint trajectory formula as 2b.
+
+```{r vif-selection}
+library(car)
+
+CONSTRAINT_COLS_REDUCED <- setdiff(CONSTRAINT_COLS, c("Lapse", "Percept"))
+
+# For each corpus, pick the latest checkpoint of the first (alphabetically)
+# model in that corpus. Constraints are item-level and don't vary by checkpoint,
+# so any snapshot gives the same VIF.
+vif_data_for_corpus <- function(corpus_label) {
+  corpus_models <- MODELS_LIST[parse_corpus(MODELS_LIST) == corpus_label]
+  if (length(corpus_models) == 0) return(NULL)
+  m   <- sort(corpus_models)[1]
+  dat <- filter(train, model == m) |>
+    group_by(binom) |>
+    slice_max(step, n = 1) |>
+    ungroup() |>
+    mutate(freq_prob_c = RelFreq - 0.5) |>
+    select(preference, freq_prob_c, all_of(CONSTRAINT_COLS_REDUCED)) |>
+    filter(complete.cases(across(everything())))
+  dat
+}
+
+compute_vif <- function(dat) {
+  pred_cols <- c(CONSTRAINT_COLS_REDUCED, "freq_prob_c")
+  fml <- as.formula(paste("preference ~", paste(pred_cols, collapse = " + ")))
+  vif(lm(fml, data = dat))
+}
+
+vif_blm <- tryCatch(compute_vif(vif_data_for_corpus("BabyLM")), error = function(e) NULL)
+vif_c4  <- tryCatch(compute_vif(vif_data_for_corpus("C4")),     error = function(e) NULL)
+
+select_predictors <- function(vif_vals) {
+  if (is.null(vif_vals)) return(CONSTRAINT_COLS_REDUCED)
+  names(vif_vals)[vif_vals <= 3]
+}
+
+VIF_SELECTED_BLM <- select_predictors(vif_blm)
+VIF_SELECTED_C4  <- select_predictors(vif_c4)
+
+# Separate into constraint predictors and freq_prob_c (always kept)
+vif_constr_blm <- setdiff(VIF_SELECTED_BLM, "freq_prob_c")
+vif_constr_c4  <- setdiff(VIF_SELECTED_C4,  "freq_prob_c")
+
+message("=== VIF selection results ===")
+message(sprintf("BabyLM — dropped (VIF > 3): %s",
+  paste(setdiff(CONSTRAINT_COLS_REDUCED, vif_constr_blm), collapse = ", ") |>
+    (\(x) if (nchar(x) == 0) "(none)" else x)()))
+message(sprintf("BabyLM — retained: %s", paste(vif_constr_blm, collapse = ", ")))
+message(sprintf("C4 — dropped (VIF > 3): %s",
+  paste(setdiff(CONSTRAINT_COLS_REDUCED, vif_constr_c4), collapse = ", ") |>
+    (\(x) if (nchar(x) == 0) "(none)" else x)()))
+message(sprintf("C4 — retained: %s", paste(vif_constr_c4, collapse = ", ")))
+```
+
+```{r vif-table, results="asis"}
+# Print VIF tables for both corpora
+vif_tbl <- function(vif_vals, corpus_label) {
+  if (is.null(vif_vals)) { message(sprintf("No VIF data for %s", corpus_label)); return() }
+  df <- data.frame(
+    Predictor = names(vif_vals),
+    VIF       = round(vif_vals, 2),
+    Retained  = ifelse(vif_vals <= 5, "Yes", "No (VIF > 3)"),
+    row.names = NULL
+  )
+  cat(sprintf("\n**%s corpus VIF**\n\n", corpus_label))
+  print(knitr::kable(df, format = "markdown"))
+}
+vif_tbl(vif_blm, "BabyLM")
+vif_tbl(vif_c4,  "C4")
+```
+
+```{r fit-2g}
+# Build per-corpus formulas using VIF-selected constraint predictors
+make_vif_formula <- function(constr_cols) {
+  terms <- paste(constr_cols, collapse = " + ")
+  as.formula(sprintf(
+    "preference ~ (%s) * log_total_c + freq_prob_c * log_total_c + (1 | binom)",
+    terms
+  ))
+}
+
+formula_2g_blm <- make_vif_formula(vif_constr_blm)
+formula_2g_c4  <- make_vif_formula(vif_constr_c4)
+
+future_map(MODELS_LIST, function(model_name) {
+  slug   <- make_slug(model_name)
+  corpus <- parse_corpus(model_name)
+  mdata  <- filter(train, model == model_name)
+  steps  <- sample_steps(mdata)
+  formula_2g <- if (corpus == "BabyLM") formula_2g_blm else formula_2g_c4
+  vif_constr <- if (corpus == "BabyLM") vif_constr_blm  else vif_constr_c4
+  message(sprintf("\n=== [2g] %s (%d checkpoints) ===", slug, length(steps)))
+
+  for (ck_idx in seq_along(steps)) {
+    s        <- steps[ck_idx]
+    ck       <- sprintf("ck%02d", ck_idx)
+    out_path <- file.path(MODELS_DIR, sprintf("constr_vif_traj_%s_%s.rds", slug, ck))
+    if (file.exists(out_path)) {
+      message(sprintf("  %s %s — exists, skipping", slug, ck)); next
+    }
+    con_data <- filter(mdata, step == s) |>
+      mutate(freq_prob_c = RelFreq - 0.5,
+             log_total_c = as.numeric(scale(OverallFreq_log))) |>
+      filter(!is.na(preference), !if_any(all_of(vif_constr), is.na))
+    if (nrow(con_data) < 20) {
+      warning(sprintf("Skipping %s %s — insufficient data (%d rows)", slug, ck, nrow(con_data))); next
+    }
+    message(sprintf("  %s %s  step=%d  n=%d", slug, ck, s, nrow(con_data)))
+    fit <- brm(
+      formula = formula_2g,
+      data    = con_data,
+      family  = gaussian(),
+      prior   = PRIORS_GAUSSIAN,
+      iter    = ITER, warmup = WARMUP, chains = CHAINS, cores = CORES,
+      backend = "cmdstanr", silent = 2, refresh = 0
+    )
+    saveRDS(fit, out_path); rm(fit); gc()
+    message(sprintf("    Saved: %s", basename(out_path)))
+  }
+}, .options = furrr_options(seed = TRUE))
+message("\n2g fitting done.")
+```
+
+------------------------------------------------------------------------
+
 ## 2d/2e: Trajectory models + bigram log-odds
 
 Replicates the per-checkpoint trajectory analyses for **preference** (Analysis 2d, mirroring Analysis 5 in the main script) and **preference deviation / signed gap** (Analysis 2e, mirroring Analysis 2 in the main script), adding corpus-specific bigram log-odds as an additional predictor.
@@ -756,6 +889,46 @@ if (!has_bigram) {
 }
 ```
 
+```{r fit-2f}
+# 2f: preference ~ freq_prob_c + bigram_logodds_c + (1 | binom)
+# Does bigram positional tendency predict model preference above and beyond
+# relative frequency, with no interactions?
+if (!has_bigram) {
+  message("Skipping 2f — no bigram exposure files found.")
+} else {
+  formula_pref_bigrel <- preference ~ freq_prob_c + bigram_logodds_c + (1 | binom)
+
+  future_map(MODELS_LIST, function(model_name) {
+    slug   <- make_slug(model_name)
+    corpus <- parse_corpus(model_name)
+    mdata  <- filter(train, model == model_name)
+    steps  <- sample_steps(mdata)
+    message(sprintf("\n=== [2f] %s (%d checkpoints) ===", slug, length(steps)))
+
+    for (ck_idx in seq_along(steps)) {
+      s        <- steps[ck_idx]
+      ck       <- sprintf("ck%02d", ck_idx)
+      out_path <- file.path(MODELS_DIR, sprintf("pref_brel_traj_%s_%s.rds", slug, ck))
+      if (file.exists(out_path)) {
+        message(sprintf("  %s %s — exists, skipping", slug, ck)); next
+      }
+      fit_data <- make_bigram_fitdata(filter(mdata, step == s), corpus)
+      if (is.null(fit_data) || nrow(fit_data) < 20) {
+        warning(sprintf("Skipping %s %s — insufficient data", slug, ck)); next
+      }
+      message(sprintf("  %s %s  step=%d  n=%d", slug, ck, s, nrow(fit_data)))
+      fit <- brm(formula = formula_pref_bigrel, data = fit_data,
+                 family = gaussian(), prior = PRIORS_GAUSSIAN,
+                 iter = ITER, warmup = WARMUP, chains = CHAINS, cores = CORES,
+                 backend = "cmdstanr", silent = 2, refresh = 0)
+      saveRDS(fit, out_path); rm(fit); gc()
+      message(sprintf("    Saved: %s", basename(out_path)))
+    }
+  }, .options = furrr_options(seed = TRUE))
+  message("\n2f fitting done.")
+}
+```
+
 ------------------------------------------------------------------------
 
 # Results (brms models)
@@ -887,6 +1060,141 @@ if (nrow(constr_coefs) > 0) {
 
 ------------------------------------------------------------------------
 
+## 2g: VIF-filtered constraints trajectory
+
+```{r load-constr-vif}
+# Build term level vectors from the VIF-selected predictors.
+# Use the union across both corpora so load_traj_coefs can handle both.
+vif_constr_union <- union(vif_constr_blm, vif_constr_c4)
+
+TERM_LEVELS_VIF <- c(
+  vif_constr_union, "log_total_c", "freq_prob_c",
+  paste0(vif_constr_union, ":log_total_c"), "freq_prob_c:log_total_c"
+)
+TERM_LABELS_VIF <- c(
+  vif_constr_union, "Overall freq\n(ln total)", "RelFreq\n(P(\u03b1)\u22120.5)",
+  paste0(vif_constr_union, " \u00d7\nOverall freq"), "RelFreq \u00d7\nOverall freq"
+)
+constr_vif_coefs <- load_traj_coefs("constr_vif_traj_", TERM_LEVELS_VIF, TERM_LABELS_VIF)
+```
+
+```{r plot-constr-vif-main, fig.height=10}
+# Main effects only — one plot per model
+if (nrow(constr_vif_coefs) > 0) {
+  use_tokens  <- !all(is.na(constr_vif_coefs$tokens))
+  vif_main    <- constr_vif_coefs |>
+    filter(as.character(term) %in% vif_constr_union)
+
+  df <- vif_main |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e6 else ck_idx) |>
+    group_by(corpus, model_size, term) |>
+    arrange(x_val, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  x_label <- if (use_tokens) "Training tokens (millions)" else "Checkpoint index"
+
+  models_list <- df |> distinct(corpus, model_size) |> arrange(corpus, model_size)
+  for (i in seq_len(nrow(models_list))) {
+    corp  <- models_list$corpus[i]
+    msize <- models_list$model_size[i]
+    df_mod    <- filter(df, corpus == corp, model_size == msize)
+    df_labels <- filter(df_mod, pt_idx %% 2 == 1)
+    p <- ggplot(df_mod, aes(x = x_val, y = estimate)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                     linewidth = 0.7, alpha = 0.7) +
+      geom_point(aes(fill = p_gt0), shape = 21,
+                 size = 3.0, colour = "grey25", stroke = 0.35) +
+      geom_text(data = df_labels, aes(label = pct_label, y = hi),
+                size = 2.5, vjust = -0.5, colour = "black") +
+      scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                             midpoint = 0.5, limits = c(0, 1), guide = "none") +
+      scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1),
+                           name = "P(\u03b2 > 0)",
+                           labels = scales::percent_format(accuracy = 1)) +
+      scale_x_continuous(x_label) +
+      scale_y_continuous("Coefficient (95% CI)",
+                         expand = expansion(mult = c(0.05, 0.2))) +
+      facet_wrap(~ term, ncol = 3) +
+      coord_cartesian(clip = "off") +
+      labs(title = sprintf("VIF-filtered constraint main effects — %s %s", corp, msize)) +
+      theme_bw(base_size = 12) +
+      theme(legend.position = "right", panel.grid.minor = element_blank(),
+            plot.title   = element_text(face = "bold", size = 13),
+            axis.text    = element_text(colour = "black", size = 11),
+            axis.title   = element_text(colour = "black", size = 13),
+            strip.text   = element_text(colour = "black", face = "bold", size = 11))
+    print(p)
+  }
+} else {
+  message("No constr_vif_traj data — fit models first (fit-2g chunk).")
+}
+```
+
+```{r plot-constr-vif-interactions, fig.height=10}
+# Interaction terms — one plot per model
+if (nrow(constr_vif_coefs) > 0) {
+  use_tokens        <- !all(is.na(constr_vif_coefs$tokens))
+  interaction_labels <- paste0(vif_constr_union, " \u00d7\nOverall freq")
+  constr_vif_int <- constr_vif_coefs |>
+    filter(as.character(term) %in% interaction_labels) |>
+    mutate(term = gsub(" \u00d7\nOverall freq", "", as.character(term)),
+           term = factor(term, levels = vif_constr_union))
+
+  df <- constr_vif_int |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e6 else ck_idx) |>
+    group_by(corpus, model_size, term) |>
+    arrange(x_val, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  x_label <- if (use_tokens) "Training tokens (millions)" else "Checkpoint index"
+
+  models_list <- df |> distinct(corpus, model_size) |> arrange(corpus, model_size)
+  for (i in seq_len(nrow(models_list))) {
+    corp  <- models_list$corpus[i]
+    msize <- models_list$model_size[i]
+    df_mod    <- filter(df, corpus == corp, model_size == msize)
+    df_labels <- filter(df_mod, pt_idx %% 2 == 1)
+    p <- ggplot(df_mod, aes(x = x_val, y = estimate)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                     linewidth = 0.7, alpha = 0.7) +
+      geom_point(aes(fill = p_gt0), shape = 21,
+                 size = 3.0, colour = "grey25", stroke = 0.35) +
+      geom_text(data = df_labels, aes(label = pct_label, y = hi),
+                size = 2.5, vjust = -0.5, colour = "black") +
+      scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                             midpoint = 0.5, limits = c(0, 1), guide = "none") +
+      scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1),
+                           name = "P(\u03b2 > 0)",
+                           labels = scales::percent_format(accuracy = 1)) +
+      scale_x_continuous(x_label) +
+      scale_y_continuous("Coefficient (95% CI)",
+                         expand = expansion(mult = c(0.05, 0.2))) +
+      facet_wrap(~ term, ncol = 3) +
+      coord_cartesian(clip = "off") +
+      labs(title = sprintf("VIF-filtered constraint \u00d7 Overall freq — %s %s", corp, msize)) +
+      theme_bw(base_size = 12) +
+      theme(legend.position = "right", panel.grid.minor = element_blank(),
+            plot.title   = element_text(face = "bold", size = 13),
+            axis.text    = element_text(colour = "black", size = 11),
+            axis.title   = element_text(colour = "black", size = 13),
+            strip.text   = element_text(colour = "black", face = "bold", size = 11))
+    print(p)
+  }
+} else {
+  message("No constr_vif_traj data — fit models first (fit-2g chunk).")
+}
+```
+
+------------------------------------------------------------------------
+
 ## 2d: Preference + bigram log-odds trajectory
 
 ```{r load-pref-btraj}
@@ -996,6 +1304,66 @@ if (nrow(sg_btraj_coefs) > 0) {
   message("No sg_btraj data — fit models first (fit-2e chunk).")
 }
 ```
+
+------------------------------------------------------------------------
+
+## 2f: Model preference \~ relative frequency + bigram log-odds
+
+Simple (no frequency-interaction) model asking whether bigram positional tendency predicts model preference above and beyond relative frequency.
+
+$$\text{preference} \sim \text{freq\_prob\_c} + \text{bigram\_logodds\_c} + (1 \mid \text{binom})$$
+
+```{r load-pref-brel-traj}
+TERM_LEVELS_BREL <- c("freq_prob_c", "bigram_logodds_c")
+TERM_LABELS_BREL <- c("RelFreq", "BigramLogOdds")
+pref_brel_coefs <- load_traj_coefs("pref_brel_traj_", TERM_LEVELS_BREL, TERM_LABELS_BREL)
+```
+
+```{r plot-pref-brel-traj, fig.width=12, fig.height=7}
+if (nrow(pref_brel_coefs) > 0) {
+  use_tokens <- !all(is.na(pref_brel_coefs$tokens))
+  df <- pref_brel_coefs |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e9 else ck_idx) |>
+    group_by(corpus, model_size, term) |>
+    arrange(x_val, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  df_labels <- filter(df, pt_idx %% 4 == 1, pt_idx > 1)
+  x_label <- if (use_tokens) "Training tokens (billions)" else "Checkpoint index"
+
+  ggplot(df, aes(x = x_val, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                   linewidth = 0.7, alpha = 0.7) +
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.0, colour = "grey25", stroke = 0.35) +
+    geom_text(data = df_labels, aes(label = pct_label, y = hi),
+              size = 2.8, vjust = -0.5, colour = "black") +
+    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous(x_label) +
+    scale_y_continuous("Coefficient (95% CI)", expand = expansion(mult = c(0.05, 0.2))) +
+    facet_grid(corpus ~ model_size + term) +
+    coord_cartesian(clip = "off") +
+    labs(title = "Model preference ~ RelFreq + BigramLogOdds — per-checkpoint trajectories") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          plot.title  = element_text(face = "bold", size = 13),
+          axis.text   = element_text(colour = "black", size = 11),
+          axis.title  = element_text(colour = "black", size = 13),
+          strip.text  = element_text(colour = "black", face = "bold", size = 11))
+} else {
+  message("No pref_brel_traj data — fit models first (fit-2f chunk).")
+}
+```
+
+------------------------------------------------------------------------
 
 ```{r plot-constr-interactions, fig.height=10}
 

@@ -706,9 +706,9 @@ if (!is.null(p_traj) && !is.null(p_coef)) {
 
 ## Human Judgments {#sec-human}
 
-To confirm that the ordering preferences learned by our models bear a meaningful relationship to human behavior, we compared model preferences to human ordering judgments collected for the same attested binomials. Judgments were elicited using a two-alternative forced-choice (2AFC) task: on each trial, participants were shown both orderings of a binomial pair (e.g., "bread and butter" and "butter and bread") and asked to select whichever felt more natural. Item order and choice position (whether the binomial appeared on the left-side or right-side of the screen) were randomized. 116 participants were recruited online via Prolific. 
+To confirm that the ordering preferences learned by our models bear a meaningful relationship to human behavior, we compared model preferences to human ordering preferences collected for the same set of binomials. Judgments were elicited using a two-alternative forced-choice (2AFC) task: on each trial, participants were shown both orderings of a binomial pair (e.g., "bread and butter" and "butter and bread") and asked to select whichever felt more natural. Item order and choice position (ordering of the binomial on the screen) were randomized. 116 participants were recruited online via Prolific. 
 
-At the final training checkpoint, model preferences correlated positively with mean human preferences across all six models. Among the BabyLM models, correlations were $r = .59$ (125M), $r = .45$ (350M), and $r = .47$ (1.3B). Among the C4 models, correlations were $r = .68$ (125M), $r = .55$ (350M), and $r = .66$ (1.3B). The full trajectory of these correlations across training — broken down by overall frequency quintile — is shown in @fig-human-model-cor (top). For reference, the same figure also shows the correlation between model preferences and relative frequency across frequency quintiles (bottom), illustrating the degree to which model preferences track corpus statistics. Together, these results confirm that model preferences are meaningfully related to human ordering judgments, providing a human baseline against which the analyses below can be interpreted. For a more detailed exploration of the human results, including supplementary statistical analyses, see Appendix @sec-human-full.
+At the final training checkpoint, model preferences are correlated positively with human preferences across all six models. Among the BabyLM models, correlations were $r = .59$ (125M), $r = .45$ (350M), and $r = .47$ (1.3B). Among the C4 models, correlations were $r = .68$ (125M), $r = .55$ (350M), and $r = .66$ (1.3B). The full trajectory of these correlations across training is shown in @fig-human-model-cor (top). For reference, the same figure also shows the correlation between model preferences and relative frequency (bottom). Together, these results confirm that model preferences are meaningfully similar to human ordering preferences, providing a human baseline. For a more detailed exploration of the human results see Appendix @sec-human-full.
 
 ```{r human-cor-setup, include=FALSE}
 # Helper functions (mirrors analysis2.Rmd)
@@ -793,7 +793,7 @@ if (!is.null(hc_data) && nrow(hc_data) > 0) {
 
 # Discussion and Conclusion
 
-The results of the present study suggest that the models trained here do develop binomial ordering preferences over the course of training, and that these preferences are at least partly driven by the distributional statistics of the training data. Beyond frequency, however, the picture is more nuanced. Smaller models (particularly the 125M models across both corpora) show the most consistent evidence of AbsPref effects, suggesting sensitivity to abstract ordering preferences over and above what relative frequency alone would predict. Larger models show weaker or absent AbsPref effects at the final checkpoint, though trajectory results indicate sensitivity to AbsPref earlier in training, with the effect weakening as training progresses — a pattern more pronounced in the C4 models, implicating data diversity. Smaller models, by contrast, appear to maintain abstract preferences throughout training, perhaps because they lack sufficient parameters to represent each binomial distinctly. Together, these results suggest that the absence of abstract preferences found in @houghton2025roleabstractrepresentations may reflect training dynamics rather than an architectural limitation. Finally, as training progresses, models' preferences grow more extreme in a direction broadly consistent with relative frequency, but the absolute gap between model preferences and frequency-based predictions also grows — modulated by model size and overall frequency — in a manner reminiscent of frequency-dependent preference extremity observed in humans.
+The results of the present study suggest that the models trained here do develop binomial ordering preferences over the course of training, and that these preferences are at least partly driven by the distributional statistics of the training data. Beyond frequency, however, the picture is more nuanced. Smaller models (particularly the 125M models across both corpora) show the most consistent evidence of AbsPref effects, suggesting sensitivity to abstract ordering preferences over and above what relative frequency alone would predict. Larger models show weaker or absent AbsPref effects at the final checkpoint, though trajectory results indicate sensitivity to AbsPref earlier in training, with the effect weakening as training progresses — a pattern more pronounced in the C4 models, perhaps due to data diversity. Smaller models, by contrast, appear to maintain abstract preferences throughout training, perhaps because they lack sufficient parameters to represent each binomial distinctly. Together, these results suggest that the absence of abstract preferences found in @houghton2025roleabstractrepresentations may reflect training dynamics rather than an architectural limitation. Finally, as training progresses, models' preferences grow more extreme in a direction broadly consistent with relative frequency, but the absolute gap between model preferences and frequency-based predictions also grows in a manner reminiscent of frequency-dependent preference extremity observed in humans.
 
 \bibliography{references,r-references}
 \bibliographystyle{colm2026_conference}
@@ -1045,6 +1045,72 @@ local({
 \FloatBarrier
 \clearpage
 
+# Posterior Coefficient Tables
+
+## Preference: Final Checkpoint
+
+```{r tbl-app-pref-final, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-pref-final
+#| tbl-pos: "H"
+#| tbl-cap: "Coefficient estimates for preference at the final checkpoint. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
+if (nrow(pref_coefs_final) > 0) {
+  pref_coefs_final |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "-", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
+           `$P(\\beta > 0)$` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
+}
+```
+
+\clearpage
+
+## Preference Deviation: Final Checkpoint
+
+```{r tbl-app-sg-final, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-sg-final
+#| tbl-pos: "H"
+#| tbl-cap: "Coefficient estimates for preference deviation at the final checkpoint."
+if (nrow(sg_coefs_final) > 0) {
+  sg_coefs_final |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "-", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
+           `$P(\\beta > 0)$` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
+}
+```
+
+\clearpage
+
+## Absolute Preference Deviation (Log-Normal)
+
+```{r tbl-app-absgap-ln, echo=FALSE, message=FALSE, warning=FALSE}
+#| label: tbl-absgap-ln
+#| tbl-pos: "H"
+#| tbl-cap: "Coefficient estimates for absolute preference deviation (log-normal likelihood). Coefficients are on the log scale. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
+if (nrow(absgap_ln_coefs) > 0) {
+  absgap_ln_coefs |>
+    mutate(term = gsub("\n", " ", as.character(term)),
+           term = gsub("\u2212", "-", term),
+           term = gsub("\u00d7", "$\\\\times$", term)) |>
+    select(Corpus = corpus, Size = model_size, Term = term,
+           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
+           `$P(\\beta > 0)$` = p_gt0) |>
+    arrange(Corpus, Size, Term) |>
+    kable(digits = 3, escape = FALSE, booktabs = TRUE)
+}
+```
+
+\FloatBarrier
+\clearpage
+
 # Coefficient Trajectories Across Training {#sec-traj-all}
 
 Each figure below follows the same format as @fig-absp-traj. Point fill encodes P($\beta$ \> 0); gold indicates P($\beta$ \> 0) $<$ 0.5 (evidence against a positive effect) and green indicates P($\beta$ \> 0) $>$ 0.5 (evidence for a positive effect).
@@ -1127,73 +1193,7 @@ plot_layout(guides = "collect")
 \FloatBarrier
 \clearpage
 
-# Posterior Coefficient Tables
-
-## Preference: Final Checkpoint
-
-```{r tbl-app-pref-final, echo=FALSE, message=FALSE, warning=FALSE}
-#| label: tbl-pref-final
-#| tbl-pos: "H"
-#| tbl-cap: "Coefficient estimates for preference at the final checkpoint. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
-if (nrow(pref_coefs_final) > 0) {
-  pref_coefs_final |>
-    mutate(term = gsub("\n", " ", as.character(term)),
-           term = gsub("\u2212", "-", term),
-           term = gsub("\u00d7", "$\\\\times$", term)) |>
-    select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
-           `$P(\\beta > 0)$` = p_gt0) |>
-    arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE, booktabs = TRUE)
-}
-```
-
-\clearpage
-
-## Preference Deviation: Final Checkpoint
-
-```{r tbl-app-sg-final, echo=FALSE, message=FALSE, warning=FALSE}
-#| label: tbl-sg-final
-#| tbl-pos: "H"
-#| tbl-cap: "Coefficient estimates for preference deviation at the final checkpoint."
-if (nrow(sg_coefs_final) > 0) {
-  sg_coefs_final |>
-    mutate(term = gsub("\n", " ", as.character(term)),
-           term = gsub("\u2212", "-", term),
-           term = gsub("\u00d7", "$\\\\times$", term)) |>
-    select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
-           `$P(\\beta > 0)$` = p_gt0) |>
-    arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE, booktabs = TRUE)
-}
-```
-
-\clearpage
-
-## Absolute Preference Deviation (Log-Normal)
-
-```{r tbl-app-absgap-ln, echo=FALSE, message=FALSE, warning=FALSE}
-#| label: tbl-absgap-ln
-#| tbl-pos: "H"
-#| tbl-cap: "Coefficient estimates for absolute preference deviation (log-normal likelihood). Coefficients are on the log scale. Mean = posterior mean; SD = posterior SD; 2.5%/97.5% = 95% credible interval bounds."
-if (nrow(absgap_ln_coefs) > 0) {
-  absgap_ln_coefs |>
-    mutate(term = gsub("\n", " ", as.character(term)),
-           term = gsub("\u2212", "-", term),
-           term = gsub("\u00d7", "$\\\\times$", term)) |>
-    select(Corpus = corpus, Size = model_size, Term = term,
-           Mean = estimate, SD = se, `2.5\\%` = lo, `97.5\\%` = hi,
-           `$P(\\beta > 0)$` = p_gt0) |>
-    arrange(Corpus, Size, Term) |>
-    kable(digits = 3, escape = FALSE, booktabs = TRUE)
-}
-```
-
-\FloatBarrier
-
 <!-- # Relative Frequency Correlation Trajectory {#sec-cor-traj} -->
-or r
 ```{r fig-cor-traj, echo=FALSE, message=FALSE, warning=FALSE, fig.width=6.5, fig.height=3, eval = FALSE}
 #| label: fig-cor-traj
 #| fig-cap: "Pearson correlation between model preference and log relative frequency ratio at each of 20 sampled training checkpoints. Values near 1 indicate near-perfect frequency tracking. The correlation increases steadily throughout training for all six models, confirming that models become progressively better at predicting corpus-attested orderings even as the absolute preference deviation grows."
@@ -1222,6 +1222,77 @@ if (nrow(sg_gap_summary) > 0 && !all(is.na(sg_gap_summary$tokens))) {
 \clearpage
 
 # Human Judgment Results {#sec-human-full}
+
+## Model Preference as a Predictor of Human Choice
+
+To test whether model ordering preferences predict human ordering behavior, we fit a Bayesian logistic regression at each of 20 evenly-spaced training checkpoints predicting participants' binary ordering responses (1 = alphabetical ordering chosen) from the model's preference score for that binomial, with a random intercept for binomial item:
+
+$$\text{resp\_binary} \sim \text{preference} + (1 \mid \text{item}), \quad \text{family} = \text{Bernoulli}$$
+
+Models used weakly informative priors (student_t(3, 0, 2.5) on the intercept; student_t(3, 0, 1) on fixed effects and random-effect standard deviations) and were run with 4 chains, 2,000 warmup iterations, and 2,000 sampling iterations. @fig-humfit-traj shows the trajectory of the model preference coefficient across training checkpoints. A positive coefficient indicates that, at that checkpoint, binomials for which the model more strongly prefers the alphabetical ordering are also more likely to be chosen in the alphabetical ordering by human participants.
+
+```{r humfit-traj-setup, include=FALSE}
+humfit_traj_coefs <- local({
+  path <- file.path(RESULTS_DIR, "humfit_traj_coefs.csv")
+  if (!file.exists(path)) {
+    warning("humfit_traj_coefs.csv not found — run prepare_results.R after fitting 2a models")
+    return(tibble())
+  }
+  read_csv(path, show_col_types = FALSE) |>
+    mutate(model_size = factor(model_size, levels = SIZE_LEVELS))
+})
+```
+
+```{r fig-humfit-traj, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=5}
+#| label: fig-humfit-traj
+#| fig-pos: "H"
+#| out-width: "100%"
+#| fig-cap: "Trajectory of the model preference coefficient ($\\beta_{\\text{preference}}$) in a logistic regression predicting human binary ordering choice from model preference score, fit separately at each of 20 training checkpoints. Each point is the posterior mean; error bars are 95% credible intervals. Point fill encodes P($\\beta$ > 0): gold indicates evidence against a positive effect and green indicates evidence for a positive effect. Percentage labels show P($\\beta$ > 0) at selected checkpoints."
+if (nrow(humfit_traj_coefs) > 0) {
+  use_tokens <- !all(is.na(humfit_traj_coefs$tokens))
+  df <- humfit_traj_coefs |>
+    mutate(p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+           pct_label = sprintf("%.0f%%", p_gt0 * 100),
+           x_val     = if (use_tokens) tokens / 1e9 else ck_idx) |>
+    group_by(corpus, model_size) |>
+    arrange(x_val, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+  df_labels <- filter(df, pt_idx %% 4 == 1, pt_idx > 1)
+  x_label <- if (use_tokens) "Training tokens (billions)" else "Checkpoint index"
+
+  ggplot(df, aes(x = x_val, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_linerange(aes(ymin = lo, ymax = hi, colour = p_gt0),
+                   linewidth = 0.7, alpha = 0.7) +
+    geom_point(aes(fill = p_gt0), shape = 21,
+               size = 3.2, colour = "grey25", stroke = 0.35) +
+    geom_text(data = df_labels, aes(label = pct_label, y = hi),
+              size = 2.8, vjust = -0.5, colour = "black") +
+    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous(x_label) +
+    scale_y_continuous("Model preference coefficient (95% CI)",
+                       expand = expansion(mult = c(0.05, 0.2))) +
+    facet_grid(corpus ~ model_size) +
+    coord_cartesian(clip = "off") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          axis.text   = element_text(colour = "black", size = 11),
+          axis.title  = element_text(colour = "black", size = 13),
+          strip.text  = element_text(colour = "black", face = "bold", size = 11))
+} else {
+  message("humfit_traj_coefs.csv not found — run prepare_results.R after fitting 2a models.")
+}
+```
+
+\FloatBarrier
+
+## Human Preference: Constraints and Frequency
 
 This appendix reports full results from the human judgment study described in @sec-human. We fit a Bayesian logistic regression model using `brms` [@R-brms] predicting participants' binary ordering responses (1 = $\alpha$ ordering chosen). The model used weakly informative priors (student_t(3, 0, 0.1) on the intercept; student_t(3, 0, 0.05) on fixed effects and random-effect standard deviations) and was run with 4 chains, 10,000 warmup iterations, and 10,000 sampling iterations.
 
@@ -1272,5 +1343,3 @@ if (!is.null(human_m1)) {
   message("human_data_model_results.rds not found.")
 }
 ```
-
-The results confirm that human ordering preferences are driven by abstract preferences.

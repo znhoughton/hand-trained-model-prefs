@@ -479,14 +479,14 @@ strongly than would be expected by the the model's training data, while
 there is little difference between the expected preference and model's
 preference for the binomial \emph{authority and force}. Interestingly,
 Figure~\ref{fig-scoring} demonstrates that there can be quite large
-difference between the training data and the model's preference. As a
-case in point, while the expected preference of \emph{heir and son} and
-\emph{crannies and nooks} is quite similar, the model learns a rather
-extreme preference for the non-alphabetical ordering of \emph{crannies
-and nooks}, but has very little preference for \emph{heir and son} in
-either ordering (despite \emph{heir and son} occurring more than 300
-times more in the nonalphabetical ordering (\emph{son and heir}) than in
-the alphabetical ordering.
+differences between the training statistics and the model's preference.
+As a case in point, while the expected preference of \emph{heir and son}
+and \emph{crannies and nooks} is quite similar, the model learns a
+rather extreme preference for the non-alphabetical ordering of
+\emph{crannies and nooks}, but has very little preference for \emph{heir
+and son} in either ordering (despite \emph{heir and son} occurring more
+than 300 times more in the nonalphabetical ordering (\emph{son and
+heir}) than in the alphabetical ordering.
 
 \begin{figure}[htbp]
 
@@ -701,31 +701,26 @@ coefficients are on the log scale.}
 
 To confirm that the ordering preferences learned by our models bear a
 meaningful relationship to human behavior, we compared model preferences
-to human ordering judgments collected for the same attested binomials.
+to human ordering preferences collected for the same set of binomials.
 Judgments were elicited using a two-alternative forced-choice (2AFC)
 task: on each trial, participants were shown both orderings of a
 binomial pair (e.g., ``bread and butter'' and ``butter and bread'') and
 asked to select whichever felt more natural. Item order and choice
-position (whether the binomial appeared on the left-side or right-side
-of the screen) were randomized. 116 participants were recruited online
-via Prolific.
+position (ordering of the binomial on the screen) were randomized. 116
+participants were recruited online via Prolific.
 
-At the final training checkpoint, model preferences correlated
-positively with mean human preferences across all six models. Among the
+At the final training checkpoint, model preferences are correlated
+positively with human preferences across all six models. Among the
 BabyLM models, correlations were \(r = .59\) (125M), \(r = .45\) (350M),
 and \(r = .47\) (1.3B). Among the C4 models, correlations were
 \(r = .68\) (125M), \(r = .55\) (350M), and \(r = .66\) (1.3B). The full
-trajectory of these correlations across training --- broken down by
-overall frequency quintile --- is shown in
+trajectory of these correlations across training is shown in
 Figure~\ref{fig-human-model-cor} (top). For reference, the same figure
 also shows the correlation between model preferences and relative
-frequency across frequency quintiles (bottom), illustrating the degree
-to which model preferences track corpus statistics. Together, these
-results confirm that model preferences are meaningfully related to human
-ordering judgments, providing a human baseline against which the
-analyses below can be interpreted. For a more detailed exploration of
-the human results, including supplementary statistical analyses, see
-Appendix Section~\ref{sec-human-full}.
+frequency (bottom). Together, these results confirm that model
+preferences are meaningfully similar to human ordering preferences,
+providing a human baseline. For a more detailed exploration of the human
+results see Appendix Section~\ref{sec-human-full}.
 
 \begin{figure}
 
@@ -756,18 +751,18 @@ what relative frequency alone would predict. Larger models show weaker
 or absent AbsPref effects at the final checkpoint, though trajectory
 results indicate sensitivity to AbsPref earlier in training, with the
 effect weakening as training progresses --- a pattern more pronounced in
-the C4 models, implicating data diversity. Smaller models, by contrast,
-appear to maintain abstract preferences throughout training, perhaps
-because they lack sufficient parameters to represent each binomial
-distinctly. Together, these results suggest that the absence of abstract
-preferences found in \citet{houghton2025roleabstractrepresentations} may
-reflect training dynamics rather than an architectural limitation.
-Finally, as training progresses, models' preferences grow more extreme
-in a direction broadly consistent with relative frequency, but the
-absolute gap between model preferences and frequency-based predictions
-also grows --- modulated by model size and overall frequency --- in a
-manner reminiscent of frequency-dependent preference extremity observed
-in humans.
+the C4 models, perhaps due to data diversity. Smaller models, by
+contrast, appear to maintain abstract preferences throughout training,
+perhaps because they lack sufficient parameters to represent each
+binomial distinctly. Together, these results suggest that the absence of
+abstract preferences found in
+\citet{houghton2025roleabstractrepresentations} may reflect training
+dynamics rather than an architectural limitation. Finally, as training
+progresses, models' preferences grow more extreme in a direction broadly
+consistent with relative frequency, but the absolute gap between model
+preferences and frequency-based predictions also grows --- modulated by
+model size and overall frequency --- in a manner reminiscent of
+frequency-dependent preference extremity observed in humans.
 
 \bibliography{references,r-references}
 \bibliographystyle{colm2026_conference}
@@ -994,84 +989,6 @@ drawn from the posterior predictive distribution.}
 \FloatBarrier
 \clearpage
 
-\section{Coefficient Trajectories Across Training}\label{sec-traj-all}
-
-Each figure below follows the same format as Figure~\ref{fig-absp-traj}.
-Point fill encodes P(\(\beta\) \textgreater{} 0); gold indicates
-P(\(\beta\) \textgreater{} 0) \(<\) 0.5 (evidence against a positive
-effect) and green indicates P(\(\beta\) \textgreater{} 0) \(>\) 0.5
-(evidence for a positive effect).
-
-\begin{figure}[H]
-
-\centering{
-
-\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-relfreq-1.pdf}
-
-}
-
-\caption{\label{fig-traj-relfreq}RelFreq coefficient trajectory across
-training checkpoints.}
-
-\end{figure}%
-
-\begin{figure}[H]
-
-\centering{
-
-\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-abspref-1.pdf}
-
-}
-
-\caption{\label{fig-traj-abspref}AbsPref coefficient trajectory across
-training checkpoints.}
-
-\end{figure}%
-
-\begin{figure}[H]
-
-\centering{
-
-\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-overallfreq-1.pdf}
-
-}
-
-\caption{\label{fig-traj-overallfreq}Overall frequency coefficient
-trajectory across training checkpoints.}
-
-\end{figure}%
-
-\begin{figure}[H]
-
-\centering{
-
-\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-relfreq-x-freq-1.pdf}
-
-}
-
-\caption{\label{fig-traj-relfreq-x-freq}RelFreq \(\times\) Overall
-frequency interaction coefficient trajectory across training
-checkpoints.}
-
-\end{figure}%
-
-\begin{figure}[H]
-
-\centering{
-
-\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-abspref-x-freq-1.pdf}
-
-}
-
-\caption{\label{fig-traj-abspref-x-freq}AbsPref \(\times\) Overall
-frequency interaction coefficient trajectory across training
-checkpoints.}
-
-\end{figure}%
-
-\FloatBarrier
-\clearpage
-
 \section{Posterior Coefficient
 Tables}\label{posterior-coefficient-tables}
 
@@ -1237,12 +1154,116 @@ credible interval bounds.}
 \end{table}%
 
 \FloatBarrier
+\clearpage
 
-or r
+\section{Coefficient Trajectories Across Training}\label{sec-traj-all}
+
+Each figure below follows the same format as Figure~\ref{fig-absp-traj}.
+Point fill encodes P(\(\beta\) \textgreater{} 0); gold indicates
+P(\(\beta\) \textgreater{} 0) \(<\) 0.5 (evidence against a positive
+effect) and green indicates P(\(\beta\) \textgreater{} 0) \(>\) 0.5
+(evidence for a positive effect).
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-relfreq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-relfreq}RelFreq coefficient trajectory across
+training checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-abspref-1.pdf}
+
+}
+
+\caption{\label{fig-traj-abspref}AbsPref coefficient trajectory across
+training checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-overallfreq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-overallfreq}Overall frequency coefficient
+trajectory across training checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-relfreq-x-freq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-relfreq-x-freq}RelFreq \(\times\) Overall
+frequency interaction coefficient trajectory across training
+checkpoints.}
+
+\end{figure}%
+
+\begin{figure}[H]
+
+\centering{
+
+\includegraphics[width=0.85\linewidth,height=\textheight,keepaspectratio]{writeup_files/figure-pdf/fig-traj-abspref-x-freq-1.pdf}
+
+}
+
+\caption{\label{fig-traj-abspref-x-freq}AbsPref \(\times\) Overall
+frequency interaction coefficient trajectory across training
+checkpoints.}
+
+\end{figure}%
+
+\FloatBarrier
+\clearpage
 
 \clearpage
 
 \section{Human Judgment Results}\label{sec-human-full}
+
+\subsection{Model Preference as a Predictor of Human
+Choice}\label{model-preference-as-a-predictor-of-human-choice}
+
+To test whether model ordering preferences predict human ordering
+behavior, we fit a Bayesian logistic regression at each of 20
+evenly-spaced training checkpoints predicting participants' binary
+ordering responses (1 = alphabetical ordering chosen) from the model's
+preference score for that binomial, with a random intercept for binomial
+item:
+
+\[\text{resp\_binary} \sim \text{preference} + (1 \mid \text{item}), \quad \text{family} = \text{Bernoulli}\]
+
+Models used weakly informative priors (student\_t(3, 0, 2.5) on the
+intercept; student\_t(3, 0, 1) on fixed effects and random-effect
+standard deviations) and were run with 4 chains, 2,000 warmup
+iterations, and 2,000 sampling iterations. \textbf{?@fig-humfit-traj}
+shows the trajectory of the model preference coefficient across training
+checkpoints. A positive coefficient indicates that, at that checkpoint,
+binomials for which the model more strongly prefers the alphabetical
+ordering are also more likely to be chosen in the alphabetical ordering
+by human participants.
+
+\FloatBarrier
+
+\subsection{Human Preference: Constraints and
+Frequency}\label{human-preference-constraints-and-frequency}
 
 This appendix reports full results from the human judgment study
 described in Section~\ref{sec-human}. We fit a Bayesian logistic
@@ -1295,8 +1316,5 @@ RelFreq = relative frequency (centered); OverallFreq = corpus frequency,
 logged and centered.}
 
 \end{table}%
-
-The results confirm that human ordering preferences are driven by
-abstract preferences.
 
 \end{document}
