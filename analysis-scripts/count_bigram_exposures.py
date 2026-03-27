@@ -5,26 +5,28 @@ Mirrors count_corpus_exposures.py to extract MARGINAL bigram counts at each
 training checkpoint, rather than full "W1 and W2" trigram counts.
 
 For each attested binomial ("W1 and W2"), we count:
-    w1_and  — times W1 appeared immediately before "and" (in any "W1 and X" context)
-    and_w1  — times W1 appeared immediately after  "and" (in any "X and W1" context)
-    w2_and  — times W2 appeared immediately before "and"
-    and_w2  — times W2 appeared immediately after  "and"
-
-These marginal counts are what compute_bigram_logodds.py needs:
-    bigram_logodds = log(w1_and * and_w2) - log(w2_and * and_w1)
-
-This is different from binomial_corpus_counts.csv (which has counts of the
-specific "W1 and W2" / "W2 and W1" forms). A word like "bread" appears before
-"and" in many contexts ("bread and butter", "bread and circuses", ...), and
-the marginal total is what the positional bigram predictor captures.
+    w1_and   — times W1 appeared immediately before "and" (in any "W1 and X" context)
+    and_w1   — times W1 appeared immediately after  "and" (in any "X and W1" context)
+    w2_and   — times W2 appeared immediately before "and"
+    and_w2   — times W2 appeared immediately after  "and"
+    w1_total — total corpus occurrences of W1 (needed for P(and|W1) normalisation)
+    w2_total — total corpus occurrences of W2
 
 Outputs (../Data/):
-    babylm_bigram_exposures.csv   columns: tokens, binom, w1_and, and_w1, w2_and, and_w2
-    c4_bigram_exposures.csv       columns: tokens, binom, w1_and, and_w1, w2_and, and_w2
+    babylm_bigram_exposures.csv   columns: tokens, binom, w1_and, and_w1, w2_and, and_w2, w1_total, w2_total
+    c4_bigram_exposures.csv       same columns
+
+Parallelisation (Linux/fork):
+    BabyLM blocks are split across --workers processes for the scan step.
+    C4 blocks are buffered (--c4-buffer blocks at a time) and scanned in parallel;
+    checkpoint snapshots are taken at buffer boundaries (off by at most
+    --c4-buffer blocks — negligible relative to checkpoint spacing).
 
 Usage:
-    python count_bigram_exposures.py             # both corpora
-    python count_bigram_exposures.py --skip-c4   # BabyLM only
+    python count_bigram_exposures.py                        # both corpora, auto workers
+    python count_bigram_exposures.py --skip-c4              # BabyLM only
+    python count_bigram_exposures.py --workers 16           # limit parallelism
+    python count_bigram_exposures.py --c4-buffer 5000       # smaller C4 buffer
     python count_bigram_exposures.py --babylm-tokenizer <path_or_hf_id>
 
 Requirements:
@@ -33,7 +35,9 @@ Requirements:
 
 import os
 import re
+import math
 import argparse
+import multiprocessing as mp
 import numpy as np
 import pandas as pd
 from itertools import chain
@@ -54,6 +58,7 @@ BABYLM_SEED        = 964
 BABYLM_EPOCHS      = 64
 WORLD_SIZE         = 2
 BLOCK_SIZE         = 1024
+SCAN_BATCH         = 500   # blocks decoded per batch within each worker
 
 C4_DATASET     = "znhoughton/c4-subset-10B-tokens"
 C4_TRAIN_SPLIT = "train"
@@ -65,7 +70,15 @@ parser.add_argument("--skip-c4", action="store_true",
 parser.add_argument("--babylm-tokenizer",
                     default="znhoughton/opt-babylm-125m-64eps-seed964",
                     help="HuggingFace model/tokenizer ID or local path.")
+parser.add_argument("--workers", type=int, default=None,
+                    help="Number of parallel worker processes (default: all cores).")
+parser.add_argument("--c4-buffer", type=int, default=10_000,
+                    help="Number of C4 blocks to buffer before parallel scan (default: 10000).")
 args = parser.parse_args()
+
+N_WORKERS  = args.workers or mp.cpu_count()
+C4_BUFFER  = args.c4_buffer
+print(f"Parallelism: {N_WORKERS} workers  |  C4 buffer: {C4_BUFFER:,} blocks")
 
 
 # ── 1. Load binomials — only attested ones need bigram counts ──────────────────
@@ -156,6 +169,54 @@ def scan_text(text):
     return w_and_counts, and_w_counts, w_total_counts
 
 
+# ── Parallel worker functions (module-level so multiprocessing can pickle them) ─
+# On Linux the default start method is "fork", so workers inherit all globals
+# (blm_lm, tokenizer, word_to_idx, n_words, etc.) via copy-on-write.
+
+def _scan_block_chunk(args):
+    """
+    BabyLM worker: decode and scan blocks[start:end] from the pre-loaded blm_lm.
+    Returns (start, wa_chunk, aw_chunk, wt_chunk) where each chunk has shape
+    (end - start, n_words) — one row per block.  These are assembled by the
+    main process into the full block_w_and / block_and_w / block_w_total arrays
+    before the shuffle replay.
+    """
+    start, end = args
+    chunk = end - start
+    wa = np.zeros((chunk, n_words), dtype=np.int16)
+    aw = np.zeros((chunk, n_words), dtype=np.int16)
+    wt = np.zeros((chunk, n_words), dtype=np.int32)
+    for bi in range(start, end, SCAN_BATCH):
+        batch_end = min(bi + SCAN_BATCH, end)
+        batch = blm_lm[bi:batch_end]
+        texts = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
+        for local_i, text in enumerate(texts):
+            gi = bi - start + local_i
+            wa_, aw_, wt_ = scan_text(text)
+            for idx, cnt in wa_.items(): wa[gi, idx] = min(cnt, 32767)
+            for idx, cnt in aw_.items(): aw[gi, idx] = min(cnt, 32767)
+            for idx, cnt in wt_.items(): wt[gi, idx] = min(cnt, 2_147_483_647)
+    return start, wa, aw, wt
+
+
+def _scan_texts(texts):
+    """
+    C4 worker: scan a list of already-decoded text strings.
+    Returns (wa, aw, wt) arrays of shape (n_words,) — the summed counts for
+    all texts in the list.  The main process accumulates these into running
+    totals and snapshots at checkpoint boundaries.
+    """
+    wa = np.zeros(n_words, dtype=np.int64)
+    aw = np.zeros(n_words, dtype=np.int64)
+    wt = np.zeros(n_words, dtype=np.int64)
+    for text in texts:
+        wa_, aw_, wt_ = scan_text(text)
+        for idx, cnt in wa_.items(): wa[idx] += cnt
+        for idx, cnt in aw_.items(): aw[idx] += cnt
+        for idx, cnt in wt_.items(): wt[idx] += cnt
+    return wa, aw, wt
+
+
 print(f"\nLoading tokenizer from '{args.babylm_tokenizer}'...")
 tokenizer = AutoTokenizer.from_pretrained(args.babylm_tokenizer)
 
@@ -213,28 +274,23 @@ blm_lm  = blm_tok.map(group_texts, batched=True,
 N = len(blm_lm)
 print(f"  {N:,} blocks × {BLOCK_SIZE} tokens = {N * BLOCK_SIZE:,} tokens per epoch")
 
-# Pre-compute per-block bigram counts for all target words.
-print(f"  Scanning {N:,} blocks for bigram counts (may take 5–15 min)...")
+# Pre-compute per-block bigram counts for all target words (parallel).
+print(f"  Scanning {N:,} blocks for bigram counts using {N_WORKERS} workers...")
 block_w_and   = np.zeros((N, n_words), dtype=np.int16)
 block_and_w   = np.zeros((N, n_words), dtype=np.int16)
 block_w_total = np.zeros((N, n_words), dtype=np.int32)
 
-SCAN_BATCH = 500
-for batch_start in range(0, N, SCAN_BATCH):
-    if batch_start % 10_000 == 0:
-        print(f"    {batch_start:,} / {N:,} blocks ...")
-    batch_end = min(batch_start + SCAN_BATCH, N)
-    batch = blm_lm[batch_start:batch_end]
-    texts = tokenizer.batch_decode(batch["input_ids"], skip_special_tokens=True)
-    for local_i, text in enumerate(texts):
-        gi = batch_start + local_i
-        wa, aw, wt = scan_text(text)
-        for idx, cnt in wa.items():
-            block_w_and[gi, idx] = min(cnt, 32767)
-        for idx, cnt in aw.items():
-            block_and_w[gi, idx] = min(cnt, 32767)
-        for idx, cnt in wt.items():
-            block_w_total[gi, idx] = min(cnt, 2147483647)
+chunk_size = math.ceil(N / N_WORKERS)
+chunks = [(i, min(i + chunk_size, N)) for i in range(0, N, chunk_size)]
+print(f"  {len(chunks)} chunks of ~{chunk_size:,} blocks each.")
+
+with mp.Pool(N_WORKERS) as pool:
+    for i, (start, wa, aw, wt) in enumerate(pool.imap_unordered(_scan_block_chunk, chunks)):
+        end = start + len(wa)
+        block_w_and[start:end]   = wa
+        block_and_w[start:end]   = aw
+        block_w_total[start:end] = wt
+        print(f"    chunk {i+1}/{len(chunks)} done (blocks {start:,}–{end:,})")
 
 total_w_and_epoch   = block_w_and.sum(axis=0).astype(np.float64)
 total_and_w_epoch   = block_and_w.sum(axis=0).astype(np.float64)
@@ -325,27 +381,48 @@ else:
     cumulative_and_w   = np.zeros(n_words, dtype=np.float64)
     cumulative_w_total = np.zeros(n_words, dtype=np.float64)
     block_count = 0
+    buffer_texts = []   # decoded texts waiting to be scanned
 
-    for block in c4_lm:
-        block_count += 1
-        text = tokenizer.decode(block["input_ids"], skip_special_tokens=True)
-        wa, aw, wt = scan_text(text)
-        for idx, cnt in wa.items(): cumulative_w_and[idx]   += cnt
-        for idx, cnt in aw.items(): cumulative_and_w[idx]   += cnt
-        for idx, cnt in wt.items(): cumulative_w_total[idx] += cnt
+    def flush_buffer(pool):
+        """Scan all texts in buffer in parallel, accumulate into cumulative arrays."""
+        if not buffer_texts:
+            return
+        chunk_size = math.ceil(len(buffer_texts) / N_WORKERS)
+        chunks = [buffer_texts[i:i + chunk_size]
+                  for i in range(0, len(buffer_texts), chunk_size)]
+        for wa, aw, wt in pool.map(_scan_texts, chunks):
+            cumulative_w_and[:]   += wa
+            cumulative_and_w[:]   += aw
+            cumulative_w_total[:] += wt
+        buffer_texts.clear()
 
-        if block_count in ckpt_blocks:
-            ci = ckpt_blocks[block_count]
-            c4_w_and[ci]   = cumulative_w_and.copy()
-            c4_and_w[ci]   = cumulative_and_w.copy()
-            c4_w_total[ci] = cumulative_w_total.copy()
+    with mp.Pool(N_WORKERS) as pool:
+        for block in c4_lm:
+            block_count += 1
+            buffer_texts.append(
+                tokenizer.decode(block["input_ids"], skip_special_tokens=True)
+            )
 
-        if block_count % 500_000 == 0:
-            print(f"  {block_count:,} blocks | "
-                  f"{block_count * BLOCK_SIZE / 1e9:.2f}B tokens", flush=True)
+            # Flush and snapshot at checkpoint boundaries.
+            # Checkpoints are ~500M tokens apart; C4_BUFFER is much smaller,
+            # so snapshots are off by at most C4_BUFFER blocks (negligible).
+            if len(buffer_texts) >= C4_BUFFER or block_count in ckpt_blocks:
+                flush_buffer(pool)
 
-        if block_count >= max_block:
-            break
+            if block_count in ckpt_blocks:
+                ci = ckpt_blocks[block_count]
+                c4_w_and[ci]   = cumulative_w_and.copy()
+                c4_and_w[ci]   = cumulative_and_w.copy()
+                c4_w_total[ci] = cumulative_w_total.copy()
+
+            if block_count % 500_000 == 0:
+                print(f"  {block_count:,} blocks | "
+                      f"{block_count * BLOCK_SIZE / 1e9:.2f}B tokens", flush=True)
+
+            if block_count >= max_block:
+                break
+
+        flush_buffer(pool)  # drain any remaining buffer
 
     print(f"  C4 replay done: {block_count:,} blocks, "
           f"{block_count * BLOCK_SIZE:,} training tokens.")
