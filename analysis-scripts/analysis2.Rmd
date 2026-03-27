@@ -310,8 +310,8 @@ if (exists("agg_sampled")) {
     geom_point(size = 1.5) +
     scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
     scale_x_continuous("Training tokens (millions)") +
-    scale_y_continuous("Pearson r (model pref ~ constraint)") +
-    facet_grid(constraint ~ corpus, scales = "free_y") +
+    scale_y_continuous("Pearson r (model pref ~ constraint)", limits = c(-1, 1)) +
+    facet_grid(constraint ~ corpus) +
     labs(title = "Raw trajectories: correlation of model preference with each constraint") +
     theme_bw(base_size = 11) +
     theme(panel.grid.minor = element_blank(),
@@ -538,7 +538,7 @@ if (nrow(constr_coefs) > 0 && !all(is.na(constr_coefs$tokens))) {
     scale_x_continuous("Training tokens (millions)") +
     scale_y_continuous("Coefficient (95% CI)",
                        expand = expansion(mult = c(0.05, 0.2))) +
-    facet_grid(term ~ corpus, scales = "free_y") +
+    facet_grid(term ~ corpus) +
     coord_cartesian(clip = "off") +
     labs(title = "Individual constraint main effects across training") +
     theme_bw(base_size = 12) +
@@ -588,7 +588,7 @@ if (nrow(constr_coefs) > 0 && !all(is.na(constr_coefs$tokens))) {
     scale_x_continuous("Training tokens (millions)") +
     scale_y_continuous("Coefficient (95% CI)",
                        expand = expansion(mult = c(0.05, 0.2))) +
-    facet_grid(term ~ corpus, scales = "free_y") +
+    facet_grid(term ~ corpus) +
     coord_cartesian(clip = "off") +
     labs(title = "Constraint \u00d7 Overall frequency interactions across training") +
     theme_bw(base_size = 12) +
