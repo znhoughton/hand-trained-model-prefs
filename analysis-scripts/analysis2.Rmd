@@ -527,7 +527,8 @@ if (file.exists(EXPOSURES_CSV)) {
       freq_prob_c    = plogis(log_freq_ratio) - 0.5,
       log_total      = if_else(alpha_seen + beta_seen > 0,
                                log(alpha_seen + beta_seen), NA_real_)
-    )
+    ) |>
+    select(-alpha_seen, -beta_seen)
   rm(dyn_freq_raw)
   message(sprintf("  dyn_freq: %d rows (%d models, %d unique steps)",
                   nrow(dyn_freq), n_distinct(dyn_freq$model),
@@ -551,7 +552,9 @@ message(sprintf("Fitting %d models: %s", length(MODELS_LIST), paste(MODELS_LIST,
 ```
 
 ```{r setup-parallel}
-# multicore uses fork — workers inherit globals. Falls back to sequential on Windows.
+# multicore uses fork — workers inherit globals (copy-on-write), so large globals
+# are not actually copied. Raise the safety-check limit accordingly.
+options(future.globals.maxSize = Inf)
 plan(multicore, workers = N_PARALLEL_MODELS)
 message(sprintf("furrr plan: %s with %d workers", class(plan())[1], N_PARALLEL_MODELS))
 ```
