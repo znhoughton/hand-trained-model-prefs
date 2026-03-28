@@ -545,9 +545,9 @@ of zero).
 # Shared helper: build long-format data and produce the comparison plot per corpus.
 # items_df must have columns: corpus, binom, sort_val (used to order binomials).
 plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
+  # items_df is always derived from items_125m so already has GenPref_centered
+  # and log_freq_ratio — no join needed (joining would create .x/.y conflicts)
   d_refs <- items_df |>
-    left_join(items_125m |> select(corpus, binom, GenPref_centered, log_freq_ratio),
-              by = c("corpus", "binom")) |>
     pivot_longer(c(GenPref_centered, log_freq_ratio),
                  names_to = "source", values_to = "x") |>
     mutate(source = recode(source,
