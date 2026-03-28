@@ -49,6 +49,7 @@ library(tidyverse)
 library(duckdb)
 library(future)
 library(furrr)
+library(patchwork)
 library(ggrepel)
 library(scales)
 library(kableExtra)
@@ -399,49 +400,83 @@ preference direction; red = AbsPref wrong. The **bar chart** summarises the
 percentage of items where AbsPref is correct for each model size, so we can
 see whether the effect strengthens or weakens with scale.
 
-```{r plot-abspref-heatmap, fig.height=10}
+```{r plot-abspref-heatmap, fig.height=8}
+# Top 15 per corpus, matching the other Section 1 plots
 dat_abspref_grid <- dat_final |>
-  semi_join(disagree_125m, by = c("corpus", "binom")) |>
+  semi_join(top15_disagree, by = c("corpus", "binom")) |>
   left_join(disagree_125m |> select(corpus, binom, signed_gap_125m),
             by = c("corpus", "binom")) |>
-  mutate(
-    binom          = fct_reorder(binom, abs(signed_gap_125m)),
-    abspref_result = if_else(abspref_ok, "AbsPref correct", "AbsPref wrong")
-  )
+  left_join(items_125m |>
+              mutate(abspref_lo = qlogis(GenPref_centered + 0.5)) |>
+              select(corpus, binom, abspref_lo, log_freq_ratio),
+            by = c("corpus", "binom")) |>
+  mutate(abspref_result = if_else(abspref_ok, "AbsPref correct", "AbsPref wrong"))
 
 for (corp in c("BabyLM", "C4")) {
   d <- filter(dat_abspref_grid, corpus == corp)
   if (nrow(d) == 0) next
 
-  p <- ggplot(d, aes(x = model_size, y = binom, fill = abspref_result)) +
-    geom_tile(colour = "white", linewidth = 0.6) +
-    geom_text(aes(
-      label = sprintf("%.2f", preference),
-      colour = abspref_result
-    ), size = 3.0, fontface = "bold") +
-    scale_fill_manual(
-      values = c("AbsPref correct" = "#a8ddb5", "AbsPref wrong" = "#fc8d59"),
-      name   = NULL
-    ) +
-    scale_colour_manual(
-      values = c("AbsPref correct" = "#084081", "AbsPref wrong" = "#7f0000"),
-      guide  = "none"
-    ) +
-    scale_x_discrete(position = "top") +
-    labs(
-      title    = sprintf("%s — AbsPref direction agreement by model size", corp),
-      subtitle = "Cell value = model preference (log-odds). Items ordered by |signed gap| in 125M (largest at top).",
-      x        = "Model size", y = NULL
-    ) +
-    theme_bw(base_size = 11) +
-    theme(
-      legend.position  = "bottom",
-      axis.text.y      = element_text(size = 9),
-      panel.grid       = element_blank(),
-      plot.title       = element_text(face = "bold")
+  # Build reference columns (AbsPref and RelFreq) as extra tiles
+  d_refs <- d |>
+    distinct(binom, signed_gap_125m, abspref_lo, log_freq_ratio) |>
+    pivot_longer(c(abspref_lo, log_freq_ratio),
+                 names_to = "col", values_to = "val") |>
+    mutate(
+      col_label = recode(col, "abspref_lo" = "AbsPref", "log_freq_ratio" = "RelFreq"),
+      col_label = factor(col_label, levels = c("AbsPref", "RelFreq"))
     )
 
-  print(p)
+  # Model preference tiles
+  d_model <- d |>
+    mutate(model_size = factor(as.character(model_size), levels = SIZE_LEVELS))
+
+  binom_order <- d |>
+    distinct(binom, signed_gap_125m) |>
+    arrange(abs(signed_gap_125m)) |>
+    pull(binom)
+
+  d_refs$binom  <- factor(d_refs$binom,  levels = binom_order)
+  d_model$binom <- factor(d_model$binom, levels = binom_order)
+
+  p_refs <- ggplot(d_refs, aes(x = col_label, y = binom, fill = val)) +
+    geom_tile(colour = "white", linewidth = 0.6) +
+    geom_text(aes(label = sprintf("%.2f", val)), size = 2.8, colour = "grey10") +
+    scale_fill_gradient2(low = "#d73027", mid = "grey95", high = "#1a9850",
+                         midpoint = 0, name = "Log-odds", guide = "none") +
+    scale_x_discrete(position = "top") +
+    labs(x = NULL, y = NULL) +
+    theme_bw(base_size = 11) +
+    theme(axis.text.y  = element_text(size = 9),
+          axis.text.x  = element_text(face = "bold"),
+          panel.grid   = element_blank())
+
+  p_model <- ggplot(d_model, aes(x = model_size, y = binom, fill = abspref_result)) +
+    geom_tile(colour = "white", linewidth = 0.6) +
+    geom_text(aes(label = sprintf("%.2f", preference),
+                  colour = abspref_result), size = 2.8, fontface = "bold") +
+    scale_fill_manual(values = c("AbsPref correct" = "#a8ddb5", "AbsPref wrong" = "#fc8d59"),
+                      name = NULL) +
+    scale_colour_manual(values = c("AbsPref correct" = "#084081", "AbsPref wrong" = "#7f0000"),
+                        guide = "none") +
+    scale_x_discrete(position = "top") +
+    labs(x = NULL, y = NULL) +
+    theme_bw(base_size = 11) +
+    theme(axis.text.y  = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x  = element_text(face = "bold"),
+          panel.grid   = element_blank(),
+          legend.position = "bottom")
+
+  p_combined <- p_refs + p_model +
+    patchwork::plot_layout(widths = c(2, 3)) +
+    patchwork::plot_annotation(
+      title    = sprintf("%s \u2014 AbsPref direction agreement by model size", corp),
+      subtitle = "Left: AbsPref and RelFreq log-odds (green = prefer \u03b1, red = prefer \u03b2). Right: model preference; green = AbsPref correct, red = wrong.",
+      theme    = theme(plot.title    = element_text(face = "bold", size = 12),
+                       plot.subtitle = element_text(size = 10))
+    )
+
+  print(p_combined)
   cat("\n\n")
 }
 ```
@@ -531,28 +566,35 @@ These plots are independent of model behaviour: they select binomials purely on
 the basis of the **gap between AbsPref and RelFreq**, then show where each model
 lands alongside both reference values.
 
+AbsPref (`GenPref_centered`) is on the `P(α) − 0.5` probability scale (range
+−0.5 to 0.5). To make it directly comparable to `log_freq_ratio` and model
+`preference` (both log-odds), it is transformed to log-odds via
+`qlogis(GenPref_centered + 0.5)` before plotting.
+
 Each row is a binomial. Markers show:
 
-- **Purple triangle** = AbsPref (`GenPref_centered`)
+- **Purple triangle** = AbsPref (log-odds: `qlogis(GenPref_centered + 0.5)`)
 - **Gold diamond** = corpus RelFreq (`log(α_seen / β_seen)`)
 - **Coloured circles** = each model's preference (log-odds), by size
 
-Note that AbsPref and RelFreq are on different scales (centered vs log-odds), so
-their magnitudes are not directly comparable — focus on **direction** (left/right
-of zero).
+All three values are now on the same log-odds scale.
 
 ```{r abspref-relfreq-helper}
 # Shared helper: build long-format data and produce the comparison plot per corpus.
 # items_df must have columns: corpus, binom, sort_val (used to order binomials).
 plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
   # items_df is always derived from items_125m so already has GenPref_centered
-  # and log_freq_ratio — no join needed (joining would create .x/.y conflicts)
+  # and log_freq_ratio — no join needed (joining would create .x/.y conflicts).
+  # Convert AbsPref to log-odds so it is on the same scale as log_freq_ratio
+  # and model preference. GenPref_centered = P(alpha) - 0.5, so
+  # qlogis(GenPref_centered + 0.5) gives the log-odds of abstract preference.
   d_refs <- items_df |>
-    pivot_longer(c(GenPref_centered, log_freq_ratio),
+    mutate(AbsPref_lo = qlogis(GenPref_centered + 0.5)) |>
+    pivot_longer(c(AbsPref_lo, log_freq_ratio),
                  names_to = "source", values_to = "x") |>
     mutate(source = recode(source,
-      "GenPref_centered" = "AbsPref",
-      "log_freq_ratio"   = "RelFreq"
+      "AbsPref_lo"     = "AbsPref",
+      "log_freq_ratio" = "RelFreq"
     ))
 
   d_models <- dat_final |>
@@ -600,9 +642,7 @@ plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
       scale_colour_manual(values = colour_vals, name = NULL) +
       scale_shape_manual(values = shape_vals, name = NULL) +
       scale_size_manual(values = size_vals, name = NULL, guide = "none") +
-      scale_x_continuous(
-        "Value (+ = prefer alpha form; AbsPref on centered scale, others on log-odds scale)"
-      ) +
+      scale_x_continuous("Log-odds (+ = prefer alpha form; all values on the same scale)") +
       labs(title    = sprintf("%s \u2014 %s", corp, title_suffix),
            subtitle = subtitle) +
       theme_bw(base_size = 11) +
@@ -622,7 +662,10 @@ regardless of whether they agree or disagree in direction.
 
 ```{r plot-abspref-relfreq-gap, fig.height=8, results='asis'}
 items_gap <- items_125m |>
-  mutate(sort_val = abs(GenPref_centered - log_freq_ratio)) |>
+  mutate(
+    abspref_lo = qlogis(GenPref_centered + 0.5),
+    sort_val   = abs(abspref_lo - log_freq_ratio)
+  ) |>
   group_by(corpus) |>
   slice_max(sort_val, n = 15) |>
   ungroup()
@@ -642,9 +685,10 @@ that the strongest directional disagreements appear first.
 
 ```{r plot-abspref-relfreq-crosszero, fig.height=8, results='asis'}
 items_cross <- items_125m |>
-  filter(sign(GenPref_centered) != sign(log_freq_ratio),
-         GenPref_centered != 0, log_freq_ratio != 0) |>
-  mutate(sort_val = abs(GenPref_centered) + abs(log_freq_ratio)) |>
+  mutate(abspref_lo = qlogis(GenPref_centered + 0.5)) |>
+  filter(sign(abspref_lo) != sign(log_freq_ratio),
+         abspref_lo != 0, log_freq_ratio != 0) |>
+  mutate(sort_val = abs(abspref_lo) + abs(log_freq_ratio)) |>
   group_by(corpus) |>
   slice_max(sort_val, n = 15) |>
   ungroup()
