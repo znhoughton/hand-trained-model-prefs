@@ -182,9 +182,21 @@ batch_dyn_freq <- function(meta_df, binom_filter = NULL) {
 }
 
 # ── Join freq data onto training data and compute derived columns ─────────────
+# training_attested.csv also has a `tokens` column, which conflicts with the
+# `tokens` returned by batch_dyn_freq. We keep the freq_df version (checkpoint-
+# specific token count from the exposures file) and drop the training one.
 attach_freq <- function(train_subset, freq_df) {
-  train_subset |>
-    left_join(freq_df, by = c("model", "step", "binom")) |>
+  joined <- train_subset |>
+    left_join(freq_df, by = c("model", "step", "binom"))
+
+  # Resolve tokens conflict: freq_df tokens is .y; drop training tokens (.x)
+  if ("tokens.y" %in% names(joined)) {
+    joined <- joined |>
+      select(-any_of("tokens.x")) |>
+      rename(tokens = tokens.y)
+  }
+
+  joined |>
     mutate(signed_gap = preference - log_freq_ratio) |>
     group_by(model, step) |>
     mutate(log_total_c = as.numeric(scale(log_total))) |>
