@@ -222,6 +222,7 @@ message(sprintf("%d models: %s", length(MODELS_LIST), paste(MODELS_LIST, collaps
 ```
 
 ```{r ck-index}
+# 20-checkpoint sampled index — used for final-checkpoint item selection
 ck_meta <- map_dfr(MODELS_LIST, function(m) {
   steps <- sample_steps(filter(train, model == m))
   tibble(model = m, ck_idx = seq_along(steps), step = steps)
@@ -231,6 +232,12 @@ final_ck_meta <- ck_meta |>
   group_by(model) |>
   filter(ck_idx == max(ck_idx)) |>
   ungroup()
+
+# Full step index — every checkpoint in the training data, used for trajectories
+ck_meta_full <- train |>
+  filter(model %in% MODELS_LIST) |>
+  distinct(model, step) |>
+  arrange(model, step)
 ```
 
 ```{r load-final}
@@ -332,12 +339,18 @@ AbsPref (direction indicated by colour) rather than with RelFreq.
 # Get all-model-size data for these items
 # Only pull columns from disagree_125m that aren't already in dat_final
 # (GenPref_centered and log_freq_ratio already exist there from the training join)
+# Top 15 per corpus by |signed_gap| in 125M
+top15_disagree <- disagree_125m |>
+  group_by(corpus) |>
+  slice_max(abs(signed_gap_125m), n = 15) |>
+  ungroup()
+
 dat_disagree_trace <- dat_final |>
-  semi_join(disagree_125m, by = c("corpus", "binom")) |>
+  semi_join(top15_disagree, by = c("corpus", "binom")) |>
   left_join(disagree_125m |> select(corpus, binom, signed_gap_125m, abspref_ok_125m),
             by = c("corpus", "binom")) |>
   mutate(
-    binom        = fct_reorder(binom, abs(signed_gap_125m)),
+    binom         = fct_reorder(binom, abs(signed_gap_125m)),
     abspref_label = if_else(GenPref_centered > 0, "\u03b1 preferred", "\u03b2 preferred")
   )
 
@@ -345,14 +358,19 @@ for (corp in c("BabyLM", "C4")) {
   d <- filter(dat_disagree_trace, corpus == corp)
   if (nrow(d) == 0) next
 
-  # RelFreq reference lines (corpus-level, constant per binom)
-  d_freq <- d |> distinct(binom, log_freq_ratio, signed_gap_125m)
+  # Reference lines: RelFreq and AbsPref (both corpus/binom-level, constant per binom)
+  d_freq    <- d |> distinct(binom, log_freq_ratio, signed_gap_125m)
+  d_abspref <- d |> distinct(binom, GenPref_centered, signed_gap_125m)
 
   p <- ggplot(d, aes(y = binom, x = preference, colour = model_size, shape = model_size)) +
     geom_vline(xintercept = 0, linetype = "solid", colour = "grey60", linewidth = 0.4) +
     geom_segment(data = d_freq,
                  aes(y = binom, yend = binom, x = 0, xend = log_freq_ratio),
-                 colour = "#cc8800", linewidth = 0.7, linetype = "dashed",
+                 colour = "#cc8800", linewidth = 0.9, linetype = "dashed",
+                 inherit.aes = FALSE) +
+    geom_segment(data = d_abspref,
+                 aes(y = binom, yend = binom, x = 0, xend = GenPref_centered),
+                 colour = "#9e3d8e", linewidth = 0.9, linetype = "dashed",
                  inherit.aes = FALSE) +
     geom_point(size = 3.5, stroke = 0.8) +
     scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
@@ -360,7 +378,7 @@ for (corp in c("BabyLM", "C4")) {
     scale_x_continuous("Model preference (log-odds; + = prefer alpha form)") +
     labs(
       title    = sprintf("%s — 125M disagreement items across model sizes", corp),
-      subtitle = "Dashed gold segments = corpus RelFreq direction; dots = model preference per size"
+      subtitle = "Gold dashed = corpus RelFreq direction; purple dashed = AbsPref direction; dots = model preference per size"
     ) +
     theme_bw(base_size = 11) +
     theme(
@@ -481,6 +499,9 @@ replicate_summary <- dat_final |>
   arrange(corpus, desc(abs(signed_gap_125m)))
 
 replicate_summary |>
+  group_by(corpus) |>
+  slice_max(abs(signed_gap_125m), n = 15) |>
+  ungroup() |>
   mutate(across(c(pref_125m, pref_350m, pref_13b, log_freq_ratio, signed_gap_125m,
                    GenPref_centered), \(x) round(x, 2))) |>
   select(corpus, binom, log_freq_ratio, GenPref_centered,
@@ -496,10 +517,147 @@ replicate_summary |>
     `N sizes\ntotal` = n_sizes
   ) |>
   kbl(caption = paste(
-    "Items where 125M disagrees with RelFreq, traced across model sizes.",
-    "Positive preference = prefers alpha form.")) |>
+    "Top 15 items per corpus (by |signed gap| in 125M) where 125M disagrees with RelFreq,",
+    "traced across model sizes. Positive preference = prefers alpha form.")) |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = TRUE, font_size = 11)
+```
+
+------------------------------------------------------------------------
+
+# Section 1b: AbsPref vs RelFreq — Where They Diverge Most
+
+These plots are independent of model behaviour: they select binomials purely on
+the basis of the **gap between AbsPref and RelFreq**, then show where each model
+lands alongside both reference values.
+
+Each row is a binomial. Markers show:
+
+- **Purple triangle** = AbsPref (`GenPref_centered`)
+- **Gold diamond** = corpus RelFreq (`log(α_seen / β_seen)`)
+- **Coloured circles** = each model's preference (log-odds), by size
+
+Note that AbsPref and RelFreq are on different scales (centered vs log-odds), so
+their magnitudes are not directly comparable — focus on **direction** (left/right
+of zero).
+
+```{r abspref-relfreq-helper}
+# Shared helper: build long-format data and produce the comparison plot per corpus.
+# items_df must have columns: corpus, binom, sort_val (used to order binomials).
+plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
+  d_refs <- items_df |>
+    left_join(items_125m |> select(corpus, binom, GenPref_centered, log_freq_ratio),
+              by = c("corpus", "binom")) |>
+    pivot_longer(c(GenPref_centered, log_freq_ratio),
+                 names_to = "source", values_to = "x") |>
+    mutate(source = recode(source,
+      "GenPref_centered" = "AbsPref",
+      "log_freq_ratio"   = "RelFreq"
+    ))
+
+  d_models <- dat_final |>
+    semi_join(items_df, by = c("corpus", "binom")) |>
+    left_join(items_df |> select(corpus, binom, sort_val), by = c("corpus", "binom")) |>
+    transmute(corpus, binom, sort_val,
+              source = paste0("Model ", as.character(model_size)),
+              x      = preference)
+
+  d_long <- bind_rows(
+    d_refs |> select(corpus, binom, sort_val, source, x),
+    d_models
+  ) |>
+    mutate(
+      binom  = fct_reorder(binom, sort_val),
+      source = factor(source, levels = c("AbsPref", "RelFreq",
+                                          "Model 125M", "Model 350M", "Model 1.3B"))
+    )
+
+  colour_vals <- c(
+    "AbsPref"    = "#9e3d8e",
+    "RelFreq"    = "#cc8800",
+    "Model 125M" = SIZE_COLOURS[["125M"]],
+    "Model 350M" = SIZE_COLOURS[["350M"]],
+    "Model 1.3B" = SIZE_COLOURS[["1.3B"]]
+  )
+  shape_vals <- c(
+    "AbsPref"    = 17,   # filled triangle
+    "RelFreq"    = 18,   # filled diamond
+    "Model 125M" = 21,
+    "Model 350M" = 22,
+    "Model 1.3B" = 24
+  )
+  size_vals <- c(
+    "AbsPref" = 4.5, "RelFreq" = 4.5,
+    "Model 125M" = 3.0, "Model 350M" = 3.0, "Model 1.3B" = 3.0
+  )
+
+  for (corp in c("BabyLM", "C4")) {
+    d <- filter(d_long, corpus == corp)
+    if (nrow(d) == 0) next
+    p <- ggplot(d, aes(y = binom, x = x, colour = source, shape = source, size = source)) +
+      geom_vline(xintercept = 0, colour = "grey60", linewidth = 0.4) +
+      geom_point(alpha = 0.9, stroke = 0.4) +
+      scale_colour_manual(values = colour_vals, name = NULL) +
+      scale_shape_manual(values = shape_vals, name = NULL) +
+      scale_size_manual(values = size_vals, name = NULL, guide = "none") +
+      scale_x_continuous(
+        "Value (+ = prefer alpha form; AbsPref on centered scale, others on log-odds scale)"
+      ) +
+      labs(title    = sprintf("%s \u2014 %s", corp, title_suffix),
+           subtitle = subtitle) +
+      theme_bw(base_size = 11) +
+      theme(axis.title.y    = element_blank(),
+            legend.position = "bottom",
+            plot.title      = element_text(face = "bold"))
+    print(p)
+    cat("\n\n")
+  }
+}
+```
+
+## Plot 1b-i: Largest absolute gap between AbsPref and RelFreq
+
+Top 15 binomials per corpus where `|GenPref_centered − log(α/β)|` is largest,
+regardless of whether they agree or disagree in direction.
+
+```{r plot-abspref-relfreq-gap, fig.height=8, results='asis'}
+items_gap <- items_125m |>
+  mutate(sort_val = abs(GenPref_centered - log_freq_ratio)) |>
+  group_by(corpus) |>
+  slice_max(sort_val, n = 15) |>
+  ungroup()
+
+plot_abspref_vs_relfreq(
+  items_gap,
+  title_suffix = "Largest |AbsPref \u2212 RelFreq| gap",
+  subtitle     = "Top 15 per corpus. Purple \u25b2 = AbsPref; gold \u25c6 = RelFreq; circles = model preference by size."
+)
+```
+
+## Plot 1b-ii: AbsPref and RelFreq point in opposite directions (cross zero)
+
+Top 15 binomials per corpus where AbsPref and RelFreq **disagree in direction**
+(one positive, one negative), ranked by `|GenPref_centered| + |log(α/β)|` so
+that the strongest directional disagreements appear first.
+
+```{r plot-abspref-relfreq-crosszero, fig.height=8, results='asis'}
+items_cross <- items_125m |>
+  filter(sign(GenPref_centered) != sign(log_freq_ratio),
+         GenPref_centered != 0, log_freq_ratio != 0) |>
+  mutate(sort_val = abs(GenPref_centered) + abs(log_freq_ratio)) |>
+  group_by(corpus) |>
+  slice_max(sort_val, n = 15) |>
+  ungroup()
+
+plot_abspref_vs_relfreq(
+  items_cross,
+  title_suffix = "AbsPref and RelFreq point in opposite directions",
+  subtitle     = paste(
+    "Top 15 per corpus by |AbsPref| + |RelFreq|.",
+    "Purple \u25b2 = AbsPref; gold \u25c6 = RelFreq; circles = model preference by size.",
+    "AbsPref and RelFreq always on opposite sides of zero."
+  )
+)
 ```
 
 ------------------------------------------------------------------------
@@ -649,15 +807,14 @@ print(case_binoms |> select(corpus, binom, log_freq_ratio, GenPref_centered, sig
 case_binom_vec <- unique(case_binoms$binom)
 message(sprintf("Loading trajectories for %d binomials (single DuckDB scan)...", length(case_binom_vec)))
 
-# One scan of the Parquet file for all 20 checkpoints × all models, filtered to
-# case binomials — replaces the previous loop of 120 separate DuckDB connections.
+# Single scan across ALL training checkpoints, filtered to case binomials only.
 t0 <- proc.time()
-freq_traj <- batch_dyn_freq(ck_meta, binom_filter = case_binom_vec)
+freq_traj <- batch_dyn_freq(ck_meta_full, binom_filter = case_binom_vec)
 message(sprintf("  DuckDB fetch done in %.1f s (%d rows)", (proc.time() - t0)[["elapsed"]], nrow(freq_traj)))
 
 dat_traj <- train |>
   filter(binom %in% case_binom_vec) |>
-  inner_join(ck_meta, by = c("model", "step")) |>
+  inner_join(ck_meta_full, by = c("model", "step")) |>
   attach_freq(freq_traj) |>
   mutate(
     corpus     = parse_corpus(model),
