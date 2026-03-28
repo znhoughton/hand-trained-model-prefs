@@ -287,6 +287,7 @@ items_125m <- dat_125m |>
     log_freq_ratio   = first(log_freq_ratio),   # corpus-level (constant per binom×corpus)
     freq_prob_c      = first(freq_prob_c),       # P(alpha) - 0.5 for RelFreq
     GenPref_centered = first(GenPref_centered),  # constant per binom, already P(alpha) - 0.5
+    log_total        = first(log_total),         # log(alpha_seen + beta_seen) at 125M final ckpt
     preference_125m  = first(preference),
     pref_prob_125m   = first(pref_prob),
     signed_gap_125m  = first(signed_gap),
@@ -348,25 +349,28 @@ conflict_summary <- dat_conflict |>
     n              = n(),
     mean_abspref   = mean(abspref_or, na.rm = TRUE),  # oriented: always positive
     mean_relfreq   = mean(relfreq_or, na.rm = TRUE),  # oriented: always negative
+    mean_pref      = mean(pref_or,    na.rm = TRUE),  # oriented: + if follows AbsPref
     mean_log_total = mean(log_total,  na.rm = TRUE),
     .groups = "drop"
   ) |>
-  mutate(across(c(mean_abspref, mean_relfreq, mean_log_total), \(x) round(x, 3)))
+  mutate(across(c(mean_abspref, mean_relfreq, mean_pref, mean_log_total), \(x) round(x, 3)))
 
 conflict_summary |>
   rename(
-    Corpus             = corpus,
-    Size               = model_size,
-    `Model follows`    = model_follows,
-    N                  = n,
+    Corpus                = corpus,
+    Size                  = model_size,
+    `Model follows`       = model_follows,
+    N                     = n,
     `AbsPref\n(oriented)` = mean_abspref,
     `RelFreq\n(oriented)` = mean_relfreq,
-    `ln(total)\nmean`  = mean_log_total
+    `Model pref\n(oriented)` = mean_pref,
+    `ln(total)\nmean`     = mean_log_total
   ) |>
   kbl(caption = paste(
     "When AbsPref and RelFreq conflict: feature values by which signal the model follows.",
     "Values are oriented so AbsPref is always positive (multiply by sign(AbsPref));",
-    "RelFreq is therefore always negative. ln(total) = log(\u03b1-seen + \u03b2-seen).")) |>
+    "RelFreq is therefore always negative; model pref > 0 means it follows AbsPref.",
+    "ln(total) = log(\u03b1-seen + \u03b2-seen).")) |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = TRUE, font_size = 11) |>
   collapse_rows(columns = 1:2, valign = "middle")
@@ -378,10 +382,11 @@ conflict_summary_long <- dat_conflict |>
   summarise(
     AbsPref          = mean(abspref_or, na.rm = TRUE),
     RelFreq          = mean(relfreq_or, na.rm = TRUE),
+    `Model pref`     = mean(pref_or,    na.rm = TRUE),
     `ln(total freq)` = mean(log_total,  na.rm = TRUE),
     .groups = "drop"
   ) |>
-  pivot_longer(c(AbsPref, RelFreq, `ln(total freq)`),
+  pivot_longer(c(AbsPref, RelFreq, `Model pref`, `ln(total freq)`),
                names_to = "metric", values_to = "value")
 
 ggplot(conflict_summary_long,
@@ -444,12 +449,15 @@ top15_disagree <- disagree_125m |>
   ungroup()
 
 # dat_final is final-checkpoint only (verified by stopifnot in load-final chunk)
+# Join log_total from items_125m (125M final-ckpt corpus total) for ordering/annotation
 dat_disagree_trace <- dat_final |>
   semi_join(top15_disagree, by = c("corpus", "binom")) |>
   left_join(disagree_125m |> select(corpus, binom, signed_gap_125m, abspref_ok_125m),
             by = c("corpus", "binom")) |>
+  left_join(items_125m |> select(corpus, binom, log_total_ref = log_total),
+            by = c("corpus", "binom")) |>
   mutate(
-    binom         = fct_reorder(binom, abs(signed_gap_125m)),
+    binom         = fct_reorder(binom, log_total_ref),   # high freq at top (fct_reorder ascending → top = high)
     abspref_label = if_else(GenPref_centered > 0, "\u03b1 preferred", "\u03b2 preferred")
   )
 
@@ -460,6 +468,8 @@ for (corp in c("BabyLM", "C4")) {
   # Reference lines: RelFreq and AbsPref (both on P(alpha)-0.5 scale)
   d_freq    <- d |> distinct(binom, freq_prob_c, signed_gap_125m)
   d_abspref <- d |> distinct(binom, GenPref_centered, signed_gap_125m)
+  d_ann     <- d |> distinct(binom, log_total_ref) |>
+    mutate(total_label = format(round(exp(log_total_ref)), big.mark = ",", scientific = FALSE))
 
   p <- ggplot(d, aes(y = binom, x = pref_prob, colour = model_size, shape = model_size)) +
     geom_vline(xintercept = 0, linetype = "solid", colour = "grey60", linewidth = 0.4) +
@@ -472,18 +482,23 @@ for (corp in c("BabyLM", "C4")) {
                  colour = "#9e3d8e", linewidth = 0.9, linetype = "dashed",
                  inherit.aes = FALSE) +
     geom_point(size = 3.5, stroke = 0.8) +
+    geom_text(data = d_ann,
+              aes(y = binom, x = 0.53, label = total_label),
+              inherit.aes = FALSE, hjust = 0, size = 2.6, colour = "grey40") +
     scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
     scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
     scale_x_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form)", limits = c(-0.5, 0.5)) +
+    coord_cartesian(clip = "off") +
     labs(
-      title    = sprintf("%s — 125M disagreement items across model sizes", corp),
-      subtitle = "Gold dashed = corpus RelFreq direction; purple dashed = AbsPref direction; dots = model preference per size"
+      title    = sprintf("%s \u2014 125M disagreement items across model sizes (ordered by overall freq)", corp),
+      subtitle = "Gold dashed = RelFreq; purple dashed = AbsPref; dots = model pref per size; right labels = total corpus count"
     ) +
     theme_bw(base_size = 11) +
     theme(
       axis.title.y    = element_blank(),
       strip.text      = element_text(face = "bold"),
-      legend.position = "bottom"
+      legend.position = "bottom",
+      plot.margin     = margin(5, 55, 5, 5, "pt")
     )
   print(p)
   cat("\n\n")
@@ -505,6 +520,8 @@ dat_abspref_grid <- dat_final |>
   semi_join(top15_disagree, by = c("corpus", "binom")) |>
   left_join(disagree_125m |> select(corpus, binom, signed_gap_125m),
             by = c("corpus", "binom")) |>
+  left_join(items_125m |> select(corpus, binom, log_total_ref = log_total),
+            by = c("corpus", "binom")) |>
   mutate(abspref_result = if_else(abspref_ok, "AbsPref correct", "AbsPref wrong"))
 # dat_final already carries GenPref_centered (P(alpha)-0.5) and freq_prob_c (same scale) from attach_freq
 
@@ -514,7 +531,7 @@ for (corp in c("BabyLM", "C4")) {
 
   # Build reference columns (AbsPref and RelFreq) as extra tiles — both on P(alpha)-0.5 scale
   d_refs <- d |>
-    distinct(binom, signed_gap_125m, GenPref_centered, freq_prob_c) |>
+    distinct(binom, signed_gap_125m, log_total_ref, GenPref_centered, freq_prob_c) |>
     pivot_longer(c(GenPref_centered, freq_prob_c),
                  names_to = "col", values_to = "val") |>
     mutate(
@@ -526,10 +543,16 @@ for (corp in c("BabyLM", "C4")) {
   d_model <- d |>
     mutate(model_size = factor(as.character(model_size), levels = SIZE_LEVELS))
 
-  binom_order <- d |>
-    distinct(binom, signed_gap_125m) |>
-    arrange(abs(signed_gap_125m)) |>
-    pull(binom)
+  # Order binomials high-to-low by overall frequency; label includes count
+  binom_counts <- d |>
+    distinct(binom, log_total_ref) |>
+    arrange(log_total_ref)   # ascending so top of y-axis = highest freq
+  binom_order  <- binom_counts$binom
+  binom_labels <- setNames(
+    sprintf("%s  (n=%s)", binom_counts$binom,
+            format(round(exp(binom_counts$log_total_ref)), big.mark = ",", scientific = FALSE)),
+    binom_counts$binom
+  )
 
   d_refs$binom  <- factor(d_refs$binom,  levels = binom_order)
   d_model$binom <- factor(d_model$binom, levels = binom_order)
@@ -540,9 +563,10 @@ for (corp in c("BabyLM", "C4")) {
     scale_fill_gradient2(low = "#d73027", mid = "grey95", high = "#1a9850",
                          midpoint = 0, name = "P(\u03b1)\u22120.5", guide = "none") +
     scale_x_discrete(position = "top") +
+    scale_y_discrete(labels = binom_labels) +
     labs(x = NULL, y = NULL) +
     theme_bw(base_size = 11) +
-    theme(axis.text.y  = element_text(size = 9),
+    theme(axis.text.y  = element_text(size = 8),
           axis.text.x  = element_text(face = "bold"),
           panel.grid   = element_blank())
 
@@ -577,37 +601,6 @@ for (corp in c("BabyLM", "C4")) {
 }
 ```
 
-```{r plot-abspref-pct-bar, fig.height=4}
-abspref_pct <- dat_abspref_grid |>
-  group_by(corpus, model_size) |>
-  summarise(
-    n          = n(),
-    pct_correct = mean(abspref_ok, na.rm = TRUE) * 100,
-    se          = sqrt(pct_correct / 100 * (1 - pct_correct / 100) / n) * 100,
-    .groups    = "drop"
-  )
-
-ggplot(abspref_pct, aes(x = model_size, y = pct_correct, fill = corpus)) +
-  geom_col(position = position_dodge(0.7), width = 0.6) +
-  geom_errorbar(aes(ymin = pct_correct - 1.96 * se, ymax = pct_correct + 1.96 * se),
-                position = position_dodge(0.7), width = 0.25) +
-  geom_hline(yintercept = 50, linetype = "dashed", colour = "grey40") +
-  annotate("text", x = 0.5, y = 52, label = "chance (50%)", hjust = 0,
-           colour = "grey40", size = 3.5) +
-  geom_text(aes(label = sprintf("%.0f%%\n(n=%d)", pct_correct, n),
-                y = pct_correct + 1.96 * se + 3),
-            position = position_dodge(0.7), size = 3.0, vjust = 0) +
-  scale_fill_manual(values = c(BabyLM = "#154733", C4 = "#F0B323"), name = "Corpus") +
-  scale_y_continuous("AbsPref predicts correct direction (%)",
-                     limits = c(0, 110), breaks = seq(0, 100, 20)) +
-  labs(
-    title    = "% of 125M-disagreement items where AbsPref is correct — by model size",
-    subtitle = "Items selected from 125M only; same items traced in 350M and 1.3B",
-    x        = "Model size"
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "right")
-```
 
 ## Full replication table
 
@@ -675,10 +668,10 @@ Each row is a binomial. Markers show:
 
 ```{r abspref-relfreq-helper}
 # Shared helper: build long-format data and produce the comparison plot per corpus.
-# items_df must have columns: corpus, binom, sort_val (used to order binomials).
+# items_df must have columns: corpus, binom, sort_val, log_total (from items_125m).
 plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
   # items_df is derived from items_125m and already has GenPref_centered (AbsPref,
-  # P(alpha)-0.5) and freq_prob_c (RelFreq, P(alpha)-0.5). No transform needed.
+  # P(alpha)-0.5), freq_prob_c (RelFreq, P(alpha)-0.5), and log_total.
   # Model preference is pref_prob = plogis(preference) - 0.5, from dat_final.
   d_refs <- items_df |>
     pivot_longer(c(GenPref_centered, freq_prob_c),
@@ -690,17 +683,18 @@ plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
 
   d_models <- dat_final |>
     semi_join(items_df, by = c("corpus", "binom")) |>
-    left_join(items_df |> select(corpus, binom, sort_val), by = c("corpus", "binom")) |>
-    transmute(corpus, binom, sort_val,
+    left_join(items_df |> select(corpus, binom, sort_val, log_total),
+              by = c("corpus", "binom")) |>
+    transmute(corpus, binom, sort_val, log_total,
               source = paste0("Model ", as.character(model_size)),
               x      = pref_prob)
 
   d_long <- bind_rows(
-    d_refs |> select(corpus, binom, sort_val, source, x),
+    d_refs |> select(corpus, binom, sort_val, log_total, source, x),
     d_models
   ) |>
     mutate(
-      binom  = fct_reorder(binom, sort_val),
+      binom  = fct_reorder(binom, log_total),   # high overall freq at top
       source = factor(source, levels = c("AbsPref", "RelFreq",
                                           "Model 125M", "Model 350M", "Model 1.3B"))
     )
@@ -727,20 +721,27 @@ plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
   for (corp in c("BabyLM", "C4")) {
     d <- filter(d_long, corpus == corp)
     if (nrow(d) == 0) next
+    d_ann <- d |> distinct(binom, log_total) |>
+      mutate(total_label = format(round(exp(log_total)), big.mark = ",", scientific = FALSE))
     p <- ggplot(d, aes(y = binom, x = x, colour = source, shape = source, size = source)) +
       geom_vline(xintercept = 0, colour = "grey60", linewidth = 0.4) +
       geom_point(alpha = 0.9, stroke = 0.4) +
+      geom_text(data = d_ann,
+                aes(y = binom, x = 0.53, label = total_label),
+                inherit.aes = FALSE, hjust = 0, size = 2.6, colour = "grey40") +
       scale_colour_manual(values = colour_vals, name = NULL) +
       scale_shape_manual(values = shape_vals, name = NULL) +
       scale_size_manual(values = size_vals, name = NULL, guide = "none") +
       scale_x_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form; all values on the same scale)",
                          limits = c(-0.5, 0.5)) +
+      coord_cartesian(clip = "off") +
       labs(title    = sprintf("%s \u2014 %s", corp, title_suffix),
-           subtitle = subtitle) +
+           subtitle = paste(subtitle, "(rows ordered high\u2192low overall freq; right labels = total corpus count)")) +
       theme_bw(base_size = 11) +
       theme(axis.title.y    = element_blank(),
             legend.position = "bottom",
-            plot.title      = element_text(face = "bold"))
+            plot.title      = element_text(face = "bold"),
+            plot.margin     = margin(5, 55, 5, 5, "pt"))
     print(p)
     cat("\n\n")
   }
@@ -809,17 +810,21 @@ extreme_125m <- items_125m |>
 cat(sprintf("Extreme AbsPref items (|AbsPref| > 0.4): BabyLM = %d, C4 = %d\n",
   sum(extreme_125m$corpus == "BabyLM"), sum(extreme_125m$corpus == "C4")))
 
-# dat_final is final-checkpoint only; GenPref_centered and freq_prob_c already present
+# dat_final is final-checkpoint only; join log_total from items_125m for ordering
 dat_extreme_trace <- dat_final |>
   semi_join(extreme_125m, by = c("corpus", "binom")) |>
-  mutate(binom = fct_reorder(binom, abs(GenPref_centered)))
+  left_join(extreme_125m |> select(corpus, binom, log_total_ref = log_total),
+            by = c("corpus", "binom")) |>
+  mutate(binom = fct_reorder(binom, log_total_ref))  # high overall freq at top
 
 for (corp in c("BabyLM", "C4")) {
   d <- filter(dat_extreme_trace, corpus == corp)
   if (nrow(d) == 0) next
 
-  d_freq    <- d |> distinct(binom, freq_prob_c, GenPref_centered)
-  d_abspref <- d_freq  # same distinct rows; GenPref_centered already there
+  d_freq    <- d |> distinct(binom, freq_prob_c, GenPref_centered, log_total_ref)
+  d_abspref <- d_freq
+  d_ann     <- d_freq |>
+    mutate(total_label = format(round(exp(log_total_ref)), big.mark = ",", scientific = FALSE))
 
   p <- ggplot(d, aes(y = binom, x = pref_prob, colour = model_size, shape = model_size)) +
     geom_vline(xintercept = 0, linetype = "solid", colour = "grey60", linewidth = 0.4) +
@@ -832,15 +837,20 @@ for (corp in c("BabyLM", "C4")) {
                  colour = "#9e3d8e", linewidth = 0.9, linetype = "dashed",
                  inherit.aes = FALSE) +
     geom_point(size = 3.5, stroke = 0.8) +
+    geom_text(data = d_ann,
+              aes(y = binom, x = 0.53, label = total_label),
+              inherit.aes = FALSE, hjust = 0, size = 2.6, colour = "grey40") +
     scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
     scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
     scale_x_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form)", limits = c(-0.5, 0.5)) +
+    coord_cartesian(clip = "off") +
     labs(
       title    = sprintf("%s \u2014 Extreme AbsPref items (|AbsPref| > 0.4)", corp),
-      subtitle = "Gold dashed = RelFreq; purple dashed = AbsPref; dots = model preference per size"
+      subtitle = "Gold dashed = RelFreq; purple dashed = AbsPref; dots = model pref per size; right labels = total corpus count. Ordered high\u2192low overall freq."
     ) +
     theme_bw(base_size = 11) +
-    theme(axis.title.y = element_blank(), legend.position = "bottom")
+    theme(axis.title.y = element_blank(), legend.position = "bottom",
+          plot.margin  = margin(5, 55, 5, 5, "pt"))
   print(p)
   cat("\n\n")
 }
@@ -868,29 +878,85 @@ dat_flat <- dat_final |>
   filter(!is.na(GenPref_centered), !is.na(preference), !is.na(log_total))
 ```
 
-## Scatter: preference ~ AbsPref, overlaid across model sizes
+## Tug-of-war: where AbsPref, RelFreq, and model preferences fall
 
-Same items, same corpus — the three model sizes are overlaid so you can see
-whether the AbsPref–preference relationship is consistent.
+For all items where **AbsPref and RelFreq point in opposite directions** (all models,
+final checkpoint), we orient everything so AbsPref is always positive and RelFreq
+always negative (using `dat_conflict` computed above). This lets us ask: when the
+two signals conflict, where does each model's preference land?
 
-```{r plot-flat-scatter, fig.height=6}
-ggplot(dat_flat, aes(x = GenPref_centered, y = pref_prob,
-                     colour = model_size, fill = model_size)) +
-  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_smooth(aes(group = model_size), method = "lm", se = TRUE,
-              linewidth = 0.9, alpha = 0.12) +
-  geom_point(shape = 21, size = 2.0, alpha = 0.55, colour = "grey30", stroke = 0.3) +
-  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
-  scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+**Plot A** shows the *distributions* of all three signals on the same axis — you can
+see the spread and central tendency of AbsPref (always right), RelFreq (always left),
+and each model's preference (in between). **Plot B** shows model preference as a
+function of AbsPref strength, coloured by how strongly RelFreq opposes.
+
+```{r plot-tug-of-war-dist, fig.height=5}
+# Build long-format: one row per signal per item
+# AbsPref and RelFreq are item-level; model pref is model×item level
+conflict_refs <- dat_conflict |>
+  distinct(corpus, binom, abspref_or, relfreq_or) |>
+  pivot_longer(c(abspref_or, relfreq_or), names_to = "signal", values_to = "value_or") |>
+  mutate(signal = recode(signal, "abspref_or" = "AbsPref", "relfreq_or" = "RelFreq"))
+
+conflict_prefs <- dat_conflict |>
+  transmute(corpus, binom,
+            signal = paste0("Model ", as.character(model_size)),
+            value_or = pref_or)
+
+conflict_long <- bind_rows(conflict_refs, conflict_prefs) |>
+  mutate(signal = factor(signal,
+    levels = c("RelFreq", "Model 125M", "Model 350M", "Model 1.3B", "AbsPref")))
+
+signal_colours <- c(
+  "AbsPref"    = "#9e3d8e",
+  "RelFreq"    = "#cc8800",
+  "Model 125M" = SIZE_COLOURS[["125M"]],
+  "Model 350M" = SIZE_COLOURS[["350M"]],
+  "Model 1.3B" = SIZE_COLOURS[["1.3B"]]
+)
+
+ggplot(conflict_long, aes(x = value_or, y = signal, fill = signal, colour = signal)) +
+  geom_vline(xintercept = 0, colour = "grey50", linewidth = 0.4) +
+  geom_violin(alpha = 0.35, linewidth = 0.5, adjust = 1.2) +
+  geom_boxplot(width = 0.18, outlier.size = 0.5, outlier.alpha = 0.3,
+               colour = "grey20", fill = NA, linewidth = 0.4) +
+  scale_fill_manual(values   = signal_colours, guide = "none") +
+  scale_colour_manual(values = signal_colours, guide = "none") +
+  scale_x_continuous("P(\u03b1) \u2212 0.5 (oriented: + = AbsPref direction, \u2212 = RelFreq direction)",
+                     limits = c(-0.5, 0.5)) +
   facet_wrap(~ corpus) +
   labs(
-    title    = "Near-flat RelFreq items: preference ~ AbsPref across model sizes",
-    subtitle = sprintf("Items selected where |log(\u03b1/\u03b2)| < %.1f in 125M; same items shown for all sizes",
-                       FLAT_THRESHOLD),
-    x = "AbsPref  P(\u03b1) \u2212 0.5", y = "Model preference  P(\u03b1) \u2212 0.5"
+    title    = "Tug-of-war: distributions of AbsPref, RelFreq, and model preference",
+    subtitle = "All items where AbsPref and RelFreq conflict; oriented so AbsPref > 0, RelFreq < 0 (all models, final checkpoint)",
+    y        = NULL
   ) +
-  theme_bw(base_size = 12) +
-  theme(strip.text = element_text(face = "bold"), legend.position = "bottom")
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"), panel.grid.minor = element_blank())
+```
+
+```{r plot-tug-of-war-scatter, fig.height=7}
+# Scatter: model preference ~ AbsPref strength, coloured by RelFreq opposition
+# abspref_or always > 0 (oriented); relfreq_or always < 0; abs(relfreq_or) = opposition strength
+ggplot(dat_conflict,
+       aes(x = abspref_or, y = pref_or, colour = abs(relfreq_or))) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50", linewidth = 0.4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              colour = "#9e3d8e", alpha = 0.5, linewidth = 0.7) +
+  annotate("text", x = 0.48, y = 0.48, label = "= AbsPref", hjust = 1,
+           colour = "#9e3d8e", size = 3, fontface = "italic") +
+  geom_point(alpha = 0.35, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9, colour = "grey20") +
+  scale_colour_gradient(low = "grey75", high = "#cc8800",
+                        name = "|RelFreq|\nopposing\nstrength") +
+  facet_grid(corpus ~ model_size) +
+  labs(
+    title    = "Model preference as a function of AbsPref (conflict items only)",
+    subtitle = "Colour = how strongly RelFreq opposes (darker = stronger RelFreq pull in opposite direction).\nDashed line = perfect AbsPref tracking.",
+    x = "AbsPref  P(\u03b1)\u22120.5 (oriented +)",
+    y = "Model preference  P(\u03b1)\u22120.5 (oriented: + = follows AbsPref)"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "right")
 ```
 
 ## AbsPref × OverallFreq — faceted by model size
