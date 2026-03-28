@@ -47,6 +47,8 @@ Three analyses:
 ```{r libraries}
 library(tidyverse)
 library(duckdb)
+library(future)
+library(furrr)
 library(ggrepel)
 library(scales)
 library(kableExtra)
@@ -80,6 +82,15 @@ FLAT_THRESHOLD <- 0.3   # roughly P(alpha) in [0.43, 0.57]
 # Number of case-study binomials
 N_CASE_BINOMS  <- 8
 
+# Parallelism
+N_CORES <- parallel::detectCores(logical = FALSE)
+message(sprintf("Detected %d physical cores", N_CORES))
+plan(multicore, workers = N_CORES)
+
+# Parquet cache path (same location as the CSV, faster for repeated reads)
+EXPOSURES_PARQUET     <- sub("\\.csv$", ".parquet", EXPOSURES_CSV)
+EXPOSURES_PARQUET_FWD <- gsub("\\\\", "/", EXPOSURES_PARQUET)
+
 stopifnot(file.exists(TRAIN_CSV), file.exists(EXPOSURES_CSV))
 ```
 
@@ -101,34 +112,65 @@ sample_steps <- function(model_df, n = N_TRAJ_CHECKPOINTS) {
   steps[idx]
 }
 
-# Per-call DuckDB connection (mirrors analysis2.Rmd).
-# binom_filter: optional character vector — load only those binomials.
-add_dyn_freq <- function(cdat, binom_filter = NULL) {
-  m <- unique(cdat$model)
-  s <- unique(cdat$step)
-  if (length(m) != 1 || length(s) != 1)
-    stop("add_dyn_freq: cdat must be a single model x step slice")
-  if (!is.null(binom_filter))
-    cdat <- filter(cdat, binom %in% binom_filter)
-  if (nrow(cdat) == 0) return(tibble())
-
-  m_safe    <- gsub("'", "''", m)
-  con_local <- dbConnect(duckdb::duckdb())
-  on.exit(dbDisconnect(con_local, shutdown = TRUE))
-  dbExecute(con_local, sprintf(
-    "CREATE VIEW exp AS SELECT * FROM read_csv_auto('%s')", EXPOSURES_CSV_FWD
+# ── One-time Parquet conversion ───────────────────────────────────────────────
+# Converts the 458 MB CSV to Parquet on first run. Subsequent runs skip this.
+# DuckDB reads Parquet ~5-10x faster than CSV (columnar, no parsing overhead).
+ensure_parquet <- function() {
+  if (file.exists(EXPOSURES_PARQUET)) {
+    message(sprintf("Parquet cache found: %s", EXPOSURES_PARQUET))
+    return(invisible(NULL))
+  }
+  message("Converting exposures CSV to Parquet (one-time)...")
+  t0  <- proc.time()
+  con <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  dbExecute(con, sprintf("SET threads = %d", N_CORES))
+  dbExecute(con, sprintf(
+    "COPY (SELECT * FROM read_csv_auto('%s')) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD)",
+    EXPOSURES_CSV_FWD, EXPOSURES_PARQUET_FWD
   ))
-  freq_raw <- dbGetQuery(con_local, sprintf("
-    SELECT binom,
-           ANY_VALUE(alpha_seen) AS alpha_seen,
-           ANY_VALUE(beta_seen)  AS beta_seen,
-           ANY_VALUE(tokens)     AS tokens
-    FROM exp
-    WHERE model = '%s' AND step = %d
-    GROUP BY binom
-  ", m_safe, s))
+  elapsed <- (proc.time() - t0)[["elapsed"]]
+  message(sprintf("Parquet written in %.1f s", elapsed))
+}
 
-  freq_dat <- as_tibble(freq_raw) |>
+# ── Batch DuckDB query ────────────────────────────────────────────────────────
+# Fetches alpha_seen / beta_seen / tokens for all rows in meta_df (a data frame
+# with columns `model` and `step`) in a single file scan.
+# binom_filter: if supplied, only those binomials are returned (saves memory for
+#               the trajectory load where we only need a handful of binomials).
+batch_dyn_freq <- function(meta_df, binom_filter = NULL) {
+  stopifnot(all(c("model", "step") %in% names(meta_df)))
+
+  con <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  dbExecute(con, sprintf("SET threads = %d", N_CORES))
+
+  src <- if (file.exists(EXPOSURES_PARQUET))
+    sprintf("read_parquet('%s')", EXPOSURES_PARQUET_FWD)
+  else
+    sprintf("read_csv_auto('%s')", EXPOSURES_CSV_FWD)
+  dbExecute(con, sprintf("CREATE VIEW exp AS SELECT * FROM %s", src))
+
+  # Load the model × step pairs as an in-memory table for an efficient JOIN
+  dbWriteTable(con, "pairs", meta_df |> distinct(model, step), overwrite = TRUE)
+
+  binom_clause <- if (!is.null(binom_filter)) {
+    binom_list <- paste0("'", gsub("'", "''", binom_filter), "'", collapse = ", ")
+    sprintf("AND e.binom IN (%s)", binom_list)
+  } else ""
+
+  freq_raw <- dbGetQuery(con, sprintf("
+    SELECT e.model, e.step, e.binom,
+           ANY_VALUE(e.alpha_seen) AS alpha_seen,
+           ANY_VALUE(e.beta_seen)  AS beta_seen,
+           ANY_VALUE(e.tokens)     AS tokens
+    FROM exp e
+    INNER JOIN pairs p ON e.model = p.model AND e.step = p.step
+    %s
+    GROUP BY e.model, e.step, e.binom
+  ", binom_clause))
+
+  as_tibble(freq_raw) |>
     mutate(
       log_freq_ratio = if_else(alpha_seen > 0 & beta_seen > 0,
                                log(alpha_seen / beta_seen), NA_real_),
@@ -137,19 +179,26 @@ add_dyn_freq <- function(cdat, binom_filter = NULL) {
                                log(alpha_seen + beta_seen), NA_real_)
     ) |>
     select(-alpha_seen, -beta_seen)
+}
 
-  cdat |>
-    left_join(freq_dat, by = "binom") |>
-    mutate(
-      signed_gap  = preference - log_freq_ratio,
-      log_total_c = as.numeric(scale(log_total))
-    )
+# ── Join freq data onto training data and compute derived columns ─────────────
+attach_freq <- function(train_subset, freq_df) {
+  train_subset |>
+    left_join(freq_df, by = c("model", "step", "binom")) |>
+    mutate(signed_gap = preference - log_freq_ratio) |>
+    group_by(model, step) |>
+    mutate(log_total_c = as.numeric(scale(log_total))) |>
+    ungroup()
 }
 ```
 
 ------------------------------------------------------------------------
 
 # Data Loading
+
+```{r parquet-cache}
+ensure_parquet()
+```
 
 ```{r load-train}
 message("Loading training data...")
@@ -173,21 +222,19 @@ final_ck_meta <- ck_meta |>
 ```
 
 ```{r load-final}
-message("Loading final-checkpoint data for all models...")
-dat_final_raw <- map_dfr(seq_len(nrow(final_ck_meta)), function(i) {
-  m  <- final_ck_meta$model[i]
-  s  <- final_ck_meta$step[i]
-  ck <- final_ck_meta$ck_idx[i]
-  message(sprintf("  %s (step=%d)", m, s))
-  add_dyn_freq(filter(train, model == m, step == s)) |>
-    mutate(
-      ck_idx     = ck,
-      corpus     = parse_corpus(m),
-      model_size = factor(parse_size(m), levels = SIZE_LEVELS)
-    )
-})
+# Single DuckDB scan for all models' final checkpoints — one file read total.
+message("Fetching final-checkpoint exposures (single DuckDB scan)...")
+t0 <- proc.time()
+freq_final <- batch_dyn_freq(final_ck_meta)
+message(sprintf("  Done in %.1f s (%d rows)", (proc.time() - t0)[["elapsed"]], nrow(freq_final)))
 
-dat_final <- dat_final_raw |>
+dat_final <- train |>
+  inner_join(final_ck_meta |> select(model, step, ck_idx), by = c("model", "step")) |>
+  attach_freq(freq_final) |>
+  mutate(
+    corpus     = parse_corpus(model),
+    model_size = factor(parse_size(model), levels = SIZE_LEVELS)
+  ) |>
   filter(!is.na(log_freq_ratio), !is.na(GenPref_centered), !is.na(preference)) |>
   mutate(
     pref_dir    = sign(preference),
@@ -196,6 +243,9 @@ dat_final <- dat_final_raw |>
     relfreq_ok  = (pref_dir == freq_dir),
     abspref_ok  = (pref_dir == abspref_dir)
   )
+
+message(sprintf("Final dataset: %d rows, %d models, %d unique binomials",
+  nrow(dat_final), n_distinct(dat_final$model), n_distinct(dat_final$binom)))
 ```
 
 ## Identify items from 125M model
@@ -268,10 +318,11 @@ AbsPref (direction indicated by colour) rather than with RelFreq.
 
 ```{r plot-disagree-trace, fig.height=10}
 # Get all-model-size data for these items
+# Only pull columns from disagree_125m that aren't already in dat_final
+# (GenPref_centered and log_freq_ratio already exist there from the training join)
 dat_disagree_trace <- dat_final |>
   semi_join(disagree_125m, by = c("corpus", "binom")) |>
-  left_join(disagree_125m |> select(corpus, binom, signed_gap_125m, GenPref_centered,
-                                     log_freq_ratio, abspref_ok_125m),
+  left_join(disagree_125m |> select(corpus, binom, signed_gap_125m, abspref_ok_125m),
             by = c("corpus", "binom")) |>
   mutate(
     binom        = fct_reorder(binom, abs(signed_gap_125m)),
@@ -584,24 +635,25 @@ print(case_binoms |> select(corpus, binom, log_freq_ratio, GenPref_centered, sig
 
 ```{r load-case-traj}
 case_binom_vec <- unique(case_binoms$binom)
-message(sprintf("Loading trajectories for %d binomials...", length(case_binom_vec)))
+message(sprintf("Loading trajectories for %d binomials (single DuckDB scan)...", length(case_binom_vec)))
 
-dat_traj <- map_dfr(seq_len(nrow(ck_meta)), function(i) {
-  m  <- ck_meta$model[i]
-  s  <- ck_meta$step[i]
-  ck <- ck_meta$ck_idx[i]
-  cdat <- filter(train, model == m, step == s, binom %in% case_binom_vec)
-  if (nrow(cdat) == 0) return(tibble())
-  add_dyn_freq(cdat, binom_filter = case_binom_vec) |>
-    mutate(
-      ck_idx     = ck,
-      corpus     = parse_corpus(m),
-      model_size = factor(parse_size(m), levels = SIZE_LEVELS)
-    )
-}) |>
-  filter(!is.na(tokens))
+# One scan of the Parquet file for all 20 checkpoints × all models, filtered to
+# case binomials — replaces the previous loop of 120 separate DuckDB connections.
+t0 <- proc.time()
+freq_traj <- batch_dyn_freq(ck_meta, binom_filter = case_binom_vec)
+message(sprintf("  DuckDB fetch done in %.1f s (%d rows)", (proc.time() - t0)[["elapsed"]], nrow(freq_traj)))
 
-message(sprintf("Loaded %d trajectory rows", nrow(dat_traj)))
+dat_traj <- train |>
+  filter(binom %in% case_binom_vec) |>
+  inner_join(ck_meta, by = c("model", "step")) |>
+  attach_freq(freq_traj) |>
+  mutate(
+    corpus     = parse_corpus(model),
+    model_size = factor(parse_size(model), levels = SIZE_LEVELS)
+  ) |>
+  filter(!is.na(tokens), !is.na(log_freq_ratio))
+
+message(sprintf("Trajectory dataset: %d rows", nrow(dat_traj)))
 ```
 
 ```{r plot-case-traj, fig.height=5, results='asis'}
