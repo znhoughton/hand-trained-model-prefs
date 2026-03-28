@@ -550,8 +550,8 @@ replicate_summary |>
          n_sizes_abspref_ok, n_sizes_relfreq_ok, n_sizes) |>
   rename(
     Corpus = corpus, Binomial = binom,
-    `RelFreq\nP(\u03b1)\u22120.5` = freq_prob_c,
-    `AbsPref\nP(\u03b1)\u22120.5` = GenPref_centered,
+    `RelFreq\nP(a)-0.5` = freq_prob_c,
+    `AbsPref\nP(a)-0.5` = GenPref_centered,
     `Pref\n125M` = pref_125m, `Pref\n350M` = pref_350m, `Pref\n1.3B` = pref_13b,
     `N sizes:\nAbsPref OK` = n_sizes_abspref_ok,
     `N sizes:\nRelFreq OK` = n_sizes_relfreq_ok,
