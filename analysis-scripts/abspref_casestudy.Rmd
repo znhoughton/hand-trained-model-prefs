@@ -310,11 +310,94 @@ for (corp in c("BabyLM", "C4")) {
 }
 ```
 
-## Summary: does the disagreement replicate in larger models?
+## Does AbsPref predict the right direction across model sizes?
 
-For each 125M-disagreement item, we check how many of the 3 model sizes
-(including 125M itself) have the preference in the AbsPref direction
-(i.e., the direction that disagrees with RelFreq but aligns with AbsPref).
+Two complementary views of the same question. The **heatmap** shows every
+disagreement item × model-size cell: green = AbsPref predicts the correct
+preference direction; red = AbsPref wrong. The **bar chart** summarises the
+percentage of items where AbsPref is correct for each model size, so we can
+see whether the effect strengthens or weakens with scale.
+
+```{r plot-abspref-heatmap, fig.height=10}
+dat_abspref_grid <- dat_final |>
+  semi_join(disagree_125m, by = c("corpus", "binom")) |>
+  left_join(disagree_125m |> select(corpus, binom, signed_gap_125m),
+            by = c("corpus", "binom")) |>
+  mutate(
+    binom          = fct_reorder(binom, abs(signed_gap_125m)),
+    abspref_result = if_else(abspref_ok, "AbsPref correct", "AbsPref wrong")
+  )
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(dat_abspref_grid, corpus == corp)
+  if (nrow(d) == 0) next
+
+  p <- ggplot(d, aes(x = model_size, y = binom, fill = abspref_result)) +
+    geom_tile(colour = "white", linewidth = 0.6) +
+    geom_text(aes(
+      label = sprintf("%.2f", preference),
+      colour = abspref_result
+    ), size = 3.0, fontface = "bold") +
+    scale_fill_manual(
+      values = c("AbsPref correct" = "#a8ddb5", "AbsPref wrong" = "#fc8d59"),
+      name   = NULL
+    ) +
+    scale_colour_manual(
+      values = c("AbsPref correct" = "#084081", "AbsPref wrong" = "#7f0000"),
+      guide  = "none"
+    ) +
+    scale_x_discrete(position = "top") +
+    labs(
+      title    = sprintf("%s — AbsPref direction agreement by model size", corp),
+      subtitle = "Cell value = model preference (log-odds). Items ordered by |signed gap| in 125M (largest at top).",
+      x        = "Model size", y = NULL
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      legend.position  = "bottom",
+      axis.text.y      = element_text(size = 9),
+      panel.grid       = element_blank(),
+      plot.title       = element_text(face = "bold")
+    )
+
+  print(p)
+  cat("\n\n")
+}
+```
+
+```{r plot-abspref-pct-bar, fig.height=4}
+abspref_pct <- dat_abspref_grid |>
+  group_by(corpus, model_size) |>
+  summarise(
+    n          = n(),
+    pct_correct = mean(abspref_ok, na.rm = TRUE) * 100,
+    se          = sqrt(pct_correct / 100 * (1 - pct_correct / 100) / n) * 100,
+    .groups    = "drop"
+  )
+
+ggplot(abspref_pct, aes(x = model_size, y = pct_correct, fill = corpus)) +
+  geom_col(position = position_dodge(0.7), width = 0.6) +
+  geom_errorbar(aes(ymin = pct_correct - 1.96 * se, ymax = pct_correct + 1.96 * se),
+                position = position_dodge(0.7), width = 0.25) +
+  geom_hline(yintercept = 50, linetype = "dashed", colour = "grey40") +
+  annotate("text", x = 0.5, y = 52, label = "chance (50%)", hjust = 0,
+           colour = "grey40", size = 3.5) +
+  geom_text(aes(label = sprintf("%.0f%%\n(n=%d)", pct_correct, n),
+                y = pct_correct + 1.96 * se + 3),
+            position = position_dodge(0.7), size = 3.0, vjust = 0) +
+  scale_fill_manual(values = c(BabyLM = "#154733", C4 = "#F0B323"), name = "Corpus") +
+  scale_y_continuous("AbsPref predicts correct direction (%)",
+                     limits = c(0, 110), breaks = seq(0, 100, 20)) +
+  labs(
+    title    = "% of 125M-disagreement items where AbsPref is correct — by model size",
+    subtitle = "Items selected from 125M only; same items traced in 350M and 1.3B",
+    x        = "Model size"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "right")
+```
+
+## Full replication table
 
 ```{r disagree-replicate-table}
 replicate_summary <- dat_final |>
