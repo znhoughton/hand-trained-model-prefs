@@ -322,7 +322,10 @@ follows AbsPref vs. when it follows RelFreq, what are the typical values of
 AbsPref, RelFreq, and overall frequency?
 
 ```{r conflict-summary-stats}
-# All final-checkpoint rows where AbsPref and RelFreq are in opposite directions
+# All final-checkpoint rows where AbsPref and RelFreq are in opposite directions.
+# Values are *oriented* by the AbsPref direction (multiply by sign(GenPref_centered))
+# so that AbsPref is always positive and RelFreq always negative, making means
+# interpretable across items that differ in which ordering AbsPref favours.
 dat_conflict <- dat_final |>
   filter(sign(GenPref_centered) != sign(freq_prob_c),
          GenPref_centered != 0, freq_prob_c != 0) |>
@@ -331,38 +334,39 @@ dat_conflict <- dat_final |>
       abspref_ok  & !relfreq_ok ~ "AbsPref",
       relfreq_ok  & !abspref_ok ~ "RelFreq",
       TRUE                      ~ "Neither / tie"
-    )
+    ),
+    orient        = sign(GenPref_centered),   # +1 or -1
+    abspref_or    = GenPref_centered * orient, # always > 0
+    relfreq_or    = freq_prob_c      * orient, # always < 0 (opposite direction)
+    pref_or       = pref_prob        * orient  # > 0 if model follows AbsPref
   ) |>
   filter(model_follows != "Neither / tie")
 
 conflict_summary <- dat_conflict |>
   group_by(corpus, model_size, model_follows) |>
   summarise(
-    n               = n(),
-    mean_abspref    = mean(abs(GenPref_centered), na.rm = TRUE),
-    mean_relfreq    = mean(abs(freq_prob_c),      na.rm = TRUE),
-    mean_log_total  = mean(log_total,             na.rm = TRUE),
-    mean_total      = mean(exp(log_total),        na.rm = TRUE),
+    n              = n(),
+    mean_abspref   = mean(abspref_or, na.rm = TRUE),  # oriented: always positive
+    mean_relfreq   = mean(relfreq_or, na.rm = TRUE),  # oriented: always negative
+    mean_log_total = mean(log_total,  na.rm = TRUE),
     .groups = "drop"
   ) |>
-  mutate(across(c(mean_abspref, mean_relfreq, mean_log_total), \(x) round(x, 3)),
-         mean_total = round(mean_total, 0))
+  mutate(across(c(mean_abspref, mean_relfreq, mean_log_total), \(x) round(x, 3)))
 
 conflict_summary |>
   rename(
-    Corpus           = corpus,
-    Size             = model_size,
-    `Model follows`  = model_follows,
-    N                = n,
-    `|AbsPref|\nmean` = mean_abspref,
-    `|RelFreq|\nmean` = mean_relfreq,
-    `ln(total)\nmean` = mean_log_total,
-    `Total count\nmean` = mean_total
+    Corpus             = corpus,
+    Size               = model_size,
+    `Model follows`    = model_follows,
+    N                  = n,
+    `AbsPref\n(oriented)` = mean_abspref,
+    `RelFreq\n(oriented)` = mean_relfreq,
+    `ln(total)\nmean`  = mean_log_total
   ) |>
   kbl(caption = paste(
-    "When AbsPref and RelFreq conflict: average feature values broken down by",
-    "which signal the model follows. |AbsPref| and |RelFreq| are absolute values",
-    "on the P(\u03b1)\u22120.5 scale; Total count = \u03b1-seen + \u03b2-seen at final checkpoint.")) |>
+    "When AbsPref and RelFreq conflict: feature values by which signal the model follows.",
+    "Values are oriented so AbsPref is always positive (multiply by sign(AbsPref));",
+    "RelFreq is therefore always negative. ln(total) = log(\u03b1-seen + \u03b2-seen).")) |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = TRUE, font_size = 11) |>
   collapse_rows(columns = 1:2, valign = "middle")
@@ -372,24 +376,25 @@ conflict_summary |>
 conflict_summary_long <- dat_conflict |>
   group_by(corpus, model_follows) |>
   summarise(
-    `|AbsPref|`      = mean(abs(GenPref_centered), na.rm = TRUE),
-    `|RelFreq|`      = mean(abs(freq_prob_c),      na.rm = TRUE),
-    `ln(total freq)` = mean(log_total,             na.rm = TRUE),
+    AbsPref          = mean(abspref_or, na.rm = TRUE),
+    RelFreq          = mean(relfreq_or, na.rm = TRUE),
+    `ln(total freq)` = mean(log_total,  na.rm = TRUE),
     .groups = "drop"
   ) |>
-  pivot_longer(c(`|AbsPref|`, `|RelFreq|`, `ln(total freq)`),
+  pivot_longer(c(AbsPref, RelFreq, `ln(total freq)`),
                names_to = "metric", values_to = "value")
 
 ggplot(conflict_summary_long,
        aes(x = model_follows, y = value, fill = model_follows)) +
   geom_col(width = 0.6) +
+  geom_hline(yintercept = 0, linewidth = 0.4, colour = "grey40") +
   scale_fill_manual(values = c("AbsPref" = "#9e3d8e", "RelFreq" = "#cc8800"),
                     name = "Model follows") +
   facet_grid(metric ~ corpus, scales = "free_y") +
   labs(
     title    = "Feature values when model follows AbsPref vs. RelFreq",
-    subtitle = "Restricted to items where AbsPref and RelFreq point in opposite directions (all models, final checkpoint)",
-    x = NULL, y = "Mean value"
+    subtitle = "Items where AbsPref and RelFreq conflict; values oriented so AbsPref > 0 (all models, final checkpoint)",
+    x = NULL, y = "Mean value (AbsPref-oriented)"
   ) +
   theme_bw(base_size = 11) +
   theme(strip.text = element_text(face = "bold"),
@@ -787,6 +792,60 @@ plot_abspref_vs_relfreq(
 )
 ```
 
+## Plot 1b-iii: Items with extreme AbsPref (|AbsPref| > 0.4)
+
+Binomials where abstract preference is very strong (`|GenPref_centered| > 0.4`,
+i.e. more than 90% of the time appearing in one order in human preference data).
+Same plot style as Section 1 — shows whether model preference aligns with the
+strong abstract preference signal, and where RelFreq falls.
+
+```{r plot-abspref-extreme, fig.height=10, results='asis'}
+extreme_125m <- items_125m |>
+  filter(abs(GenPref_centered) > 0.4) |>
+  group_by(corpus) |>
+  slice_max(abs(GenPref_centered), n = 15) |>
+  ungroup()
+
+cat(sprintf("Extreme AbsPref items (|AbsPref| > 0.4): BabyLM = %d, C4 = %d\n",
+  sum(extreme_125m$corpus == "BabyLM"), sum(extreme_125m$corpus == "C4")))
+
+# dat_final is final-checkpoint only; GenPref_centered and freq_prob_c already present
+dat_extreme_trace <- dat_final |>
+  semi_join(extreme_125m, by = c("corpus", "binom")) |>
+  mutate(binom = fct_reorder(binom, abs(GenPref_centered)))
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(dat_extreme_trace, corpus == corp)
+  if (nrow(d) == 0) next
+
+  d_freq    <- d |> distinct(binom, freq_prob_c, GenPref_centered)
+  d_abspref <- d_freq  # same distinct rows; GenPref_centered already there
+
+  p <- ggplot(d, aes(y = binom, x = pref_prob, colour = model_size, shape = model_size)) +
+    geom_vline(xintercept = 0, linetype = "solid", colour = "grey60", linewidth = 0.4) +
+    geom_segment(data = d_freq,
+                 aes(y = binom, yend = binom, x = 0, xend = freq_prob_c),
+                 colour = "#cc8800", linewidth = 0.9, linetype = "dashed",
+                 inherit.aes = FALSE) +
+    geom_segment(data = d_abspref,
+                 aes(y = binom, yend = binom, x = 0, xend = GenPref_centered),
+                 colour = "#9e3d8e", linewidth = 0.9, linetype = "dashed",
+                 inherit.aes = FALSE) +
+    geom_point(size = 3.5, stroke = 0.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
+    scale_x_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form)", limits = c(-0.5, 0.5)) +
+    labs(
+      title    = sprintf("%s \u2014 Extreme AbsPref items (|AbsPref| > 0.4)", corp),
+      subtitle = "Gold dashed = RelFreq; purple dashed = AbsPref; dots = model preference per size"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(axis.title.y = element_blank(), legend.position = "bottom")
+  print(p)
+  cat("\n\n")
+}
+```
+
 ------------------------------------------------------------------------
 
 # Section 2: Near-Flat RelFreq Items (Identified in 125M)
@@ -959,6 +1018,29 @@ dat_traj <- train |>
 
 message(sprintf("Trajectory dataset: %d rows", nrow(dat_traj)))
 ```
+
+### Notable case: "days and years" in C4
+
+In C4, **"years and days"** (β ordering) is more common than **"days and years"** (α ordering):
+455 vs. 795 occurrences at end of training. This reflects the natural English tendency
+to order temporal units from largest to smallest (years → days). Here are 5 example
+sentences from the C4 corpus containing "years and days":
+
+> 1. "The reduction is based on the length of time (in **years and days**) that you retire early."
+>
+> 2. "...counting the **years and days** till retirement (the 'Reginald Perrin syndrome')."
+>
+> 3. "Every culture must choose a time in history at which to begin its count of **years and days**."
+>
+> 4. "Extended term is term life insurance purchased in advance by your cash values for a
+>    predetermined number of **years and days**."
+>
+> 5. "The EAU is a page of **years and days** to read with the best Creating Inclusive School
+>    Communities in the l of science." *(garbled OCR)*
+
+The consistent pattern across examples 1–4 is that "years and days" appears as a
+**duration span** (coarse-to-fine ordering), which conflicts with the abstract preference
+for "days and years" captured in AbsPref.
 
 ```{r plot-case-traj, fig.height=5, results='asis'}
 for (corp in c("BabyLM", "C4")) {
