@@ -408,7 +408,7 @@ dat_abspref_grid <- dat_final |>
             by = c("corpus", "binom")) |>
   left_join(items_125m |>
               mutate(abspref_lo = qlogis(GenPref_centered + 0.5)) |>
-              select(corpus, binom, abspref_lo, log_freq_ratio),
+              select(corpus, binom, abspref_lo),
             by = c("corpus", "binom")) |>
   mutate(abspref_result = if_else(abspref_ok, "AbsPref correct", "AbsPref wrong"))
 
