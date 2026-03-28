@@ -1,10 +1,16 @@
 #!/usr/bin/env Rscript
 # prepare_results_new.R ───────────────────────────────────────────────────────
-# Generates only the new CSVs added in the latest analysis round:
+# Re-generates all analysis-2 CSVs that use dynamic RelFreq values.
+# Run this after analysis2.Rmd finishes refitting; no need to re-run the full
+# prepare_results.R (which handles analysis.Rmd outputs).
+#
 #   humfit_traj_coefs.csv      (Analysis 2a: human pref ~ model pref trajectory)
+#   constr_traj_coefs.csv      (Analysis 2b: pref ~ all constraints trajectory)
 #   constr_vif_traj_coefs.csv  (Analysis 2g: VIF-filtered constraint trajectory)
 #   pref_btraj_coefs.csv       (Analysis 2d: pref ~ genpref + bigram + freq trajectory)
 #   sg_btraj_coefs.csv         (Analysis 2e: signed_gap ~ genpref + bigram + freq trajectory)
+#   pref_brel_final_coefs.csv  (Analysis 2f: pref ~ relfreq + bigram, final checkpoint)
+#   sg_brel_final_coefs.csv    (Analysis 2h: signed_gap ~ relfreq + bigram, final checkpoint)
 #   constraint_cor_traj.csv    (descriptive: constraint × preference correlations)
 #
 # Run with:  Rscript analysis-scripts/prepare_results_new.R
@@ -32,6 +38,13 @@ OUT_DIR    <- normalizePath(file.path(SCRIPT_DIR, "../Data/processed/results"),
                             mustWork = FALSE)
 CSV_PATH   <- normalizePath(file.path(SCRIPT_DIR, "../Data/processed/checkpoint_results_with_exposures.csv"),
                             mustWork = FALSE)
+
+message("SCRIPT_DIR : ", SCRIPT_DIR)
+message("MODELS_DIR : ", MODELS_DIR)
+message("OUT_DIR    : ", OUT_DIR)
+if (!dir.exists(MODELS_DIR))
+  stop("MODELS_DIR not found: ", MODELS_DIR,
+       "\n  Run from the analysis-scripts/ directory or via Rscript --file=.")
 
 dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 
@@ -118,7 +131,26 @@ if (file.exists(CSV_PATH)) {
   TRAJ_META <- tibble(slug = character(), ck_idx = integer(), tokens = double())
 }
 
-# ── Trajectory extractor ──────────────────────────────────────────────────────
+# ── Extractors ────────────────────────────────────────────────────────────────
+# Final / single-checkpoint models (no token count column).
+extract_and_save <- function(prefix, term_levels, term_labels, fname) {
+  paths <- list_fits(prefix)
+  if (length(paths) == 0) {
+    message(sprintf("  No .rds files for '%s'; skipping", prefix))
+    return(invisible(NULL))
+  }
+  message(sprintf("Processing %d file(s) for '%s'...", length(paths), prefix))
+  coefs <- map_dfr(paths, function(path) {
+    slug   <- sub("\\.rds$", "", sub(paste0("^", prefix), "", basename(path)))
+    fit    <- readRDS(path)
+    result <- extract_coefs(fit, slug, term_levels, term_labels)
+    rm(fit); gc()
+    result
+  })
+  save_csv(coefs, fname)
+}
+
+# Trajectory models (adds token count x-axis from TRAJ_META).
 extract_traj_and_save <- function(prefix, term_levels, term_labels, fname) {
   paths <- list_fits(prefix)
   if (length(paths) == 0) {
@@ -142,7 +174,7 @@ extract_traj_and_save <- function(prefix, term_levels, term_labels, fname) {
   save_csv(coefs, fname)
 }
 
-# ── Run new exports ───────────────────────────────────────────────────────────
+# ── Run exports ───────────────────────────────────────────────────────────────
 
 # 2a: human pref ~ model preference (logistic trajectory)
 extract_traj_and_save(
@@ -151,6 +183,22 @@ extract_traj_and_save(
   term_labels = "Model preference",
   fname       = "humfit_traj_coefs.csv"
 )
+
+# 2b: pref ~ all constraints trajectory
+TERM_LEVELS_CONSTR <- c(
+  CONSTRAINT_COLS,
+  "log_total_c", "freq_prob_c",
+  paste0(CONSTRAINT_COLS, ":log_total_c"),
+  "freq_prob_c:log_total_c"
+)
+TERM_LABELS_CONSTR <- c(
+  CONSTRAINT_COLS,
+  "Overall freq\n(ln total)", "RelFreq\n(P(alpha)\u22120.5)",
+  paste0(CONSTRAINT_COLS, " \u00d7\nOverall freq"),
+  "RelFreq \u00d7\nOverall freq"
+)
+extract_traj_and_save("constr_traj_", TERM_LEVELS_CONSTR, TERM_LABELS_CONSTR,
+                      "constr_traj_coefs.csv")
 
 # 2g: VIF-filtered constraint trajectory
 TERM_LEVELS_VIF <- c(
@@ -177,6 +225,12 @@ TERM_LABELS_BTRAJ <- c(
 )
 extract_traj_and_save("pref_btraj_", TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "pref_btraj_coefs.csv")
 extract_traj_and_save("sg_btraj_",   TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "sg_btraj_coefs.csv")
+
+# 2f/2h: pref / signed_gap ~ relfreq + bigram, final checkpoint only
+TERM_LEVELS_BREL <- c("freq_prob_c", "bigram_logodds_c")
+TERM_LABELS_BREL <- c("RelFreq", "BigramLogOdds")
+extract_and_save("pref_brel_final_", TERM_LEVELS_BREL, TERM_LABELS_BREL, "pref_brel_final_coefs.csv")
+extract_and_save("sg_brel_final_",   TERM_LEVELS_BREL, TERM_LABELS_BREL, "sg_brel_final_coefs.csv")
 
 # Constraint–preference correlation trajectories
 message("Computing constraint-preference correlation trajectories...")

@@ -699,19 +699,31 @@ message(sprintf("C4 — retained: %s", paste(vif_constr_c4, collapse = ", ")))
 
 ```{r vif-table, results="asis"}
 # Print VIF tables for both corpora
-vif_tbl <- function(vif_vals, corpus_label) {
+vif_tbl <- function(vif_vals, corpus_label, dropped, retained) {
   if (is.null(vif_vals)) { message(sprintf("No VIF data for %s", corpus_label)); return() }
   df <- data.frame(
     Predictor = names(vif_vals),
     VIF       = round(vif_vals, 2),
-    Retained  = ifelse(vif_vals <= 5, "Yes", "No (VIF > 3)"),
+    Retained  = ifelse(vif_vals <= 3, "Yes", "No (VIF > 3)"),
     row.names = NULL
   )
   cat(sprintf("\n**%s corpus VIF**\n\n", corpus_label))
   print(knitr::kable(df, format = "markdown"))
+  if (length(dropped) == 0) {
+    cat(sprintf("\n*%s: no constraints dropped (all VIF \u2264 3). Retained: %s.*\n\n",
+                corpus_label, paste(retained, collapse = ", ")))
+  } else {
+    cat(sprintf("\n*%s: **dropped** (VIF > 3): %s. **Retained**: %s.*\n\n",
+                corpus_label,
+                paste(dropped,  collapse = ", "),
+                paste(retained, collapse = ", ")))
+  }
 }
-vif_tbl(vif_blm, "BabyLM")
-vif_tbl(vif_c4,  "C4")
+
+dropped_blm  <- setdiff(CONSTRAINT_COLS_REDUCED, vif_constr_blm)
+dropped_c4   <- setdiff(CONSTRAINT_COLS_REDUCED, vif_constr_c4)
+vif_tbl(vif_blm, "BabyLM", dropped_blm, vif_constr_blm)
+vif_tbl(vif_c4,  "C4",     dropped_c4,  vif_constr_c4)
 ```
 
 ```{r fit-2g}
