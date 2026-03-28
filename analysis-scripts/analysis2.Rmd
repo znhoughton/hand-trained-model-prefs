@@ -55,6 +55,7 @@ library(brms)
 library(patchwork)
 library(future)
 library(furrr)
+library(duckdb)
 ```
 
 ```{r config}
@@ -76,7 +77,8 @@ HUMAN_CSV   <- file.path(DATA_DIR, "human_responses_attested.csv")
 AGG_CSV     <- file.path(DATA_DIR, "attested_agg.csv")
 BLM_BIGRAM_CSV <- normalizePath(file.path(SCRIPT_DIR, "../Data/babylm_bigram_exposures.csv"), mustWork = FALSE)
 C4_BIGRAM_CSV  <- normalizePath(file.path(SCRIPT_DIR, "../Data/c4_bigram_exposures.csv"),  mustWork = FALSE)
-EXPOSURES_CSV  <- normalizePath(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"), mustWork = FALSE)
+EXPOSURES_CSV     <- normalizePath(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"), mustWork = FALSE)
+EXPOSURES_CSV_FWD <- gsub("\\\\", "/", EXPOSURES_CSV)  # forward-slash path for DuckDB
 
 dir.create(MODELS_DIR, showWarnings = FALSE, recursive = TRUE)
 
@@ -137,13 +139,41 @@ sample_steps <- function(model_df, n = N_TRAJ_CHECKPOINTS) {
 }
 
 # Join checkpoint-specific freq_prob_c, log_freq_ratio, signed_gap, log_total_c
-# onto a single-checkpoint data slice.  Replaces static RelFreq / OverallFreq_log
-# everywhere in the fitting chunks.
+# onto a single-checkpoint data slice.  Opens a per-call DuckDB connection so
+# that no large global is needed (mirrors load_single_checkpoint in analysis.Rmd).
 add_dyn_freq <- function(cdat) {
+  m <- unique(cdat$model)
+  s <- unique(cdat$step)
+  if (length(m) != 1 || length(s) != 1)
+    stop("add_dyn_freq: cdat must be a single model \u00d7 step slice")
+  m_safe <- gsub("'", "''", m)
+
+  con_local <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con_local, shutdown = TRUE))
+  dbExecute(con_local, sprintf(
+    "CREATE VIEW exp AS SELECT * FROM read_csv_auto('%s')", EXPOSURES_CSV_FWD
+  ))
+  freq_raw <- dbGetQuery(con_local, sprintf("
+    SELECT binom,
+           ANY_VALUE(alpha_seen) AS alpha_seen,
+           ANY_VALUE(beta_seen)  AS beta_seen
+    FROM exp
+    WHERE model = '%s' AND step = %d
+    GROUP BY binom
+  ", m_safe, s))
+
+  freq_dat <- as_tibble(freq_raw) |>
+    mutate(
+      log_freq_ratio = if_else(alpha_seen > 0 & beta_seen > 0,
+                               log(alpha_seen / beta_seen), NA_real_),
+      freq_prob_c    = plogis(log_freq_ratio) - 0.5,
+      log_total      = if_else(alpha_seen + beta_seen > 0,
+                               log(alpha_seen + beta_seen), NA_real_)
+    ) |>
+    select(-alpha_seen, -beta_seen)
+
   cdat |>
-    left_join(select(dyn_freq, model, step, binom,
-                     freq_prob_c, log_freq_ratio, log_total),
-              by = c("model", "step", "binom")) |>
+    left_join(freq_dat, by = "binom") |>
     mutate(
       signed_gap  = preference - log_freq_ratio,
       log_total_c = as.numeric(scale(log_total))
@@ -497,45 +527,8 @@ Cells below fit models and save `.rds` files. Already-fitted models are skipped 
 message("Loading training data...")
 train <- read_csv(TRAIN_CSV, show_col_types = FALSE)
 
-# Load checkpoint-specific alpha_seen / beta_seen from the exposures file.
-# These are identical across prompts for a given (model, step, binom), so we
-# aggregate with ANY_VALUE to get one row per model × step × binom.
-# This replaces the static whole-corpus RelFreq for freq_prob_c, signed_gap,
-# and log_total_c throughout all fitting chunks.
-message("Loading dynamic frequency values from checkpoint_results_with_exposures.csv...")
-if (file.exists(EXPOSURES_CSV)) {
-  library(duckdb)
-  exp_path_fwd <- gsub("\\\\", "/", normalizePath(EXPOSURES_CSV))
-  con_exp <- dbConnect(duckdb::duckdb())
-  dbExecute(con_exp, sprintf(
-    "CREATE VIEW exp AS SELECT * FROM read_csv_auto('%s')", exp_path_fwd
-  ))
-  dyn_freq_raw <- dbGetQuery(con_exp, "
-    SELECT model, step, binom,
-           ANY_VALUE(alpha_seen) AS alpha_seen,
-           ANY_VALUE(beta_seen)  AS beta_seen
-    FROM exp
-    GROUP BY model, step, binom
-  ")
-  dbDisconnect(con_exp, shutdown = TRUE)
-  rm(con_exp, exp_path_fwd)
-
-  dyn_freq <- as_tibble(dyn_freq_raw) |>
-    mutate(
-      log_freq_ratio = if_else(alpha_seen > 0 & beta_seen > 0,
-                               log(alpha_seen / beta_seen), NA_real_),
-      freq_prob_c    = plogis(log_freq_ratio) - 0.5,
-      log_total      = if_else(alpha_seen + beta_seen > 0,
-                               log(alpha_seen + beta_seen), NA_real_)
-    ) |>
-    select(-alpha_seen, -beta_seen)
-  rm(dyn_freq_raw)
-  message(sprintf("  dyn_freq: %d rows (%d models, %d unique steps)",
-                  nrow(dyn_freq), n_distinct(dyn_freq$model),
-                  n_distinct(dyn_freq$step)))
-} else {
+if (!file.exists(EXPOSURES_CSV))
   stop("checkpoint_results_with_exposures.csv not found — cannot compute dynamic frequency values.")
-}
 
 message("Loading human responses...")
 human <- read_csv(HUMAN_CSV, show_col_types = FALSE)
@@ -552,9 +545,7 @@ message(sprintf("Fitting %d models: %s", length(MODELS_LIST), paste(MODELS_LIST,
 ```
 
 ```{r setup-parallel}
-# multicore uses fork — workers inherit globals (copy-on-write), so large globals
-# are not actually copied. Raise the safety-check limit accordingly.
-options(future.globals.maxSize = Inf)
+# multicore uses fork — workers inherit the environment without copying.
 plan(multicore, workers = N_PARALLEL_MODELS)
 message(sprintf("furrr plan: %s with %d workers", class(plan())[1], N_PARALLEL_MODELS))
 ```
