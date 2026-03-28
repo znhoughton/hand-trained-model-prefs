@@ -683,9 +683,9 @@ plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
 
   d_models <- dat_final |>
     semi_join(items_df, by = c("corpus", "binom")) |>
-    left_join(items_df |> select(corpus, binom, sort_val, log_total),
+    left_join(items_df |> select(corpus, binom, sort_val, log_total_ref = log_total),
               by = c("corpus", "binom")) |>
-    transmute(corpus, binom, sort_val, log_total,
+    transmute(corpus, binom, sort_val, log_total = log_total_ref,
               source = paste0("Model ", as.character(model_size)),
               x      = pref_prob)
 
