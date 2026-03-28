@@ -257,6 +257,7 @@ dat_final <- train |>
   ) |>
   filter(!is.na(log_freq_ratio), !is.na(GenPref_centered), !is.na(preference)) |>
   mutate(
+    pref_prob   = plogis(preference) - 0.5,          # P(alpha) - 0.5; same scale as GenPref_centered & freq_prob_c
     pref_dir    = sign(preference),
     freq_dir    = sign(log_freq_ratio),
     abspref_dir = sign(GenPref_centered),
@@ -266,6 +267,10 @@ dat_final <- train |>
 
 message(sprintf("Final dataset: %d rows, %d models, %d unique binomials",
   nrow(dat_final), n_distinct(dat_final$model), n_distinct(dat_final$binom)))
+
+# Sanity check: exactly one step per model (final checkpoint only)
+steps_per_model <- dat_final |> group_by(model) |> summarise(n_steps = n_distinct(step))
+stopifnot("dat_final has more than one step per model" = all(steps_per_model$n_steps == 1))
 ```
 
 ## Identify items from 125M model
@@ -280,16 +285,18 @@ items_125m <- dat_125m |>
   group_by(corpus, binom) |>
   summarise(
     log_freq_ratio   = first(log_freq_ratio),   # corpus-level (constant per binom×corpus)
-    GenPref_centered = first(GenPref_centered),  # constant per binom
+    freq_prob_c      = first(freq_prob_c),       # P(alpha) - 0.5 for RelFreq
+    GenPref_centered = first(GenPref_centered),  # constant per binom, already P(alpha) - 0.5
     preference_125m  = first(preference),
+    pref_prob_125m   = first(pref_prob),
     signed_gap_125m  = first(signed_gap),
     relfreq_ok_125m  = first(relfreq_ok),
     abspref_ok_125m  = first(abspref_ok),
     .groups          = "drop"
   ) |>
   mutate(
-    freq_dir    = sign(log_freq_ratio),
-    abspref_dir = sign(GenPref_centered),
+    freq_dir      = sign(log_freq_ratio),
+    abspref_dir   = sign(GenPref_centered),
     pref_dir_125m = sign(preference_125m)
   )
 
@@ -331,10 +338,10 @@ cat(sprintf("AbsPref correct in 125M: BabyLM %.0f%%, C4 %.0f%%\n",
 
 ## Preference across model sizes for 125M-disagreement items
 
-Each binomial row shows the model's preference (log-odds) for 125M, 350M,
-and 1.3B. The dashed vertical line marks where RelFreq falls (same for all
-sizes since same training corpus). We expect preferences to align with
-AbsPref (direction indicated by colour) rather than with RelFreq.
+Each binomial row shows the model's preference (P(α) − 0.5 scale) for 125M, 350M,
+and 1.3B. The dashed gold segment marks where RelFreq falls and the dashed purple
+segment marks AbsPref (both same for all model sizes since same training corpus).
+We expect preferences to align with AbsPref rather than RelFreq.
 
 ```{r plot-disagree-trace, fig.height=10}
 # Get all-model-size data for these items
@@ -346,6 +353,7 @@ top15_disagree <- disagree_125m |>
   slice_max(abs(signed_gap_125m), n = 15) |>
   ungroup()
 
+# dat_final is final-checkpoint only (verified by stopifnot in load-final chunk)
 dat_disagree_trace <- dat_final |>
   semi_join(top15_disagree, by = c("corpus", "binom")) |>
   left_join(disagree_125m |> select(corpus, binom, signed_gap_125m, abspref_ok_125m),
@@ -359,14 +367,14 @@ for (corp in c("BabyLM", "C4")) {
   d <- filter(dat_disagree_trace, corpus == corp)
   if (nrow(d) == 0) next
 
-  # Reference lines: RelFreq and AbsPref (both corpus/binom-level, constant per binom)
-  d_freq    <- d |> distinct(binom, log_freq_ratio, signed_gap_125m)
+  # Reference lines: RelFreq and AbsPref (both on P(alpha)-0.5 scale)
+  d_freq    <- d |> distinct(binom, freq_prob_c, signed_gap_125m)
   d_abspref <- d |> distinct(binom, GenPref_centered, signed_gap_125m)
 
-  p <- ggplot(d, aes(y = binom, x = preference, colour = model_size, shape = model_size)) +
+  p <- ggplot(d, aes(y = binom, x = pref_prob, colour = model_size, shape = model_size)) +
     geom_vline(xintercept = 0, linetype = "solid", colour = "grey60", linewidth = 0.4) +
     geom_segment(data = d_freq,
-                 aes(y = binom, yend = binom, x = 0, xend = log_freq_ratio),
+                 aes(y = binom, yend = binom, x = 0, xend = freq_prob_c),
                  colour = "#cc8800", linewidth = 0.9, linetype = "dashed",
                  inherit.aes = FALSE) +
     geom_segment(data = d_abspref,
@@ -376,7 +384,7 @@ for (corp in c("BabyLM", "C4")) {
     geom_point(size = 3.5, stroke = 0.8) +
     scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
     scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
-    scale_x_continuous("Model preference (log-odds; + = prefer alpha form)") +
+    scale_x_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form)", limits = c(-0.5, 0.5)) +
     labs(
       title    = sprintf("%s — 125M disagreement items across model sizes", corp),
       subtitle = "Gold dashed = corpus RelFreq direction; purple dashed = AbsPref direction; dots = model preference per size"
@@ -401,28 +409,26 @@ percentage of items where AbsPref is correct for each model size, so we can
 see whether the effect strengthens or weakens with scale.
 
 ```{r plot-abspref-heatmap, fig.height=8}
+# dat_final is final-checkpoint only (verified by stopifnot in load-final chunk)
 # Top 15 per corpus, matching the other Section 1 plots
 dat_abspref_grid <- dat_final |>
   semi_join(top15_disagree, by = c("corpus", "binom")) |>
   left_join(disagree_125m |> select(corpus, binom, signed_gap_125m),
             by = c("corpus", "binom")) |>
-  left_join(items_125m |>
-              mutate(abspref_lo = qlogis(GenPref_centered + 0.5)) |>
-              select(corpus, binom, abspref_lo),
-            by = c("corpus", "binom")) |>
   mutate(abspref_result = if_else(abspref_ok, "AbsPref correct", "AbsPref wrong"))
+# dat_final already carries GenPref_centered (P(alpha)-0.5) and freq_prob_c (same scale) from attach_freq
 
 for (corp in c("BabyLM", "C4")) {
   d <- filter(dat_abspref_grid, corpus == corp)
   if (nrow(d) == 0) next
 
-  # Build reference columns (AbsPref and RelFreq) as extra tiles
+  # Build reference columns (AbsPref and RelFreq) as extra tiles — both on P(alpha)-0.5 scale
   d_refs <- d |>
-    distinct(binom, signed_gap_125m, abspref_lo, log_freq_ratio) |>
-    pivot_longer(c(abspref_lo, log_freq_ratio),
+    distinct(binom, signed_gap_125m, GenPref_centered, freq_prob_c) |>
+    pivot_longer(c(GenPref_centered, freq_prob_c),
                  names_to = "col", values_to = "val") |>
     mutate(
-      col_label = recode(col, "abspref_lo" = "AbsPref", "log_freq_ratio" = "RelFreq"),
+      col_label = recode(col, "GenPref_centered" = "AbsPref", "freq_prob_c" = "RelFreq"),
       col_label = factor(col_label, levels = c("AbsPref", "RelFreq"))
     )
 
@@ -442,7 +448,7 @@ for (corp in c("BabyLM", "C4")) {
     geom_tile(colour = "white", linewidth = 0.6) +
     geom_text(aes(label = sprintf("%.2f", val)), size = 2.8, colour = "grey10") +
     scale_fill_gradient2(low = "#d73027", mid = "grey95", high = "#1a9850",
-                         midpoint = 0, name = "Log-odds", guide = "none") +
+                         midpoint = 0, name = "P(\u03b1)\u22120.5", guide = "none") +
     scale_x_discrete(position = "top") +
     labs(x = NULL, y = NULL) +
     theme_bw(base_size = 11) +
@@ -452,7 +458,7 @@ for (corp in c("BabyLM", "C4")) {
 
   p_model <- ggplot(d_model, aes(x = model_size, y = binom, fill = abspref_result)) +
     geom_tile(colour = "white", linewidth = 0.6) +
-    geom_text(aes(label = sprintf("%.2f", preference),
+    geom_text(aes(label = sprintf("%.2f", pref_prob),
                   colour = abspref_result), size = 2.8, fontface = "bold") +
     scale_fill_manual(values = c("AbsPref correct" = "#a8ddb5", "AbsPref wrong" = "#fc8d59"),
                       name = NULL) +
@@ -523,13 +529,13 @@ replicate_summary <- dat_final |>
     n_sizes_abspref_ok = sum(abspref_ok),
     n_sizes_relfreq_ok = sum(relfreq_ok),
     n_sizes            = n_distinct(model_size),
-    pref_125m          = preference[model_size == "125M"][1],
-    pref_350m          = preference[model_size == "350M"][1],
-    pref_13b           = preference[model_size == "1.3B"][1],
+    pref_125m          = pref_prob[model_size == "125M"][1],
+    pref_350m          = pref_prob[model_size == "350M"][1],
+    pref_13b           = pref_prob[model_size == "1.3B"][1],
     .groups            = "drop"
   ) |>
   left_join(items_125m |> select(corpus, binom, GenPref_centered,
-                                  log_freq_ratio, signed_gap_125m),
+                                  freq_prob_c, signed_gap_125m),
             by = c("corpus", "binom")) |>
   arrange(corpus, desc(abs(signed_gap_125m)))
 
@@ -537,15 +543,15 @@ replicate_summary |>
   group_by(corpus) |>
   slice_max(abs(signed_gap_125m), n = 15) |>
   ungroup() |>
-  mutate(across(c(pref_125m, pref_350m, pref_13b, log_freq_ratio, signed_gap_125m,
+  mutate(across(c(pref_125m, pref_350m, pref_13b, freq_prob_c,
                    GenPref_centered), \(x) round(x, 2))) |>
-  select(corpus, binom, log_freq_ratio, GenPref_centered,
+  select(corpus, binom, freq_prob_c, GenPref_centered,
          pref_125m, pref_350m, pref_13b,
          n_sizes_abspref_ok, n_sizes_relfreq_ok, n_sizes) |>
   rename(
     Corpus = corpus, Binomial = binom,
-    `RelFreq\nlog(α/β)` = log_freq_ratio,
-    `GenPref\n(centered)` = GenPref_centered,
+    `RelFreq\nP(\u03b1)\u22120.5` = freq_prob_c,
+    `AbsPref\nP(\u03b1)\u22120.5` = GenPref_centered,
     `Pref\n125M` = pref_125m, `Pref\n350M` = pref_350m, `Pref\n1.3B` = pref_13b,
     `N sizes:\nAbsPref OK` = n_sizes_abspref_ok,
     `N sizes:\nRelFreq OK` = n_sizes_relfreq_ok,
@@ -553,7 +559,7 @@ replicate_summary |>
   ) |>
   kbl(caption = paste(
     "Top 15 items per corpus (by |signed gap| in 125M) where 125M disagrees with RelFreq,",
-    "traced across model sizes. Positive preference = prefers alpha form.")) |>
+    "traced across model sizes. All preference values on P(\u03b1)\u22120.5 scale; + = prefers \u03b1 form.")) |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
                 full_width = TRUE, font_size = 11)
 ```
@@ -566,35 +572,30 @@ These plots are independent of model behaviour: they select binomials purely on
 the basis of the **gap between AbsPref and RelFreq**, then show where each model
 lands alongside both reference values.
 
-AbsPref (`GenPref_centered`) is on the `P(α) − 0.5` probability scale (range
-−0.5 to 0.5). To make it directly comparable to `log_freq_ratio` and model
-`preference` (both log-odds), it is transformed to log-odds via
-`qlogis(GenPref_centered + 0.5)` before plotting.
+All three quantities are on the same **P(α) − 0.5** scale (range −0.5 to 0.5):
+- `AbsPref` = `GenPref_centered` (already on this scale)
+- `RelFreq` = `freq_prob_c` = `plogis(log(α_seen/β_seen)) − 0.5`
+- Model preference = `plogis(preference) − 0.5`
 
 Each row is a binomial. Markers show:
 
-- **Purple triangle** = AbsPref (log-odds: `qlogis(GenPref_centered + 0.5)`)
-- **Gold diamond** = corpus RelFreq (`log(α_seen / β_seen)`)
-- **Coloured circles** = each model's preference (log-odds), by size
-
-All three values are now on the same log-odds scale.
+- **Purple triangle** = AbsPref (`GenPref_centered`, P(α) − 0.5)
+- **Gold diamond** = corpus RelFreq (`freq_prob_c`, P(α) − 0.5)
+- **Coloured circles** = each model's preference (`plogis(pref) − 0.5`), by size
 
 ```{r abspref-relfreq-helper}
 # Shared helper: build long-format data and produce the comparison plot per corpus.
 # items_df must have columns: corpus, binom, sort_val (used to order binomials).
 plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
-  # items_df is always derived from items_125m so already has GenPref_centered
-  # and log_freq_ratio — no join needed (joining would create .x/.y conflicts).
-  # Convert AbsPref to log-odds so it is on the same scale as log_freq_ratio
-  # and model preference. GenPref_centered = P(alpha) - 0.5, so
-  # qlogis(GenPref_centered + 0.5) gives the log-odds of abstract preference.
+  # items_df is derived from items_125m and already has GenPref_centered (AbsPref,
+  # P(alpha)-0.5) and freq_prob_c (RelFreq, P(alpha)-0.5). No transform needed.
+  # Model preference is pref_prob = plogis(preference) - 0.5, from dat_final.
   d_refs <- items_df |>
-    mutate(AbsPref_lo = qlogis(GenPref_centered + 0.5)) |>
-    pivot_longer(c(AbsPref_lo, log_freq_ratio),
+    pivot_longer(c(GenPref_centered, freq_prob_c),
                  names_to = "source", values_to = "x") |>
     mutate(source = recode(source,
-      "AbsPref_lo"     = "AbsPref",
-      "log_freq_ratio" = "RelFreq"
+      "GenPref_centered" = "AbsPref",
+      "freq_prob_c"      = "RelFreq"
     ))
 
   d_models <- dat_final |>
@@ -602,7 +603,7 @@ plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
     left_join(items_df |> select(corpus, binom, sort_val), by = c("corpus", "binom")) |>
     transmute(corpus, binom, sort_val,
               source = paste0("Model ", as.character(model_size)),
-              x      = preference)
+              x      = pref_prob)
 
   d_long <- bind_rows(
     d_refs |> select(corpus, binom, sort_val, source, x),
@@ -642,7 +643,8 @@ plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
       scale_colour_manual(values = colour_vals, name = NULL) +
       scale_shape_manual(values = shape_vals, name = NULL) +
       scale_size_manual(values = size_vals, name = NULL, guide = "none") +
-      scale_x_continuous("Log-odds (+ = prefer alpha form; all values on the same scale)") +
+      scale_x_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form; all values on the same scale)",
+                         limits = c(-0.5, 0.5)) +
       labs(title    = sprintf("%s \u2014 %s", corp, title_suffix),
            subtitle = subtitle) +
       theme_bw(base_size = 11) +
@@ -657,15 +659,12 @@ plot_abspref_vs_relfreq <- function(items_df, title_suffix, subtitle) {
 
 ## Plot 1b-i: Largest absolute gap between AbsPref and RelFreq
 
-Top 15 binomials per corpus where `|GenPref_centered − log(α/β)|` is largest,
-regardless of whether they agree or disagree in direction.
+Top 15 binomials per corpus where `|GenPref_centered − freq_prob_c|` is largest
+(both on P(α) − 0.5 scale), regardless of whether they agree or disagree in direction.
 
 ```{r plot-abspref-relfreq-gap, fig.height=8, results='asis'}
 items_gap <- items_125m |>
-  mutate(
-    abspref_lo = qlogis(GenPref_centered + 0.5),
-    sort_val   = abs(abspref_lo - log_freq_ratio)
-  ) |>
+  mutate(sort_val = abs(GenPref_centered - freq_prob_c)) |>
   group_by(corpus) |>
   slice_max(sort_val, n = 15) |>
   ungroup()
@@ -680,15 +679,14 @@ plot_abspref_vs_relfreq(
 ## Plot 1b-ii: AbsPref and RelFreq point in opposite directions (cross zero)
 
 Top 15 binomials per corpus where AbsPref and RelFreq **disagree in direction**
-(one positive, one negative), ranked by `|GenPref_centered| + |log(α/β)|` so
-that the strongest directional disagreements appear first.
+(one positive, one negative), ranked by `|GenPref_centered| + |freq_prob_c|`
+(both on P(α) − 0.5 scale) so that the strongest directional disagreements appear first.
 
 ```{r plot-abspref-relfreq-crosszero, fig.height=8, results='asis'}
 items_cross <- items_125m |>
-  mutate(abspref_lo = qlogis(GenPref_centered + 0.5)) |>
-  filter(sign(abspref_lo) != sign(log_freq_ratio),
-         abspref_lo != 0, log_freq_ratio != 0) |>
-  mutate(sort_val = abs(abspref_lo) + abs(log_freq_ratio)) |>
+  filter(sign(GenPref_centered) != sign(freq_prob_c),
+         GenPref_centered != 0, freq_prob_c != 0) |>
+  mutate(sort_val = abs(GenPref_centered) + abs(freq_prob_c)) |>
   group_by(corpus) |>
   slice_max(sort_val, n = 15) |>
   ungroup()
@@ -732,7 +730,7 @@ Same items, same corpus — the three model sizes are overlaid so you can see
 whether the AbsPref–preference relationship is consistent.
 
 ```{r plot-flat-scatter, fig.height=6}
-ggplot(dat_flat, aes(x = GenPref_centered, y = preference,
+ggplot(dat_flat, aes(x = GenPref_centered, y = pref_prob,
                      colour = model_size, fill = model_size)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
   geom_smooth(aes(group = model_size), method = "lm", se = TRUE,
@@ -745,7 +743,7 @@ ggplot(dat_flat, aes(x = GenPref_centered, y = preference,
     title    = "Near-flat RelFreq items: preference ~ AbsPref across model sizes",
     subtitle = sprintf("Items selected where |log(\u03b1/\u03b2)| < %.1f in 125M; same items shown for all sizes",
                        FLAT_THRESHOLD),
-    x = "GenPref (centered)", y = "Model preference (log-odds of alpha)"
+    x = "AbsPref  P(\u03b1) \u2212 0.5", y = "Model preference  P(\u03b1) \u2212 0.5"
   ) +
   theme_bw(base_size = 12) +
   theme(strip.text = element_text(face = "bold"), legend.position = "bottom")
@@ -763,7 +761,7 @@ dat_flat_grp <- dat_flat |>
   ) |>
   ungroup()
 
-ggplot(dat_flat_grp, aes(x = GenPref_centered, y = preference,
+ggplot(dat_flat_grp, aes(x = GenPref_centered, y = pref_prob,
                           colour = exposure_grp, linetype = exposure_grp)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
   geom_smooth(method = "lm", se = TRUE, linewidth = 0.9, alpha = 0.12) +
@@ -777,7 +775,7 @@ ggplot(dat_flat_grp, aes(x = GenPref_centered, y = preference,
   labs(
     title    = "AbsPref \u00d7 OverallFreq for near-flat RelFreq items",
     subtitle = "Solid = above-median overall freq; dashed = below. Same items in each model-size panel.",
-    x = "GenPref (centered)", y = "Model preference (log-odds)"
+    x = "AbsPref  P(\u03b1) \u2212 0.5", y = "Model preference  P(\u03b1) \u2212 0.5"
   ) +
   theme_bw(base_size = 11) +
   theme(strip.text = element_text(face = "bold"), legend.position = "bottom")
@@ -789,7 +787,7 @@ ggplot(dat_flat_grp, aes(x = GenPref_centered, y = preference,
 flat_ols <- dat_flat |>
   group_by(corpus, model_size) |>
   group_modify(function(d, k) {
-    fit <- lm(preference ~ GenPref_centered * log_total_c, data = d)
+    fit <- lm(pref_prob ~ GenPref_centered * log_total_c, data = d)
     cf  <- coef(summary(fit))
     as_tibble(cf, rownames = "term") |>
       rename(estimate = Estimate, se = `Std. Error`, t = `t value`, p = `Pr(>|t|)`) |>
@@ -817,7 +815,8 @@ flat_ols |>
   rename(Corpus = corpus, Size = model_size, Term = term,
          Estimate = estimate, SE = se, p = p_label) |>
   kbl(caption = paste(
-    "OLS: preference ~ AbsPref * OverallFreq, near-flat RelFreq items only.",
+    "OLS: pref_prob ~ AbsPref * OverallFreq, near-flat RelFreq items only.",
+    "Outcome and AbsPref are both on P(\u03b1)\u22120.5 scale.",
     "Same items used across 125M/350M/1.3B within each corpus.")) |>
   kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
 ```
@@ -830,10 +829,12 @@ Take the top **`r N_CASE_BINOMS`** 125M-disagreement items per corpus (largest
 `|signed_gap|` in 125M, AbsPref predicts correct direction) and plot their
 full training trajectories for all three model sizes.
 
+All values are on the **P(α) − 0.5** scale (0 = no preference; +0.5 = always α; −0.5 = always β).
+
 For each binomial:
-- **Coloured solid lines** = model preference (log-odds) across training, one per model size
-- **Dashed gold line** = corpus RelFreq (same for all sizes; cumulative count ratio)
-- **Horizontal purple line** = AbsPref (constant, not training-dependent)
+- **Coloured solid lines** = model preference (`plogis(pref) − 0.5`) across training, one per model size
+- **Dashed gold line** = corpus RelFreq (`freq_prob_c = plogis(log(α/β)) − 0.5`; same for all sizes)
+- **Horizontal purple line** = AbsPref (`GenPref_centered`, constant, not training-dependent)
 
 ```{r select-case-binoms}
 case_binoms <- disagree_125m |>
@@ -844,7 +845,11 @@ case_binoms <- disagree_125m |>
 
 cat(sprintf("Case study binomials: %d BabyLM, %d C4\n",
   sum(case_binoms$corpus == "BabyLM"), sum(case_binoms$corpus == "C4")))
-print(case_binoms |> select(corpus, binom, log_freq_ratio, GenPref_centered, signed_gap_125m))
+print(case_binoms |>
+  transmute(corpus, binom,
+            relfreq_prob = freq_prob_c,      # P(alpha) - 0.5
+            abspref_prob = GenPref_centered,  # P(alpha) - 0.5
+            signed_gap_125m))
 ```
 
 ```{r load-case-traj}
@@ -862,7 +867,8 @@ dat_traj <- train |>
   attach_freq(freq_traj) |>
   mutate(
     corpus     = parse_corpus(model),
-    model_size = factor(parse_size(model), levels = SIZE_LEVELS)
+    model_size = factor(parse_size(model), levels = SIZE_LEVELS),
+    pref_prob  = plogis(preference) - 0.5   # P(alpha) - 0.5 scale
   ) |>
   filter(!is.na(tokens), !is.na(log_freq_ratio))
 
@@ -880,24 +886,26 @@ for (corp in c("BabyLM", "C4")) {
       next
     }
 
-    abspref_val <- d$GenPref_centered[!is.na(d$GenPref_centered)][1]
+    abspref_val <- d$GenPref_centered[!is.na(d$GenPref_centered)][1]  # already P(alpha)-0.5
 
-    p <- ggplot(d, aes(x = tokens, y = preference,
+    d_smallmodel <- d |> filter(model_size == first(levels(d$model_size))) |>
+      distinct(tokens, freq_prob_c)
+    relfreq_final_val <- d_smallmodel |> arrange(desc(tokens)) |> slice(1) |> pull(freq_prob_c)
+
+    p <- ggplot(d, aes(x = tokens, y = pref_prob,
                         colour = model_size, fill = model_size, shape = model_size)) +
       # Zero line
       geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.35) +
-      # AbsPref reference
+      # AbsPref reference (constant, P(alpha)-0.5 scale)
       geom_hline(yintercept = abspref_val, colour = "#9e3d8e",
                  linetype = "dotdash", linewidth = 0.8, alpha = 0.85) +
       annotate("text", x = -Inf, y = abspref_val, hjust = -0.05, vjust = -0.45,
                label = sprintf("AbsPref = %.2f", abspref_val), colour = "#9e3d8e", size = 3.2) +
-      # Corpus RelFreq trajectory (same for all sizes — use one model's data)
-      geom_line(data = d |> filter(model_size == first(levels(d$model_size))) |>
-                  distinct(tokens, log_freq_ratio),
-                aes(x = tokens, y = log_freq_ratio), colour = "#cc8800",
+      # Corpus RelFreq trajectory (same for all sizes — use smallest model's data; P(alpha)-0.5)
+      geom_line(data = d_smallmodel,
+                aes(x = tokens, y = freq_prob_c), colour = "#cc8800",
                 linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE) +
-      annotate("text", x = Inf, y = filter(d, model_size == first(levels(d$model_size))) |>
-                 arrange(desc(tokens)) |> slice(1) |> pull(log_freq_ratio),
+      annotate("text", x = Inf, y = relfreq_final_val,
                hjust = 1.05, vjust = -0.4, label = "RelFreq", colour = "#cc8800", size = 3.2) +
       # Model preference per size
       geom_line(linewidth = 0.85) +
@@ -907,13 +915,13 @@ for (corp in c("BabyLM", "C4")) {
       scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
       scale_x_continuous("Training tokens",
                          labels = label_number(scale_cut = cut_short_scale())) +
-      scale_y_continuous("Log-odds preference (+ = prefer alpha form)") +
+      scale_y_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form)", limits = c(-0.5, 0.5)) +
       labs(
         title    = sprintf('%s \u2014 "%s"', corp, binom_i),
         subtitle = sprintf(
-          "RelFreq log(\u03b1/\u03b2) = %.2f (predicts %s); AbsPref = %.2f (predicts %s)",
-          mean(d$log_freq_ratio, na.rm = TRUE),
-          if_else(mean(d$log_freq_ratio, na.rm = TRUE) > 0, "\u03b1", "\u03b2"),
+          "RelFreq P(\u03b1)\u22120.5 = %.2f (predicts %s); AbsPref P(\u03b1)\u22120.5 = %.2f (predicts %s)",
+          mean(d$freq_prob_c, na.rm = TRUE),
+          if_else(mean(d$freq_prob_c, na.rm = TRUE) > 0, "\u03b1", "\u03b2"),
           abspref_val,
           if_else(abspref_val > 0, "\u03b1", "\u03b2"))
       ) +
