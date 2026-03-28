@@ -178,8 +178,8 @@ batch_dyn_freq <- function(meta_df, binom_filter = NULL) {
       freq_prob_c    = plogis(log_freq_ratio) - 0.5,
       log_total      = if_else(alpha_seen + beta_seen > 0,
                                log(alpha_seen + beta_seen), NA_real_)
-    ) |>
-    select(-alpha_seen, -beta_seen)
+    )
+  # alpha_seen and beta_seen are kept for downstream count annotations
 }
 
 # ── Join freq data onto training data and compute derived columns ─────────────
@@ -314,26 +314,111 @@ cat(sprintf("  C4:     %d (%.1f%%)\n",
 
 ------------------------------------------------------------------------
 
-# Section 1: Items Where 125M RelFreq Is Wrong — Traced Across Model Sizes
+# Summary Statistics: When AbsPref and RelFreq Conflict
 
-For each corpus, we take all binomials where RelFreq predicts the wrong
-direction in the 125M model. We then ask:
+Across **all models and sizes** at the final checkpoint, we identify items
+where AbsPref and RelFreq point in opposite directions and ask: when the model
+follows AbsPref vs. when it follows RelFreq, what are the typical values of
+AbsPref, RelFreq, and overall frequency?
 
-- Does AbsPref predict the right direction for those items in 125M?
-- Do 350M and 1.3B also show a preference deviation for those same items
-  (i.e., does the disagreement with RelFreq replicate at larger scales)?
+```{r conflict-summary-stats}
+# All final-checkpoint rows where AbsPref and RelFreq are in opposite directions
+dat_conflict <- dat_final |>
+  filter(sign(GenPref_centered) != sign(freq_prob_c),
+         GenPref_centered != 0, freq_prob_c != 0) |>
+  mutate(
+    model_follows = case_when(
+      abspref_ok  & !relfreq_ok ~ "AbsPref",
+      relfreq_ok  & !abspref_ok ~ "RelFreq",
+      TRUE                      ~ "Neither / tie"
+    )
+  ) |>
+  filter(model_follows != "Neither / tie")
+
+conflict_summary <- dat_conflict |>
+  group_by(corpus, model_size, model_follows) |>
+  summarise(
+    n               = n(),
+    mean_abspref    = mean(abs(GenPref_centered), na.rm = TRUE),
+    mean_relfreq    = mean(abs(freq_prob_c),      na.rm = TRUE),
+    mean_log_total  = mean(log_total,             na.rm = TRUE),
+    mean_total      = mean(exp(log_total),        na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(across(c(mean_abspref, mean_relfreq, mean_log_total), \(x) round(x, 3)),
+         mean_total = round(mean_total, 0))
+
+conflict_summary |>
+  rename(
+    Corpus           = corpus,
+    Size             = model_size,
+    `Model follows`  = model_follows,
+    N                = n,
+    `|AbsPref|\nmean` = mean_abspref,
+    `|RelFreq|\nmean` = mean_relfreq,
+    `ln(total)\nmean` = mean_log_total,
+    `Total count\nmean` = mean_total
+  ) |>
+  kbl(caption = paste(
+    "When AbsPref and RelFreq conflict: average feature values broken down by",
+    "which signal the model follows. |AbsPref| and |RelFreq| are absolute values",
+    "on the P(\u03b1)\u22120.5 scale; Total count = \u03b1-seen + \u03b2-seen at final checkpoint.")) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE, font_size = 11) |>
+  collapse_rows(columns = 1:2, valign = "middle")
+```
+
+```{r conflict-summary-plot, fig.height=6}
+conflict_summary_long <- dat_conflict |>
+  group_by(corpus, model_follows) |>
+  summarise(
+    `|AbsPref|`      = mean(abs(GenPref_centered), na.rm = TRUE),
+    `|RelFreq|`      = mean(abs(freq_prob_c),      na.rm = TRUE),
+    `ln(total freq)` = mean(log_total,             na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(c(`|AbsPref|`, `|RelFreq|`, `ln(total freq)`),
+               names_to = "metric", values_to = "value")
+
+ggplot(conflict_summary_long,
+       aes(x = model_follows, y = value, fill = model_follows)) +
+  geom_col(width = 0.6) +
+  scale_fill_manual(values = c("AbsPref" = "#9e3d8e", "RelFreq" = "#cc8800"),
+                    name = "Model follows") +
+  facet_grid(metric ~ corpus, scales = "free_y") +
+  labs(
+    title    = "Feature values when model follows AbsPref vs. RelFreq",
+    subtitle = "Restricted to items where AbsPref and RelFreq point in opposite directions (all models, final checkpoint)",
+    x = NULL, y = "Mean value"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"),
+        legend.position = "none",
+        axis.text.x = element_text(face = "bold"))
+```
+
+------------------------------------------------------------------------
+
+# Section 1: Items Where AbsPref and RelFreq Conflict — Model Follows AbsPref
+
+For each corpus, we select binomials where:
+1. **AbsPref and RelFreq point in opposite directions** (`sign(GenPref_centered) ≠ sign(freq_prob_c)`)
+2. **The 125M model's preference aligns with AbsPref** (not RelFreq)
+
+These are the clearest cases where abstract preference overrides corpus frequency.
+We then trace those same items in 350M and 1.3B to ask whether the pattern scales.
 
 ```{r disagree-selection}
 disagree_125m <- items_125m |>
-  filter(!relfreq_ok_125m) |>
+  filter(
+    sign(GenPref_centered) != sign(freq_prob_c),  # AbsPref and RelFreq in opposite directions
+    abspref_ok_125m                               # 125M model follows AbsPref (not RelFreq)
+  ) |>
   arrange(corpus, desc(abs(signed_gap_125m)))
 
-cat(sprintf("Disagreement items (RelFreq wrong in 125M): %d BabyLM, %d C4\n",
-  sum(disagree_125m$corpus == "BabyLM"),
-  sum(disagree_125m$corpus == "C4")))
-cat(sprintf("AbsPref correct in 125M: BabyLM %.0f%%, C4 %.0f%%\n",
-  mean(disagree_125m$abspref_ok_125m[disagree_125m$corpus == "BabyLM"]) * 100,
-  mean(disagree_125m$abspref_ok_125m[disagree_125m$corpus == "C4"]) * 100))
+cat(sprintf("Items where AbsPref and RelFreq conflict AND 125M follows AbsPref:\n"))
+cat(sprintf("  BabyLM: %d\n", sum(disagree_125m$corpus == "BabyLM")))
+cat(sprintf("  C4:     %d\n", sum(disagree_125m$corpus == "C4")))
 ```
 
 ## Preference across model sizes for 125M-disagreement items
@@ -838,7 +923,7 @@ For each binomial:
 
 ```{r select-case-binoms}
 case_binoms <- disagree_125m |>
-  filter(abspref_ok_125m) |>
+  # disagree_125m already filtered to abspref_ok_125m & opposite directions
   group_by(corpus) |>
   slice_max(abs(signed_gap_125m), n = N_CASE_BINOMS) |>
   ungroup()
@@ -892,6 +977,14 @@ for (corp in c("BabyLM", "C4")) {
       distinct(tokens, freq_prob_c)
     relfreq_final_val <- d_smallmodel |> arrange(desc(tokens)) |> slice(1) |> pull(freq_prob_c)
 
+    # Corpus-level final counts: take the checkpoint with the most tokens in this corpus
+    # (alpha_seen/beta_seen are cumulative, so max tokens = fullest count)
+    final_counts <- d |>
+      filter(tokens == max(tokens, na.rm = TRUE)) |>
+      slice(1)
+    alpha_n <- formatC(final_counts$alpha_seen, format = "d", big.mark = ",")
+    beta_n  <- formatC(final_counts$beta_seen,  format = "d", big.mark = ",")
+
     p <- ggplot(d, aes(x = tokens, y = pref_prob,
                         colour = model_size, fill = model_size, shape = model_size)) +
       # Zero line
@@ -914,7 +1007,9 @@ for (corp in c("BabyLM", "C4")) {
       scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
       scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
       scale_x_continuous("Training tokens",
-                         labels = label_number(scale_cut = cut_short_scale())) +
+                         labels = label_number(scale_cut = cut_short_scale()),
+                         expand = expansion(mult = c(0.02, 0.05))) +
+      coord_cartesian(xlim = c(0, NA)) +
       scale_y_continuous("P(\u03b1) \u2212 0.5  (+ = prefer \u03b1 form)", limits = c(-0.5, 0.5)) +
       labs(
         title    = sprintf('%s \u2014 "%s"', corp, binom_i),
@@ -923,7 +1018,9 @@ for (corp in c("BabyLM", "C4")) {
           mean(d$freq_prob_c, na.rm = TRUE),
           if_else(mean(d$freq_prob_c, na.rm = TRUE) > 0, "\u03b1", "\u03b2"),
           abspref_val,
-          if_else(abspref_val > 0, "\u03b1", "\u03b2"))
+          if_else(abspref_val > 0, "\u03b1", "\u03b2")),
+        caption  = sprintf("Corpus counts at end of training: \u03b1 ordering = %s, \u03b2 ordering = %s",
+                           alpha_n, beta_n)
       ) +
       theme_bw(base_size = 12) +
       theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
@@ -941,18 +1038,15 @@ for (corp in c("BabyLM", "C4")) {
 ```{r summary-table}
 tibble(
   Analysis = c(
-    "BabyLM: RelFreq wrong in 125M",
-    "  \u2514 AbsPref correct in 125M",
+    "BabyLM: AbsPref vs RelFreq conflict items (125M follows AbsPref)",
     "  \u2514 Replicates in 350M/1.3B (AbsPref ok in all 3 sizes)",
-    "C4: RelFreq wrong in 125M",
-    "  \u2514 AbsPref correct in 125M",
+    "C4: AbsPref vs RelFreq conflict items (125M follows AbsPref)",
     "  \u2514 Replicates in 350M/1.3B (AbsPref ok in all 3 sizes)",
     "BabyLM: near-flat RelFreq items",
     "C4: near-flat RelFreq items"
   ),
   N = c(
     sum(disagree_125m$corpus == "BabyLM"),
-    sum(disagree_125m$abspref_ok_125m & disagree_125m$corpus == "BabyLM"),
     {
       r <- dat_final |>
         semi_join(filter(disagree_125m, corpus == "BabyLM"), by = c("corpus","binom")) |>
@@ -961,7 +1055,6 @@ tibble(
       sum(r$all_ok)
     },
     sum(disagree_125m$corpus == "C4"),
-    sum(disagree_125m$abspref_ok_125m & disagree_125m$corpus == "C4"),
     {
       r <- dat_final |>
         semi_join(filter(disagree_125m, corpus == "C4"), by = c("corpus","binom")) |>
