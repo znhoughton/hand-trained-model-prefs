@@ -1017,6 +1017,46 @@ if (!has_bigram) {
 }
 ```
 
+```{r fit-2i}
+# 2i: signed_gap ~ genpref_c * log_total_c + (1 | binom)
+# Minimal model: does abstract human preference predict the model's deviation from
+# corpus-frequency-predicted ordering, after controlling only for overall exposure
+# frequency?  No RelFreq predictor — signed_gap already removes that signal.
+formula_sg_genpref <- signed_gap ~ genpref_c * log_total_c + (1 | binom)
+
+future_map(MODELS_LIST, function(model_name) {
+  slug   <- make_slug(model_name)
+  corpus <- parse_corpus(model_name)
+  mdata  <- filter(train, model == model_name)
+  steps  <- sample_steps(mdata)
+  message(sprintf("\n=== [2i] %s (%d checkpoints) ===", slug, length(steps)))
+
+  for (ck_idx in seq_along(steps)) {
+    s        <- steps[ck_idx]
+    ck       <- sprintf("ck%02d", ck_idx)
+    out_path <- file.path(MODELS_DIR, sprintf("sg_genpref_traj_%s_%s.rds", slug, ck))
+    if (file.exists(out_path)) {
+      message(sprintf("  %s %s — exists, skipping", slug, ck)); next
+    }
+    fit_data <- filter(mdata, step == s) |>
+      add_dyn_freq() |>
+      mutate(genpref_c = GenPref_centered) |>
+      filter(!is.na(signed_gap), !is.na(genpref_c), !is.na(log_total_c))
+    if (nrow(fit_data) < 20) {
+      warning(sprintf("Skipping %s %s — insufficient data (%d rows)", slug, ck, nrow(fit_data))); next
+    }
+    message(sprintf("  %s %s  step=%d  n=%d", slug, ck, s, nrow(fit_data)))
+    fit <- brm(formula = formula_sg_genpref, data = fit_data,
+               family = gaussian(), prior = PRIORS_GAUSSIAN,
+               iter = ITER, warmup = WARMUP, chains = CHAINS, cores = CORES,
+               backend = "cmdstanr", silent = 2, refresh = 0)
+    saveRDS(fit, out_path); rm(fit); gc()
+    message(sprintf("    Saved: %s", basename(out_path)))
+  }
+}, .options = furrr_options(seed = TRUE))
+message("\n2i (signed gap ~ GenPref * overall freq) fitting done.")
+```
+
 ------------------------------------------------------------------------
 
 # Results (brms models)
@@ -1390,6 +1430,59 @@ if (nrow(sg_btraj_coefs) > 0) {
           strip.text  = element_text(colour = "black", face = "bold", size = 11))
 } else {
   message("No sg_btraj data — fit models first (fit-2e chunk).")
+}
+```
+
+------------------------------------------------------------------------
+
+## 2i: Preference deviation \~ abstract preference × overall frequency (minimal model)
+
+To assess whether abstract preference drives deviation from corpus frequency independent of the number of predictors, we fit a minimal model with only GenPref and its interaction with overall (log) frequency:
+
+$$\text{signed\_gap} \sim \text{genpref\_c} \times \text{log\_total\_c} + (1 \mid \text{binom})$$
+
+This model is deliberately sparse: `signed_gap` already removes the corpus frequency signal, so we ask only whether abstract preference (and its modulation by how frequently the model has encountered a form) predicts the residual deviation.
+
+```{r load-sg-genpref-traj}
+TERM_LEVELS_SG_GP <- c("genpref_c", "log_total_c", "genpref_c:log_total_c")
+TERM_LABELS_SG_GP <- c("GenPref", "Overall freq\n(ln, z)", "GenPref \u00d7\nOverall freq")
+
+sg_genpref_coefs <- load_traj_coefs("sg_genpref_traj_", TERM_LEVELS_SG_GP, TERM_LABELS_SG_GP)
+```
+
+```{r plot-sg-genpref-traj, fig.width=12, fig.height=6}
+if (nrow(sg_genpref_coefs) > 0) {
+  df <- sg_genpref_coefs |>
+    mutate(p_gt0 = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE))
+
+  x_label <- if ("tokens" %in% names(df) && any(!is.na(df$tokens)))
+    "Training tokens" else "Checkpoint index"
+  x_var   <- if (x_label == "Training tokens") "tokens" else "ck_idx"
+
+  ggplot(df, aes(x = .data[[x_var]], y = estimate, colour = p_gt0, fill = p_gt0)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.18, colour = NA) +
+    geom_line(linewidth = 0.7) +
+    geom_point(shape = 21, size = 2.0, colour = "grey25", stroke = 0.3) +
+    scale_colour_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                           midpoint = 0.5, limits = c(0, 1), guide = "none") +
+    scale_fill_gradient2(low = "#F0B323", mid = "grey93", high = "#154733",
+                         midpoint = 0.5, limits = c(0, 1),
+                         name = "P(\u03b2 > 0)",
+                         labels = scales::percent_format(accuracy = 1)) +
+    scale_x_continuous(x_label) +
+    scale_y_continuous("Coefficient (95% CI)", expand = expansion(mult = c(0.05, 0.2))) +
+    facet_grid(corpus ~ model_size + term) +
+    coord_cartesian(clip = "off") +
+    labs(title = "Preference deviation (signed gap) ~ GenPref \u00d7 overall frequency — per-checkpoint trajectories") +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "right", panel.grid.minor = element_blank(),
+          plot.title  = element_text(face = "bold", size = 13),
+          axis.text   = element_text(colour = "black", size = 11),
+          axis.title  = element_text(colour = "black", size = 13),
+          strip.text  = element_text(colour = "black", face = "bold", size = 11))
+} else {
+  message("No sg_genpref_traj data — fit models first (fit-2i chunk).")
 }
 ```
 

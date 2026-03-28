@@ -11,6 +11,7 @@
 #   sg_btraj_coefs.csv         (Analysis 2e: signed_gap ~ genpref + bigram + freq trajectory)
 #   pref_brel_final_coefs.csv  (Analysis 2f: pref ~ relfreq + bigram, final checkpoint)
 #   sg_brel_final_coefs.csv    (Analysis 2h: signed_gap ~ relfreq + bigram, final checkpoint)
+#   sg_genpref_traj_coefs.csv  (Analysis 2i: signed_gap ~ genpref * overall freq, trajectory)
 #   constraint_cor_traj.csv    (descriptive: constraint × preference correlations)
 #
 # Run with:  Rscript analysis-scripts/prepare_results_new.R
@@ -225,6 +226,12 @@ TERM_LABELS_BTRAJ <- c(
 )
 extract_traj_and_save("pref_btraj_", TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "pref_btraj_coefs.csv")
 extract_traj_and_save("sg_btraj_",   TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "sg_btraj_coefs.csv")
+
+# 2i: signed_gap ~ genpref_c * log_total_c (minimal model, trajectory)
+TERM_LEVELS_SG_GP <- c("genpref_c", "log_total_c", "genpref_c:log_total_c")
+TERM_LABELS_SG_GP <- c("GenPref", "Overall freq\n(ln, z)", "GenPref \u00d7\nOverall freq")
+extract_traj_and_save("sg_genpref_traj_", TERM_LEVELS_SG_GP, TERM_LABELS_SG_GP,
+                      "sg_genpref_traj_coefs.csv")
 
 # 2f/2h: pref / signed_gap ~ relfreq + bigram, final checkpoint only
 TERM_LEVELS_BREL <- c("freq_prob_c", "bigram_logodds_c")

@@ -1,0 +1,622 @@
+---
+title: "Where Abstract Preference Outperforms Corpus Frequency"
+subtitle: "Items where RelFreq fails in 125M models — traced across model sizes"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 12, fig.height = 6, dpi = 150,
+                      out.width = "100%")
+```
+
+# Overview
+
+We use the **125M model** as a discovery set within each corpus: identify
+binomials where, at the final training checkpoint, the corpus relative frequency
+(**RelFreq**) predicts the *wrong* preference direction. We then trace those
+exact same binomials in the 350M and 1.3B models to ask whether the pattern
+replicates, and whether abstract preference (**AbsPref / GenPref**) consistently
+explains the deviation.
+
+**Comparison structure**:
+- Item selection is based on the 125M model's final checkpoint, separately per
+  corpus (BabyLM and C4).
+- The same items are then looked at in 350M and 1.3B within the same corpus.
+- BabyLM and C4 items are kept separate throughout.
+
+Three analyses:
+
+1. **Disagreement items (§1)**: binomials where RelFreq is wrong in the 125M
+   model — how often does AbsPref predict the right direction there, and do
+   350M/1.3B also deviate from RelFreq for the same items?
+2. **Near-flat RelFreq items (§2)**: binomials where the 125M corpus frequency
+   signal is near-chance — how do AbsPref and OverallFreq jointly determine
+   preferences in all three model sizes for those items?
+3. **Case studies (§3)**: full training trajectories for the 5–10 strongest
+   disagreement binomials from 125M, shown for all model sizes.
+
+------------------------------------------------------------------------
+
+```{r libraries}
+library(tidyverse)
+library(duckdb)
+library(ggrepel)
+library(scales)
+library(kableExtra)
+```
+
+```{r config}
+SCRIPT_DIR <- {
+  knitr_input <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  if (!is.null(knitr_input) && nchar(knitr_input) > 0) {
+    dirname(normalizePath(knitr_input, mustWork = FALSE))
+  } else if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    dirname(normalizePath(rstudioapi::getActiveDocumentContext()$path, mustWork = FALSE))
+  } else {
+    normalizePath(".", mustWork = FALSE)
+  }
+}
+
+DATA_DIR          <- normalizePath(file.path(SCRIPT_DIR, "../Data/processed"), mustWork = FALSE)
+TRAIN_CSV         <- file.path(DATA_DIR, "training_attested.csv")
+EXPOSURES_CSV     <- normalizePath(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"),
+                                   mustWork = FALSE)
+EXPOSURES_CSV_FWD <- gsub("\\\\", "/", EXPOSURES_CSV)
+
+N_TRAJ_CHECKPOINTS <- 20
+SIZE_LEVELS        <- c("125M", "350M", "1.3B")
+SIZE_COLOURS       <- c("125M" = "#74add1", "350M" = "#007030", "1.3B" = "#154733")
+SIZE_SHAPES        <- c("125M" = 21, "350M" = 22, "1.3B" = 24)
+
+# |log(alpha/beta)| below this = "near-flat RelFreq"
+FLAT_THRESHOLD <- 0.3   # roughly P(alpha) in [0.43, 0.57]
+# Number of case-study binomials
+N_CASE_BINOMS  <- 8
+
+stopifnot(file.exists(TRAIN_CSV), file.exists(EXPOSURES_CSV))
+```
+
+```{r helpers}
+parse_corpus <- function(x) case_when(
+  grepl("babylm", x, TRUE) ~ "BabyLM",
+  grepl("opt.c4", x, TRUE) ~ "C4",
+  TRUE ~ NA_character_
+)
+parse_size <- function(x) case_when(
+  grepl("125m",    x, TRUE) ~ "125M",
+  grepl("350m",    x, TRUE) ~ "350M",
+  grepl("1[._]3b", x, TRUE) ~ "1.3B",
+  TRUE ~ NA_character_
+)
+sample_steps <- function(model_df, n = N_TRAJ_CHECKPOINTS) {
+  steps <- sort(unique(model_df$step))
+  idx   <- unique(round(seq(1, length(steps), length.out = min(n, length(steps)))))
+  steps[idx]
+}
+
+# Per-call DuckDB connection (mirrors analysis2.Rmd).
+# binom_filter: optional character vector — load only those binomials.
+add_dyn_freq <- function(cdat, binom_filter = NULL) {
+  m <- unique(cdat$model)
+  s <- unique(cdat$step)
+  if (length(m) != 1 || length(s) != 1)
+    stop("add_dyn_freq: cdat must be a single model x step slice")
+  if (!is.null(binom_filter))
+    cdat <- filter(cdat, binom %in% binom_filter)
+  if (nrow(cdat) == 0) return(tibble())
+
+  m_safe    <- gsub("'", "''", m)
+  con_local <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con_local, shutdown = TRUE))
+  dbExecute(con_local, sprintf(
+    "CREATE VIEW exp AS SELECT * FROM read_csv_auto('%s')", EXPOSURES_CSV_FWD
+  ))
+  freq_raw <- dbGetQuery(con_local, sprintf("
+    SELECT binom,
+           ANY_VALUE(alpha_seen) AS alpha_seen,
+           ANY_VALUE(beta_seen)  AS beta_seen,
+           ANY_VALUE(tokens)     AS tokens
+    FROM exp
+    WHERE model = '%s' AND step = %d
+    GROUP BY binom
+  ", m_safe, s))
+
+  freq_dat <- as_tibble(freq_raw) |>
+    mutate(
+      log_freq_ratio = if_else(alpha_seen > 0 & beta_seen > 0,
+                               log(alpha_seen / beta_seen), NA_real_),
+      freq_prob_c    = plogis(log_freq_ratio) - 0.5,
+      log_total      = if_else(alpha_seen + beta_seen > 0,
+                               log(alpha_seen + beta_seen), NA_real_)
+    ) |>
+    select(-alpha_seen, -beta_seen)
+
+  cdat |>
+    left_join(freq_dat, by = "binom") |>
+    mutate(
+      signed_gap  = preference - log_freq_ratio,
+      log_total_c = as.numeric(scale(log_total))
+    )
+}
+```
+
+------------------------------------------------------------------------
+
+# Data Loading
+
+```{r load-train}
+message("Loading training data...")
+train <- read_csv(TRAIN_CSV, show_col_types = FALSE)
+
+MODELS_LIST <- sort(unique(train$model))
+MODELS_LIST <- MODELS_LIST[!is.na(parse_corpus(MODELS_LIST))]
+message(sprintf("%d models: %s", length(MODELS_LIST), paste(MODELS_LIST, collapse = ", ")))
+```
+
+```{r ck-index}
+ck_meta <- map_dfr(MODELS_LIST, function(m) {
+  steps <- sample_steps(filter(train, model == m))
+  tibble(model = m, ck_idx = seq_along(steps), step = steps)
+})
+
+final_ck_meta <- ck_meta |>
+  group_by(model) |>
+  filter(ck_idx == max(ck_idx)) |>
+  ungroup()
+```
+
+```{r load-final}
+message("Loading final-checkpoint data for all models...")
+dat_final_raw <- map_dfr(seq_len(nrow(final_ck_meta)), function(i) {
+  m  <- final_ck_meta$model[i]
+  s  <- final_ck_meta$step[i]
+  ck <- final_ck_meta$ck_idx[i]
+  message(sprintf("  %s (step=%d)", m, s))
+  add_dyn_freq(filter(train, model == m, step == s)) |>
+    mutate(
+      ck_idx     = ck,
+      corpus     = parse_corpus(m),
+      model_size = factor(parse_size(m), levels = SIZE_LEVELS)
+    )
+})
+
+dat_final <- dat_final_raw |>
+  filter(!is.na(log_freq_ratio), !is.na(GenPref_centered), !is.na(preference)) |>
+  mutate(
+    pref_dir    = sign(preference),
+    freq_dir    = sign(log_freq_ratio),
+    abspref_dir = sign(GenPref_centered),
+    relfreq_ok  = (pref_dir == freq_dir),
+    abspref_ok  = (pref_dir == abspref_dir)
+  )
+```
+
+## Identify items from 125M model
+
+```{r items-from-125m}
+# 125M final-checkpoint data — used as the discovery set for item selection
+dat_125m <- dat_final |>
+  filter(model_size == "125M", pref_dir != 0, freq_dir != 0)
+
+# Per-corpus, per-binomial summary from 125M
+items_125m <- dat_125m |>
+  group_by(corpus, binom) |>
+  summarise(
+    log_freq_ratio   = first(log_freq_ratio),   # corpus-level (constant per binom×corpus)
+    GenPref_centered = first(GenPref_centered),  # constant per binom
+    preference_125m  = first(preference),
+    signed_gap_125m  = first(signed_gap),
+    relfreq_ok_125m  = first(relfreq_ok),
+    abspref_ok_125m  = first(abspref_ok),
+    .groups          = "drop"
+  ) |>
+  mutate(
+    freq_dir    = sign(log_freq_ratio),
+    abspref_dir = sign(GenPref_centered),
+    pref_dir_125m = sign(preference_125m)
+  )
+
+cat(sprintf("125M items at final checkpoint:\n"))
+cat(sprintf("  BabyLM: %d binomials\n", sum(items_125m$corpus == "BabyLM")))
+cat(sprintf("  C4:     %d binomials\n", sum(items_125m$corpus == "C4")))
+cat(sprintf("\nRelFreq predicts wrong direction in 125M:\n"))
+cat(sprintf("  BabyLM: %d (%.1f%%)\n",
+  sum(!items_125m$relfreq_ok_125m & items_125m$corpus == "BabyLM"),
+  mean(!items_125m$relfreq_ok_125m[items_125m$corpus == "BabyLM"]) * 100))
+cat(sprintf("  C4:     %d (%.1f%%)\n",
+  sum(!items_125m$relfreq_ok_125m & items_125m$corpus == "C4"),
+  mean(!items_125m$relfreq_ok_125m[items_125m$corpus == "C4"]) * 100))
+```
+
+------------------------------------------------------------------------
+
+# Section 1: Items Where 125M RelFreq Is Wrong — Traced Across Model Sizes
+
+For each corpus, we take all binomials where RelFreq predicts the wrong
+direction in the 125M model. We then ask:
+
+- Does AbsPref predict the right direction for those items in 125M?
+- Do 350M and 1.3B also show a preference deviation for those same items
+  (i.e., does the disagreement with RelFreq replicate at larger scales)?
+
+```{r disagree-selection}
+disagree_125m <- items_125m |>
+  filter(!relfreq_ok_125m) |>
+  arrange(corpus, desc(abs(signed_gap_125m)))
+
+cat(sprintf("Disagreement items (RelFreq wrong in 125M): %d BabyLM, %d C4\n",
+  sum(disagree_125m$corpus == "BabyLM"),
+  sum(disagree_125m$corpus == "C4")))
+cat(sprintf("AbsPref correct in 125M: BabyLM %.0f%%, C4 %.0f%%\n",
+  mean(disagree_125m$abspref_ok_125m[disagree_125m$corpus == "BabyLM"]) * 100,
+  mean(disagree_125m$abspref_ok_125m[disagree_125m$corpus == "C4"]) * 100))
+```
+
+## Preference across model sizes for 125M-disagreement items
+
+Each binomial row shows the model's preference (log-odds) for 125M, 350M,
+and 1.3B. The dashed vertical line marks where RelFreq falls (same for all
+sizes since same training corpus). We expect preferences to align with
+AbsPref (direction indicated by colour) rather than with RelFreq.
+
+```{r plot-disagree-trace, fig.height=10}
+# Get all-model-size data for these items
+dat_disagree_trace <- dat_final |>
+  semi_join(disagree_125m, by = c("corpus", "binom")) |>
+  left_join(disagree_125m |> select(corpus, binom, signed_gap_125m, GenPref_centered,
+                                     log_freq_ratio, abspref_ok_125m),
+            by = c("corpus", "binom")) |>
+  mutate(
+    binom        = fct_reorder(binom, abs(signed_gap_125m)),
+    abspref_label = if_else(GenPref_centered > 0, "\u03b1 preferred", "\u03b2 preferred")
+  )
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(dat_disagree_trace, corpus == corp)
+  if (nrow(d) == 0) next
+
+  # RelFreq reference lines (corpus-level, constant per binom)
+  d_freq <- d |> distinct(binom, log_freq_ratio, signed_gap_125m)
+
+  p <- ggplot(d, aes(y = binom, x = preference, colour = model_size, shape = model_size)) +
+    geom_vline(xintercept = 0, linetype = "solid", colour = "grey60", linewidth = 0.4) +
+    geom_segment(data = d_freq,
+                 aes(y = binom, yend = binom, x = 0, xend = log_freq_ratio),
+                 colour = "#cc8800", linewidth = 0.7, linetype = "dashed",
+                 inherit.aes = FALSE) +
+    geom_point(size = 3.5, stroke = 0.8) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
+    scale_x_continuous("Model preference (log-odds; + = prefer alpha form)") +
+    labs(
+      title    = sprintf("%s — 125M disagreement items across model sizes", corp),
+      subtitle = "Dashed gold segments = corpus RelFreq direction; dots = model preference per size"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      axis.title.y    = element_blank(),
+      strip.text      = element_text(face = "bold"),
+      legend.position = "bottom"
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Summary: does the disagreement replicate in larger models?
+
+For each 125M-disagreement item, we check how many of the 3 model sizes
+(including 125M itself) have the preference in the AbsPref direction
+(i.e., the direction that disagrees with RelFreq but aligns with AbsPref).
+
+```{r disagree-replicate-table}
+replicate_summary <- dat_final |>
+  semi_join(disagree_125m, by = c("corpus", "binom")) |>
+  group_by(corpus, binom) |>
+  summarise(
+    n_sizes_abspref_ok = sum(abspref_ok),
+    n_sizes_relfreq_ok = sum(relfreq_ok),
+    n_sizes            = n_distinct(model_size),
+    pref_125m          = preference[model_size == "125M"][1],
+    pref_350m          = preference[model_size == "350M"][1],
+    pref_13b           = preference[model_size == "1.3B"][1],
+    .groups            = "drop"
+  ) |>
+  left_join(items_125m |> select(corpus, binom, GenPref_centered,
+                                  log_freq_ratio, signed_gap_125m),
+            by = c("corpus", "binom")) |>
+  arrange(corpus, desc(abs(signed_gap_125m)))
+
+replicate_summary |>
+  mutate(across(c(pref_125m, pref_350m, pref_13b, log_freq_ratio, signed_gap_125m,
+                   GenPref_centered), \(x) round(x, 2))) |>
+  select(corpus, binom, log_freq_ratio, GenPref_centered,
+         pref_125m, pref_350m, pref_13b,
+         n_sizes_abspref_ok, n_sizes_relfreq_ok, n_sizes) |>
+  rename(
+    Corpus = corpus, Binomial = binom,
+    `RelFreq\nlog(α/β)` = log_freq_ratio,
+    `GenPref\n(centered)` = GenPref_centered,
+    `Pref\n125M` = pref_125m, `Pref\n350M` = pref_350m, `Pref\n1.3B` = pref_13b,
+    `N sizes:\nAbsPref OK` = n_sizes_abspref_ok,
+    `N sizes:\nRelFreq OK` = n_sizes_relfreq_ok,
+    `N sizes\ntotal` = n_sizes
+  ) |>
+  kbl(caption = paste(
+    "Items where 125M disagrees with RelFreq, traced across model sizes.",
+    "Positive preference = prefers alpha form.")) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE, font_size = 11)
+```
+
+------------------------------------------------------------------------
+
+# Section 2: Near-Flat RelFreq Items (Identified in 125M)
+
+Items where the corpus RelFreq is near-chance in the 125M model
+(`|log(α/β)| <` `r FLAT_THRESHOLD`). These are the same items in 350M and
+1.3B (same training corpus). When the frequency signal is flat, how do
+AbsPref and OverallFreq jointly determine preferences — and does this
+replicate across model sizes?
+
+```{r flat-selection}
+flat_125m <- items_125m |>
+  filter(abs(log_freq_ratio) < FLAT_THRESHOLD)
+
+cat(sprintf("Near-flat items in 125M: BabyLM = %d, C4 = %d\n",
+  sum(flat_125m$corpus == "BabyLM"), sum(flat_125m$corpus == "C4")))
+
+dat_flat <- dat_final |>
+  semi_join(flat_125m, by = c("corpus", "binom")) |>
+  filter(!is.na(GenPref_centered), !is.na(preference), !is.na(log_total))
+```
+
+## Scatter: preference ~ AbsPref, overlaid across model sizes
+
+Same items, same corpus — the three model sizes are overlaid so you can see
+whether the AbsPref–preference relationship is consistent.
+
+```{r plot-flat-scatter, fig.height=6}
+ggplot(dat_flat, aes(x = GenPref_centered, y = preference,
+                     colour = model_size, fill = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_smooth(aes(group = model_size), method = "lm", se = TRUE,
+              linewidth = 0.9, alpha = 0.12) +
+  geom_point(shape = 21, size = 2.0, alpha = 0.55, colour = "grey30", stroke = 0.3) +
+  scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+  scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+  facet_wrap(~ corpus) +
+  labs(
+    title    = "Near-flat RelFreq items: preference ~ AbsPref across model sizes",
+    subtitle = sprintf("Items selected where |log(\u03b1/\u03b2)| < %.1f in 125M; same items shown for all sizes",
+                       FLAT_THRESHOLD),
+    x = "GenPref (centered)", y = "Model preference (log-odds of alpha)"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "bottom")
+```
+
+## AbsPref × OverallFreq — faceted by model size
+
+```{r plot-flat-interaction, fig.height=8}
+dat_flat_grp <- dat_flat |>
+  group_by(corpus) |>
+  mutate(
+    exposure_grp = if_else(
+      log_total > median(log_total, na.rm = TRUE), "High overall freq", "Low overall freq"
+    )
+  ) |>
+  ungroup()
+
+ggplot(dat_flat_grp, aes(x = GenPref_centered, y = preference,
+                          colour = exposure_grp, linetype = exposure_grp)) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.9, alpha = 0.12) +
+  geom_point(aes(shape = model_size), size = 1.8, alpha = 0.5) +
+  scale_colour_manual(values = c("High overall freq" = "#154733", "Low overall freq" = "#74add1"),
+                      name = "Overall freq") +
+  scale_linetype_manual(values = c("High overall freq" = "solid", "Low overall freq" = "dashed"),
+                        name = "Overall freq") +
+  scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
+  facet_grid(corpus ~ model_size) +
+  labs(
+    title    = "AbsPref \u00d7 OverallFreq for near-flat RelFreq items",
+    subtitle = "Solid = above-median overall freq; dashed = below. Same items in each model-size panel.",
+    x = "GenPref (centered)", y = "Model preference (log-odds)"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(strip.text = element_text(face = "bold"), legend.position = "bottom")
+```
+
+## OLS coefficients per corpus × model size
+
+```{r flat-ols-table}
+flat_ols <- dat_flat |>
+  group_by(corpus, model_size) |>
+  group_modify(function(d, k) {
+    fit <- lm(preference ~ GenPref_centered * log_total_c, data = d)
+    cf  <- coef(summary(fit))
+    as_tibble(cf, rownames = "term") |>
+      rename(estimate = Estimate, se = `Std. Error`, t = `t value`, p = `Pr(>|t|)`) |>
+      filter(term != "(Intercept)") |>
+      mutate(
+        term = recode(term,
+          "GenPref_centered"             = "AbsPref",
+          "log_total_c"                  = "OverallFreq (log, z)",
+          "GenPref_centered:log_total_c" = "AbsPref \u00d7 OverallFreq"
+        ),
+        R2 = round(summary(fit)$r.squared, 3),
+        n  = nrow(d)
+      )
+  }) |>
+  ungroup() |>
+  mutate(
+    estimate = round(estimate, 3),
+    se       = round(se, 3),
+    p_label  = case_when(p < .001 ~ "< .001", p < .01 ~ "< .01",
+                         p < .05 ~ "< .05",   TRUE ~ sprintf("%.3f", p))
+  )
+
+flat_ols |>
+  select(corpus, model_size, term, estimate, se, p_label, R2, n) |>
+  rename(Corpus = corpus, Size = model_size, Term = term,
+         Estimate = estimate, SE = se, p = p_label) |>
+  kbl(caption = paste(
+    "OLS: preference ~ AbsPref * OverallFreq, near-flat RelFreq items only.",
+    "Same items used across 125M/350M/1.3B within each corpus.")) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Section 3: Case Studies — Full Training Trajectories
+
+Take the top **`r N_CASE_BINOMS`** 125M-disagreement items per corpus (largest
+`|signed_gap|` in 125M, AbsPref predicts correct direction) and plot their
+full training trajectories for all three model sizes.
+
+For each binomial:
+- **Coloured solid lines** = model preference (log-odds) across training, one per model size
+- **Dashed gold line** = corpus RelFreq (same for all sizes; cumulative count ratio)
+- **Horizontal purple line** = AbsPref (constant, not training-dependent)
+
+```{r select-case-binoms}
+case_binoms <- disagree_125m |>
+  filter(abspref_ok_125m) |>
+  group_by(corpus) |>
+  slice_max(abs(signed_gap_125m), n = N_CASE_BINOMS) |>
+  ungroup()
+
+cat(sprintf("Case study binomials: %d BabyLM, %d C4\n",
+  sum(case_binoms$corpus == "BabyLM"), sum(case_binoms$corpus == "C4")))
+print(case_binoms |> select(corpus, binom, log_freq_ratio, GenPref_centered, signed_gap_125m))
+```
+
+```{r load-case-traj}
+case_binom_vec <- unique(case_binoms$binom)
+message(sprintf("Loading trajectories for %d binomials...", length(case_binom_vec)))
+
+dat_traj <- map_dfr(seq_len(nrow(ck_meta)), function(i) {
+  m  <- ck_meta$model[i]
+  s  <- ck_meta$step[i]
+  ck <- ck_meta$ck_idx[i]
+  cdat <- filter(train, model == m, step == s, binom %in% case_binom_vec)
+  if (nrow(cdat) == 0) return(tibble())
+  add_dyn_freq(cdat, binom_filter = case_binom_vec) |>
+    mutate(
+      ck_idx     = ck,
+      corpus     = parse_corpus(m),
+      model_size = factor(parse_size(m), levels = SIZE_LEVELS)
+    )
+}) |>
+  filter(!is.na(tokens))
+
+message(sprintf("Loaded %d trajectory rows", nrow(dat_traj)))
+```
+
+```{r plot-case-traj, fig.height=5, results='asis'}
+for (corp in c("BabyLM", "C4")) {
+  these_binoms <- case_binoms |> filter(corpus == corp) |> pull(binom)
+
+  for (binom_i in these_binoms) {
+    d <- filter(dat_traj, corpus == corp, binom == binom_i, !is.na(log_freq_ratio))
+    if (nrow(d) == 0) {
+      cat(sprintf("\n*No data for %s / %s.*\n\n", corp, binom_i))
+      next
+    }
+
+    abspref_val <- d$GenPref_centered[!is.na(d$GenPref_centered)][1]
+
+    p <- ggplot(d, aes(x = tokens, y = preference,
+                        colour = model_size, fill = model_size, shape = model_size)) +
+      # Zero line
+      geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.35) +
+      # AbsPref reference
+      geom_hline(yintercept = abspref_val, colour = "#9e3d8e",
+                 linetype = "dotdash", linewidth = 0.8, alpha = 0.85) +
+      annotate("text", x = -Inf, y = abspref_val, hjust = -0.05, vjust = -0.45,
+               label = sprintf("AbsPref = %.2f", abspref_val), colour = "#9e3d8e", size = 3.2) +
+      # Corpus RelFreq trajectory (same for all sizes — use one model's data)
+      geom_line(data = d |> filter(model_size == first(levels(d$model_size))) |>
+                  distinct(tokens, log_freq_ratio),
+                aes(x = tokens, y = log_freq_ratio), colour = "#cc8800",
+                linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE) +
+      annotate("text", x = Inf, y = filter(d, model_size == first(levels(d$model_size))) |>
+                 arrange(desc(tokens)) |> slice(1) |> pull(log_freq_ratio),
+               hjust = 1.05, vjust = -0.4, label = "RelFreq", colour = "#cc8800", size = 3.2) +
+      # Model preference per size
+      geom_line(linewidth = 0.85) +
+      geom_point(size = 2.0, stroke = 0.5, colour = "grey25") +
+      scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+      scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+      scale_shape_manual(values = SIZE_SHAPES, name = "Model size") +
+      scale_x_continuous("Training tokens",
+                         labels = label_number(scale_cut = cut_short_scale())) +
+      scale_y_continuous("Log-odds preference (+ = prefer alpha form)") +
+      labs(
+        title    = sprintf('%s \u2014 "%s"', corp, binom_i),
+        subtitle = sprintf(
+          "RelFreq log(\u03b1/\u03b2) = %.2f (predicts %s); AbsPref = %.2f (predicts %s)",
+          mean(d$log_freq_ratio, na.rm = TRUE),
+          if_else(mean(d$log_freq_ratio, na.rm = TRUE) > 0, "\u03b1", "\u03b2"),
+          abspref_val,
+          if_else(abspref_val > 0, "\u03b1", "\u03b2"))
+      ) +
+      theme_bw(base_size = 12) +
+      theme(legend.position = "bottom", plot.title = element_text(face = "bold"))
+
+    print(p)
+    cat("\n\n")
+  }
+}
+```
+
+------------------------------------------------------------------------
+
+# Summary
+
+```{r summary-table}
+tibble(
+  Analysis = c(
+    "BabyLM: RelFreq wrong in 125M",
+    "  \u2514 AbsPref correct in 125M",
+    "  \u2514 Replicates in 350M/1.3B (AbsPref ok in all 3 sizes)",
+    "C4: RelFreq wrong in 125M",
+    "  \u2514 AbsPref correct in 125M",
+    "  \u2514 Replicates in 350M/1.3B (AbsPref ok in all 3 sizes)",
+    "BabyLM: near-flat RelFreq items",
+    "C4: near-flat RelFreq items"
+  ),
+  N = c(
+    sum(disagree_125m$corpus == "BabyLM"),
+    sum(disagree_125m$abspref_ok_125m & disagree_125m$corpus == "BabyLM"),
+    {
+      r <- dat_final |>
+        semi_join(filter(disagree_125m, corpus == "BabyLM"), by = c("corpus","binom")) |>
+        group_by(binom) |>
+        summarise(all_ok = all(abspref_ok))
+      sum(r$all_ok)
+    },
+    sum(disagree_125m$corpus == "C4"),
+    sum(disagree_125m$abspref_ok_125m & disagree_125m$corpus == "C4"),
+    {
+      r <- dat_final |>
+        semi_join(filter(disagree_125m, corpus == "C4"), by = c("corpus","binom")) |>
+        group_by(binom) |>
+        summarise(all_ok = all(abspref_ok))
+      sum(r$all_ok)
+    },
+    n_distinct(dat_flat$binom[dat_flat$corpus == "BabyLM"]),
+    n_distinct(dat_flat$binom[dat_flat$corpus == "C4"])
+  )
+) |>
+  kbl() |>
+  kable_styling(bootstrap_options = c("striped"), full_width = FALSE)
+```
