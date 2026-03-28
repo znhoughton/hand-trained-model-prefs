@@ -94,6 +94,20 @@ TERM_LABELS_ABSGAP <- c(
 
 SIZE_LEVELS  <- c("125M", "350M", "1.3B")
 SIZE_COLOURS <- c("125M" = "#1b7837", "350M" = "#762a83", "1.3B" = "#b2182b")
+CORPUS_SHAPES <- c("BabyLM" = 16, "C4" = 17)  # circle / triangle
+
+RESULTS_DIR  <- normalizePath(file.path(
+  {
+    inp <- knitr::current_input(dir = TRUE)
+    if (!is.null(inp)) dirname(inp)
+    else if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable())
+      dirname(normalizePath(rstudioapi::getActiveDocumentContext()$path))
+    else getwd()
+  },
+  "../Data/processed/results"
+), mustWork = FALSE)
+CONSTRAINT_COLS_REDUCED <- c("Form", "Culture", "Power", "Intense",
+                              "Icon", "Freq", "Len", "BStress")
 
 N_TRAJ_CHECKPOINTS <- 20   # must match the value used when fitting
 
@@ -137,11 +151,19 @@ PRED_SPECS <- list(
 ```
 
 ```{r build-traj-meta, message=FALSE}
-# Build a lookup table: slug × ck_idx → actual token count.
-# brms only stores formula variables in fit$data, so 'tokens' is absent from the
-# per-checkpoint .rds files.  We recover token counts by replaying the same
-# sample_checkpoints() logic used during fitting — a fast, read-only DuckDB query.
-if (!is.null(CSV_PATH)) {
+# Load pre-computed TRAJ_META from prepare_results.R output (slug × ck_idx → tokens).
+# Falls back to rebuilding from the checkpoint CSV if traj_meta.csv is missing.
+traj_meta_csv <- tryCatch(
+  normalizePath(file.path(RESULTS_DIR, "traj_meta.csv"), mustWork = TRUE),
+  error = function(e) NULL
+)
+
+if (!is.null(traj_meta_csv)) {
+  TRAJ_META <- read_csv(traj_meta_csv, show_col_types = FALSE)
+  message(sprintf("TRAJ_META loaded from traj_meta.csv: %d models, %d checkpoint rows total",
+                  n_distinct(TRAJ_META$slug), nrow(TRAJ_META)))
+} else if (!is.null(CSV_PATH)) {
+  message("traj_meta.csv not found — rebuilding from checkpoint CSV (run prepare_results.R to cache this)...")
   library(duckdb)
   CSV_PATH_FWD <- gsub("\\\\", "/", CSV_PATH)
   con_meta <- dbConnect(duckdb::duckdb())
@@ -167,7 +189,7 @@ if (!is.null(CSV_PATH)) {
                   n_distinct(TRAJ_META$slug), nrow(TRAJ_META)))
 } else {
   TRAJ_META <- NULL
-  warning("CSV not found — trajectory x-axis will be NA (set CSV_PATH in the config chunk)")
+  warning("Neither traj_meta.csv nor checkpoint CSV found — trajectory x-axis will be NA")
 }
 ```
 
@@ -447,6 +469,17 @@ genpref_sig_timeline <- function(traj_df, title = NULL,
     )
 }
 
+# ── Load pre-computed results CSVs ───────────────────────────────────────────
+load_results_csv <- function(fname) {
+  path <- file.path(RESULTS_DIR, fname)
+  if (!file.exists(path)) {
+    warning(sprintf("%s not found — run prepare_results.R first", fname))
+    return(tibble())
+  }
+  read_csv(path, show_col_types = FALSE) |>
+    mutate(model_size = factor(model_size, levels = SIZE_LEVELS))
+}
+
 # ── Raw signed_gap descriptive summaries from trajectory fits ─────────────────
 # Extracts fit$data to compute mean signed_gap and mean |signed_gap| per
 # checkpoint. Returns a single tibble with one row per model × checkpoint.
@@ -611,7 +644,7 @@ preference     <- signed_gap + log_freq_ratio   # signed_gap = preference - log_
 Three summaries are plotted. **Mean signed gap** (D1) shows whether models have a systematic directional bias — over- or under-favoring alpha relative to corpus frequency on average. A mean of zero would indicate that, averaged across items, preferences match corpus statistics exactly; non-zero values indicate a systematic offset in one direction. **Mean absolute signed gap** (D2) discards direction and tracks only the size of deviations, asking whether models become more or less extreme over training. **Preference–frequency correlation** (D3) computes the Pearson correlation between `preference` and `log_freq_ratio` across items at each checkpoint, measuring how well the model's preference *ordering* across items tracks the corpus frequency ratio — without penalising for overall scale differences.
 
 ```{r desc-gap-load, message=FALSE}
-sg_gap_summary <- load_traj_gap_summary("sg_traj_")
+sg_gap_summary <- load_results_csv("sg_gap_summary.csv")
 ```
 
 ## Plot D1: Mean Signed Gap
@@ -1084,5 +1117,146 @@ if (nrow(pref_coefs_ckpt) > 0) {
     arrange(Corpus, Size, Term) %>%
     knitr::kable(digits = 3,
                  caption = "Posterior fixed effects: preference ~ (genpref_c + freq_prob_c + log_total_c) * tokens_c + (1|binom).")
+}
+```
+
+------------------------------------------------------------------------
+
+# Part V — GenPref Trajectory With Bigram Log-Odds
+
+These plots reproduce the GenPref significance timeline from Analyses 2 and 5, but using models that additionally include bigram log-odds as a predictor. If the GenPref effect survives the inclusion of bigram positional tendencies, it is less likely to reflect mere co-occurrence statistics. The models are:
+
+$$\{\text{preference},\ \text{signed\_gap}\} \sim \text{genpref\_c} \times \text{log\_total\_c} + \text{freq\_prob\_c} \times \text{log\_total\_c} + \text{bigram\_logodds\_c} + (1 \mid \text{binom})$$
+
+```{r btraj-load, message=FALSE}
+TERM_LEVELS_BTRAJ <- c(
+  "GenPref", "RelFreq", "BigramLogOdds",
+  "Overall freq\n(ln, z)", "GenPref \u00d7\nOverall freq", "RelFreq \u00d7\nOverall freq"
+)
+
+pref_btraj_coefs <- load_results_csv("pref_btraj_coefs.csv") |>
+  mutate(term = factor(term, levels = TERM_LEVELS_BTRAJ))
+sg_btraj_coefs   <- load_results_csv("sg_btraj_coefs.csv") |>
+  mutate(term = factor(term, levels = TERM_LEVELS_BTRAJ))
+```
+
+## Plot B1: GenPref — Preference Model (+ Bigram Log-Odds)
+
+```{r btraj-pref-sig, fig.width=12, fig.height=5.5}
+genpref_sig_timeline(
+  pref_btraj_coefs,
+  title      = "GenPref significance over training — preference model + bigram log-odds",
+  focus_term = "GenPref"
+)
+```
+
+## Plot B2: GenPref — Signed Gap Model (+ Bigram Log-Odds)
+
+```{r btraj-sg-sig, fig.width=12, fig.height=5.5}
+genpref_sig_timeline(
+  sg_btraj_coefs,
+  title      = "GenPref significance over training — signed gap model + bigram log-odds",
+  focus_term = "GenPref"
+)
+```
+
+------------------------------------------------------------------------
+
+# Part VI — VIF-Filtered Constraint Main Effects
+
+Trajectory of each VIF-retained constraint coefficient (main effect only) across 20 sampled training checkpoints. `Lapse` and `Percept` are excluded a priori; any additional constraint with VIF \> 3 (computed once per corpus from item-level OLS) is also excluded. Panels are arranged by constraint so patterns across model sizes and corpora are visible within each constraint. Point fill encodes P(β \> 0); the colour of the CI bar identifies model size.
+
+```{r vif-traj-load, message=FALSE}
+constr_vif_coefs <- load_results_csv("constr_vif_traj_coefs.csv") |>
+  filter(!is.na(term), as.character(term) %in% CONSTRAINT_COLS_REDUCED)
+```
+
+```{r vif-traj-plot, fig.width=14, fig.height=10}
+if (nrow(constr_vif_coefs) > 0) {
+  df <- constr_vif_coefs |>
+    mutate(
+      p_gt0     = pnorm(0, mean = estimate, sd = se, lower.tail = FALSE),
+      pct_label = sprintf("%.0f%%", p_gt0 * 100),
+      x_val     = tokens / 1e6
+    ) |>
+    group_by(corpus, model_size, term) |>
+    arrange(x_val, .by_group = TRUE) |>
+    mutate(pt_idx = row_number()) |>
+    ungroup()
+
+  ggplot(df, aes(x = x_val, y = estimate,
+                 colour = model_size, fill = model_size,
+                 group = interaction(corpus, model_size))) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.12, colour = NA) +
+    geom_line(aes(linetype = corpus), linewidth = 0.75) +
+    geom_point(aes(shape = corpus), size = 2) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values   = SIZE_COLOURS, name = "Model size") +
+    scale_linetype_manual(values = c("BabyLM" = "solid", "C4" = "dashed"), name = "Corpus") +
+    scale_shape_manual(values = CORPUS_SHAPES, name = "Corpus") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Coefficient (95% CI)") +
+    facet_wrap(~ term, scales = "free_y", ncol = 4) +
+    labs(
+      title    = "VIF-filtered constraint main effects over training",
+      subtitle = "preference ~ (selected constraints) * log_total_c + freq_prob_c * log_total_c + (1|binom)  |  ribbon = 95% CI"
+    ) +
+    theme_bw(base_size = 11) +
+    theme(legend.position  = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.text       = element_text(face = "bold", size = 10))
+} else {
+  message("No constr_vif_traj_coefs.csv data — run prepare_results.R after fitting 2g models.")
+}
+```
+
+------------------------------------------------------------------------
+
+# Part VII — Constraint–Preference Correlations
+
+Pearson correlation between each constraint and model preference (left) / preference deviation (right) at each of 20 sampled training checkpoints. Each panel shows one constraint; lines are coloured by model size and line type distinguishes corpus. This is a model-free descriptive view of which constraints track the model's ordering tendency over training.
+
+```{r cor-traj-load, message=FALSE}
+cor_traj <- load_results_csv("constraint_cor_traj.csv")
+```
+
+```{r cor-traj-plot, fig.width=14, fig.height=10}
+if (nrow(cor_traj) > 0) {
+  df <- cor_traj |>
+    filter(constraint %in% CONSTRAINT_COLS_REDUCED) |>
+    pivot_longer(cols = c(cor_pref, cor_pref_dev),
+                 names_to = "outcome", values_to = "r") |>
+    mutate(
+      outcome    = recode(outcome,
+                          "cor_pref"     = "Preference",
+                          "cor_pref_dev" = "Preference deviation"),
+      model_size = factor(model_size, levels = SIZE_LEVELS)
+    )
+
+  ggplot(df, aes(x = tokens / 1e6, y = r,
+                 colour = model_size,
+                 linetype = corpus,
+                 group = interaction(model, outcome))) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_line(linewidth = 0.7, alpha = 0.85) +
+    geom_point(aes(shape = corpus), size = 1.5) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_linetype_manual(values = c("BabyLM" = "solid", "C4" = "dashed"), name = "Corpus") +
+    scale_shape_manual(values = CORPUS_SHAPES, name = "Corpus") +
+    scale_x_continuous("Training tokens (millions)") +
+    scale_y_continuous("Pearson r", limits = c(-1, 1)) +
+    facet_grid(outcome ~ constraint) +
+    labs(
+      title    = "Constraint–preference correlations over training",
+      subtitle = "Top row: cor(preference, constraint)  |  Bottom row: cor(preference deviation, constraint)  |  line type = corpus"
+    ) +
+    theme_bw(base_size = 10) +
+    theme(legend.position  = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.text.x     = element_text(face = "bold", size = 9),
+          strip.text.y     = element_text(face = "bold", size = 9))
+} else {
+  message("No constraint_cor_traj.csv data — run prepare_results.R first.")
 }
 ```

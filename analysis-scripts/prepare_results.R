@@ -260,6 +260,8 @@ extract_traj_and_save("humfit_traj_", TERM_LEVELS_HUM, TERM_LABELS_HUM, "humfit_
 # ── Analysis 2: model pref ~ individual constraints (trajectory) ──────────────
 CONSTRAINT_COLS <- c("Form", "Percept", "Culture", "Power", "Intense",
                      "Icon", "Freq", "Len", "Lapse", "BStress")
+CONSTRAINT_COLS_REDUCED <- setdiff(CONSTRAINT_COLS, c("Lapse", "Percept"))
+
 TERM_LEVELS_CONSTR <- c(
   CONSTRAINT_COLS,
   "log_total_c", "freq_prob_c",
@@ -273,6 +275,83 @@ TERM_LABELS_CONSTR <- c(
   "RelFreq \u00d7\nOverall freq"
 )
 extract_traj_and_save("constr_traj_", TERM_LEVELS_CONSTR, TERM_LABELS_CONSTR, "constr_traj_coefs.csv")
+
+# VIF-filtered constraint trajectory (constr_vif_traj_): term set is corpus-specific
+# so use the full reduced set as levels — absent terms will be NA and can be filtered.
+TERM_LEVELS_VIF <- c(
+  CONSTRAINT_COLS_REDUCED, "log_total_c", "freq_prob_c",
+  paste0(CONSTRAINT_COLS_REDUCED, ":log_total_c"), "freq_prob_c:log_total_c"
+)
+TERM_LABELS_VIF <- c(
+  CONSTRAINT_COLS_REDUCED,
+  "Overall freq\n(ln total)", "RelFreq\n(P(alpha)\u22120.5)",
+  paste0(CONSTRAINT_COLS_REDUCED, " \u00d7\nOverall freq"),
+  "RelFreq \u00d7\nOverall freq"
+)
+extract_traj_and_save("constr_vif_traj_", TERM_LEVELS_VIF, TERM_LABELS_VIF, "constr_vif_traj_coefs.csv")
+
+# ── Analysis 2d/2e: preference/signed_gap + bigram log-odds trajectory ─────────
+TERM_LEVELS_BTRAJ <- c(
+  "genpref_c", "freq_prob_c", "bigram_logodds_c", "log_total_c",
+  "genpref_c:log_total_c", "freq_prob_c:log_total_c"
+)
+TERM_LABELS_BTRAJ <- c(
+  "GenPref", "RelFreq", "BigramLogOdds",
+  "Overall freq\n(ln, z)", "GenPref \u00d7\nOverall freq", "RelFreq \u00d7\nOverall freq"
+)
+extract_traj_and_save("pref_btraj_", TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "pref_btraj_coefs.csv")
+extract_traj_and_save("sg_btraj_",   TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "sg_btraj_coefs.csv")
+
+# ── Constraint–preference correlation trajectories ────────────────────────────
+# Computed directly from training_attested.csv (no brms loading needed).
+# Saves constraint_cor_traj.csv: one row per model × sampled checkpoint × constraint.
+message("Computing constraint-preference correlation trajectories...")
+train_csv <- normalizePath(file.path(SCRIPT_DIR, "../Data/processed/training_attested.csv"),
+                           mustWork = FALSE)
+if (file.exists(train_csv)) {
+  train_dat <- read_csv(train_csv, show_col_types = FALSE) |>
+    mutate(
+      corpus     = parse_corpus(model),
+      model_size = factor(parse_size(model), levels = SIZE_LEVELS),
+      pref_dev   = preference - qlogis(pmax(pmin(RelFreq, 1 - 1e-9), 1e-9))
+    ) |>
+    filter(!is.na(corpus), !is.na(model_size))
+
+  # Sample the same 20 checkpoint indices per model as used in fitting
+  sample_steps_pr <- function(steps_vec, n = N_TRAJ_CHECKPOINTS) {
+    steps_vec <- sort(unique(steps_vec))
+    idx <- unique(round(seq(1, length(steps_vec), length.out = min(n, length(steps_vec)))))
+    steps_vec[idx]
+  }
+
+  cor_rows <- train_dat |>
+    group_by(model, corpus, model_size) |>
+    group_modify(function(mdat, key) {
+      sampled_steps <- sample_steps_pr(mdat$step)
+      map_dfr(sampled_steps, function(s) {
+        ck_dat <- filter(mdat, step == s)
+        tok    <- ck_dat$tokens[1]
+        map_dfr(CONSTRAINT_COLS_REDUCED, function(constr) {
+          x <- ck_dat[[constr]]
+          tibble(
+            tokens     = tok,
+            constraint = constr,
+            cor_pref   = if (sum(!is.na(x) & !is.na(ck_dat$preference)) > 3)
+                           cor(ck_dat$preference, x, use = "complete.obs") else NA_real_,
+            cor_pref_dev = if (sum(!is.na(x) & !is.na(ck_dat$pref_dev)) > 3)
+                             cor(ck_dat$pref_dev, x, use = "complete.obs") else NA_real_
+          )
+        })
+      })
+    }) |>
+    ungroup()
+
+  save_csv(cor_rows |> select(model, corpus, model_size, tokens, constraint,
+                               cor_pref, cor_pref_dev),
+           "constraint_cor_traj.csv")
+} else {
+  message("  training_attested.csv not found; skipping constraint_cor_traj.csv")
+}
 
 # ── Posterior predictive checks ───────────────────────────────────────────────
 # Save tidy data frames (observed y + yrep draws) rather than pre-rendered

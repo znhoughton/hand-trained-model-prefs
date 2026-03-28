@@ -76,6 +76,7 @@ HUMAN_CSV   <- file.path(DATA_DIR, "human_responses_attested.csv")
 AGG_CSV     <- file.path(DATA_DIR, "attested_agg.csv")
 BLM_BIGRAM_CSV <- normalizePath(file.path(SCRIPT_DIR, "../Data/babylm_bigram_exposures.csv"), mustWork = FALSE)
 C4_BIGRAM_CSV  <- normalizePath(file.path(SCRIPT_DIR, "../Data/c4_bigram_exposures.csv"),  mustWork = FALSE)
+EXPOSURES_CSV  <- normalizePath(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"), mustWork = FALSE)
 
 dir.create(MODELS_DIR, showWarnings = FALSE, recursive = TRUE)
 
@@ -133,6 +134,20 @@ sample_steps <- function(model_df, n = N_TRAJ_CHECKPOINTS) {
   steps <- sort(unique(model_df$step))
   idx   <- unique(round(seq(1, length(steps), length.out = min(n, length(steps)))))
   steps[idx]
+}
+
+# Join checkpoint-specific freq_prob_c, log_freq_ratio, signed_gap, log_total_c
+# onto a single-checkpoint data slice.  Replaces static RelFreq / OverallFreq_log
+# everywhere in the fitting chunks.
+add_dyn_freq <- function(cdat) {
+  cdat |>
+    left_join(select(dyn_freq, model, step, binom,
+                     freq_prob_c, log_freq_ratio, log_total),
+              by = c("model", "step", "binom")) |>
+    mutate(
+      signed_gap  = preference - log_freq_ratio,
+      log_total_c = as.numeric(scale(log_total))
+    )
 }
 
 list_fits <- function(prefix) {
@@ -482,6 +497,45 @@ Cells below fit models and save `.rds` files. Already-fitted models are skipped 
 message("Loading training data...")
 train <- read_csv(TRAIN_CSV, show_col_types = FALSE)
 
+# Load checkpoint-specific alpha_seen / beta_seen from the exposures file.
+# These are identical across prompts for a given (model, step, binom), so we
+# aggregate with ANY_VALUE to get one row per model × step × binom.
+# This replaces the static whole-corpus RelFreq for freq_prob_c, signed_gap,
+# and log_total_c throughout all fitting chunks.
+message("Loading dynamic frequency values from checkpoint_results_with_exposures.csv...")
+if (file.exists(EXPOSURES_CSV)) {
+  library(duckdb)
+  exp_path_fwd <- gsub("\\\\", "/", normalizePath(EXPOSURES_CSV))
+  con_exp <- dbConnect(duckdb::duckdb())
+  dbExecute(con_exp, sprintf(
+    "CREATE VIEW exp AS SELECT * FROM read_csv_auto('%s')", exp_path_fwd
+  ))
+  dyn_freq_raw <- dbGetQuery(con_exp, "
+    SELECT model, step, binom,
+           ANY_VALUE(alpha_seen) AS alpha_seen,
+           ANY_VALUE(beta_seen)  AS beta_seen
+    FROM exp
+    GROUP BY model, step, binom
+  ")
+  dbDisconnect(con_exp, shutdown = TRUE)
+  rm(con_exp, exp_path_fwd)
+
+  dyn_freq <- as_tibble(dyn_freq_raw) |>
+    mutate(
+      log_freq_ratio = if_else(alpha_seen > 0 & beta_seen > 0,
+                               log(alpha_seen / beta_seen), NA_real_),
+      freq_prob_c    = plogis(log_freq_ratio) - 0.5,
+      log_total      = if_else(alpha_seen + beta_seen > 0,
+                               log(alpha_seen + beta_seen), NA_real_)
+    )
+  rm(dyn_freq_raw)
+  message(sprintf("  dyn_freq: %d rows (%d models, %d unique steps)",
+                  nrow(dyn_freq), n_distinct(dyn_freq$model),
+                  n_distinct(dyn_freq$step)))
+} else {
+  stop("checkpoint_results_with_exposures.csv not found — cannot compute dynamic frequency values.")
+}
+
 message("Loading human responses...")
 human <- read_csv(HUMAN_CSV, show_col_types = FALSE)
 # Fix: old CSV generation produced duplicate 'binom' column headers;
@@ -568,9 +622,9 @@ future_map(MODELS_LIST, function(model_name) {
     if (!file.exists(con_path)) {
       message(sprintf("  %s %s  step=%d", slug, ck, s))
       con_data <- cdat |>
-        mutate(freq_prob_c = RelFreq - 0.5,
-               log_total_c = as.numeric(scale(OverallFreq_log))) |>
-        filter(!is.na(preference), !if_any(all_of(CONSTRAINT_COLS), is.na))
+        add_dyn_freq() |>
+        filter(!is.na(preference), !is.na(freq_prob_c), !is.na(log_total_c),
+               !if_any(all_of(CONSTRAINT_COLS), is.na))
       fit <- brm(
         formula = formula_2b,
         data    = con_data,
@@ -611,7 +665,7 @@ vif_data_for_corpus <- function(corpus_label) {
     group_by(binom) |>
     slice_max(step, n = 1) |>
     ungroup() |>
-    mutate(freq_prob_c = RelFreq - 0.5) |>
+    add_dyn_freq() |>
     select(preference, freq_prob_c, all_of(CONSTRAINT_COLS_REDUCED)) |>
     filter(complete.cases(across(everything())))
   dat
@@ -696,9 +750,9 @@ future_map(MODELS_LIST, function(model_name) {
       message(sprintf("  %s %s — exists, skipping", slug, ck)); next
     }
     con_data <- filter(mdata, step == s) |>
-      mutate(freq_prob_c = RelFreq - 0.5,
-             log_total_c = as.numeric(scale(OverallFreq_log))) |>
-      filter(!is.na(preference), !if_any(all_of(vif_constr), is.na))
+      add_dyn_freq() |>
+      filter(!is.na(preference), !is.na(freq_prob_c), !is.na(log_total_c),
+             !if_any(all_of(vif_constr), is.na))
     if (nrow(con_data) < 20) {
       warning(sprintf("Skipping %s %s — insufficient data (%d rows)", slug, ck, nrow(con_data))); next
     }
@@ -797,12 +851,8 @@ make_bigram_fitdata <- function(cdat, corpus) {
   bg_ck <- filter(bg_df, tokens == ck_tokens[1])
 
   cdat |>
-    mutate(
-      genpref_c   = GenPref_centered,
-      freq_prob_c = RelFreq - 0.5,
-      log_total_c = as.numeric(scale(OverallFreq_log)),
-      signed_gap  = preference - qlogis(pmax(pmin(RelFreq, 1 - 1e-9), 1e-9))
-    ) |>
+    add_dyn_freq() |>
+    mutate(genpref_c = GenPref_centered) |>
     left_join(select(bg_ck, binom, w1_and, and_w1, w2_and, and_w2, w1_total, w2_total), by = "binom") |>
     mutate(
       bigram_logodds   = (log(w1_and + 0.5) + log(and_w2 + 0.5)) -
