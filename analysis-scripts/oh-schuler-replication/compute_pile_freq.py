@@ -45,7 +45,7 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PILE_DATASET = "monology/pile-uncopyrighted"
-N_WORKERS    = 32      # number of parallel workers (local CPU cores)
+N_WORKERS    = 20      # number of parallel workers (local CPU cores)
 
 # Where to download the dataset. Set to a path with sufficient disk space
 # (~800 GB for the full dataset). None = HuggingFace default cache.
