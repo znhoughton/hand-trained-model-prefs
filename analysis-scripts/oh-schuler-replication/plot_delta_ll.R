@@ -25,22 +25,71 @@ DATA_DIR   <- file.path(BASE_DIR, "Data")
 PREFS_CSV  <- file.path(SCRIPT_DIR, "oh_schuler_prefs.csv")
 PPL_CSV    <- file.path(SCRIPT_DIR, "oh_schuler_perplexity.csv")
 HUMAN_CSV  <- file.path(DATA_DIR, "all_human_data.csv")
+BINOMS_CSV <- file.path(DATA_DIR, "nonce_and_attested_binoms.csv")
 OUT_PDF    <- file.path(SCRIPT_DIR, "delta_ll_plot.pdf")
 OUT_PNG    <- file.path(SCRIPT_DIR, "delta_ll_plot.png")
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 message("Loading data ...")
 
-human_trials <- read_csv(HUMAN_CSV, show_col_types = FALSE) |>
+LOG_PATH <- file.path(SCRIPT_DIR, "plot_delta_ll.log")
+log_line <- function(...) {
+  msg <- paste0(...)
+  message(msg)
+  cat(msg, "\n", file = LOG_PATH, append = TRUE)
+}
+cat(sprintf("\n%s\nRun: %s\n", strrep("=", 60), format(Sys.time())),
+    file = LOG_PATH, append = TRUE)
+
+# Attested binomials only
+all_binoms_df   <- read_csv(BINOMS_CSV, show_col_types = FALSE)
+attested_binoms <- all_binoms_df |> filter(Attested == 1) |> pull(Alpha)
+nonce_binoms    <- all_binoms_df |> filter(Attested == 0) |> pull(Alpha)
+
+human_trials_all <- read_csv(HUMAN_CSV, show_col_types = FALSE) |>
   mutate(binom = Alpha, resp_alpha = as.integer(resp == "alpha")) |>
   select(binom, resp_alpha, RelFreq)
 
-model_prefs <- read_csv(PREFS_CSV, show_col_types = FALSE)
-ppl         <- read_csv(PPL_CSV,   show_col_types = FALSE)
+human_trials <- human_trials_all |> filter(binom %in% attested_binoms)
 
-message(sprintf("  %d human trials, %d unique binomials, %d models",
-                nrow(human_trials), n_distinct(human_trials$binom),
-                n_distinct(model_prefs$model)))
+model_prefs_all <- read_csv(PREFS_CSV, show_col_types = FALSE)
+model_prefs     <- model_prefs_all |> filter(binom %in% attested_binoms)
+
+ppl <- read_csv(PPL_CSV, show_col_types = FALSE)
+
+# ── Log drop counts ───────────────────────────────────────────────────────────
+n_human_before  <- n_distinct(human_trials_all$binom)
+n_human_after   <- n_distinct(human_trials$binom)
+n_human_dropped <- n_human_before - n_human_after
+
+n_prefs_before  <- n_distinct(model_prefs_all$binom)
+n_prefs_after   <- n_distinct(model_prefs$binom)
+n_prefs_dropped <- n_prefs_before - n_prefs_after
+
+dropped_human <- setdiff(unique(human_trials_all$binom), attested_binoms)
+dropped_prefs <- setdiff(unique(model_prefs_all$binom),  attested_binoms)
+
+log_line(sprintf(
+  "Human trials:  %d → %d unique binomials retained  (%d dropped as non-attested)",
+  n_human_before, n_human_after, n_human_dropped
+))
+if (length(dropped_human) > 0) {
+  log_line("  Dropped from human_trials: ", paste(dropped_human, collapse = ", "))
+}
+
+log_line(sprintf(
+  "Model prefs:   %d → %d unique binomials retained  (%d dropped as non-attested)",
+  n_prefs_before, n_prefs_after, n_prefs_dropped
+))
+if (length(dropped_prefs) > 0) {
+  log_line("  Dropped from model_prefs: ", paste(dropped_prefs, collapse = ", "))
+}
+
+log_line(sprintf(
+  "Final: %d human trials, %d unique attested binomials, %d models",
+  nrow(human_trials), n_distinct(human_trials$binom), n_distinct(model_prefs$model)
+))
+message(sprintf("  (full log → %s)", LOG_PATH))
 
 # ── Join & compute ΔLL per model ─────────────────────────────────────────────
 dat <- human_trials |>

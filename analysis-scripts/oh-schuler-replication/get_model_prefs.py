@@ -61,7 +61,7 @@ MODEL_CONFIGS = {
     "facebook/opt-13b":              {"params": "13000M", "family": "OPT",      "label": "OPT-13B",      "skip": False},
     "facebook/opt-30b":              {"params": "30000M", "family": "OPT",      "label": "OPT-30B",      "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
     "facebook/opt-66b":              {"params": "66000M", "family": "OPT",      "label": "OPT-66B",      "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
-    "facebook/opt-175b":             {"params": "175000M","family": "OPT",      "label": "OPT-175B",     "skip": True},                        # ~350 GB — exceeds 2×80 GB
+    "facebook/opt-175b":             {"params": "175000M","family": "OPT",      "label": "OPT-175B",     "skip": False, "multi_gpu": True},
 }
 
 # ── Sentence-frame prompts (same set as model-prefs-all-ckpts.py) ─────────────
@@ -166,8 +166,8 @@ def score_binomials(model, tokenizer, binoms_df: pd.DataFrame,
     """
     rows = []
     for prompt in tqdm(LIST_OF_PROMPTS, desc="  prompts", leave=False):
-        alpha_texts    = (prompt + binoms_df["Alpha"]).tolist()
-        nonalpha_texts = (prompt + binoms_df["Nonalpha"]).tolist()
+        alpha_texts    = [prompt + str(t) for t in binoms_df["Alpha"]]
+        nonalpha_texts = [prompt + str(t) for t in binoms_df["Nonalpha"]]
         lps = batch_logprobs(model, tokenizer, alpha_texts + nonalpha_texts)
         n = len(alpha_texts)
         for i, row in enumerate(binoms_df.itertuples(index=False)):
@@ -236,10 +236,29 @@ def main():
     # Load binomials that appear in the human experiment
     print("Loading human experiment binomials ...")
     human = pd.read_csv(HUMAN_CSV)
-    binoms_df = (human[["Alpha", "Nonalpha"]]
-                 .drop_duplicates(subset="Alpha")
-                 .reset_index(drop=True))
-    print(f"  {len(binoms_df)} unique binomials\n")
+    all_unique  = human[["Alpha", "Nonalpha"]].drop_duplicates(subset="Alpha")
+    binoms_df   = (all_unique
+                   .dropna(subset=["Alpha", "Nonalpha"])
+                   .reset_index(drop=True))
+    n_dropped   = len(all_unique) - len(binoms_df)
+    dropped_rows = all_unique[all_unique[["Alpha", "Nonalpha"]].isna().any(axis=1)]
+
+    drop_msg = (
+        f"Binomials dropped (NaN in Alpha or Nonalpha): {n_dropped} / {len(all_unique)}\n"
+        + (("\n".join(f"  {r.Alpha!r}  |  {r.Nonalpha!r}"
+                      for r in dropped_rows.itertuples()))
+           if n_dropped > 0 else "  (none)")
+    )
+    print(drop_msg)
+
+    LOG_PATH = SCRIPT_DIR / "get_model_prefs.log"
+    with open(LOG_PATH, "a") as log:
+        import datetime
+        log.write(f"\n{'='*60}\n")
+        log.write(f"Run: {datetime.datetime.now().isoformat()}\n")
+        log.write(drop_msg + "\n")
+
+    print(f"  {len(binoms_df)} unique binomials retained  (log → {LOG_PATH})\n")
 
     all_prefs = []
     all_ppl   = []
