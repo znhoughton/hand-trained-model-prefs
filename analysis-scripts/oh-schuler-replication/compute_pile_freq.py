@@ -5,27 +5,21 @@ compute_pile_freq.py
 Compute trigram (binomial) frequencies from The Pile for attested binomials
 (e.g., "bread and butter" vs "butter and bread").
 
-Used as a corpus-frequency approximation for LLMs trained on web text
-(OPT, GPT-Neo, GPT-2), replacing Google Books RelFreq in plot_delta_ll.R.
-
-Output columns match batch_dyn_freq() in abspref_casestudy.Rmd:
-  binom, alpha, nonalpha, alpha_seen, nonalpha_seen, freq_prob_c, log_total
-
-Resume-safe: saves a progress checkpoint every SAVE_EVERY documents and
-resumes from the last checkpoint on restart.
+Optimised for multi-core machines:
+  - Aho-Corasick automaton: all ~1,200 patterns found in a single O(n) text
+    scan per document, instead of ~600 separate regex calls.
+  - Dataset sharding: splits the corpus into N_WORKERS shards; each worker
+    process streams and counts its own shard independently.
+  - Resume-safe: completed shards are skipped on restart.
 
 Usage:
-    pip install datasets pandas scipy
+    pip install datasets pyahocorasick pandas scipy
     python compute_pile_freq.py
-
-Note: The Pile is ~800 GB; streaming avoids a full download but requires
-a stable internet connection for the duration. To limit to a specific subset
-(e.g. Pile-CC only), set PILE_SUBSET below.
 """
 
 import json
 import logging
-import re
+import multiprocessing as mp
 import sys
 from math import log
 from pathlib import Path
@@ -34,19 +28,20 @@ import pandas as pd
 from scipy.special import expit  # plogis
 
 try:
+    import ahocorasick
+except ImportError:
+    sys.exit("Install: pip install pyahocorasick")
+
+try:
     from datasets import load_dataset
 except ImportError:
-    sys.exit("Install dependencies: pip install datasets pandas scipy")
+    sys.exit("Install: pip install datasets pandas scipy")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# monology/pile-uncopyrighted is The Pile in standard Parquet format (no loading
-# script required). It covers all subsets except copyrighted books (Books3,
-# BookCorpus2), which is fine for a web-text frequency proxy.
 PILE_DATASET = "monology/pile-uncopyrighted"
-PILE_SUBSET  = "train"    # this dataset has a single "train" split
-
-SAVE_EVERY   = 50_000    # save progress checkpoint every N documents
-REPORT_EVERY = 10_000    # log progress every N documents
+PILE_SPLIT   = "train"
+N_WORKERS    = 32      # set to number of available CPU cores
+REPORT_EVERY = 50_000  # log progress every N documents per shard
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR  = Path(__file__).resolve().parent
@@ -54,10 +49,10 @@ BASE_DIR    = SCRIPT_DIR.parent.parent
 DATA_DIR    = BASE_DIR / "Data"
 BINOMS_CSV  = DATA_DIR / "nonce_and_attested_binoms.csv"
 OUT_CSV     = SCRIPT_DIR / "pile_corpus_freq.csv"
-CKPT_JSON   = SCRIPT_DIR / "pile_freq_checkpoint.json"
+PARTIAL_DIR = SCRIPT_DIR / "pile_freq_partials"
 LOG_PATH    = SCRIPT_DIR / "compute_pile_freq.log"
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging (main process only) ───────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(message)s",
@@ -69,146 +64,176 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Load attested binomials ───────────────────────────────────────────────────
-binoms_df = pd.read_csv(BINOMS_CSV)
-attested  = binoms_df[binoms_df["Attested"] == 1].copy()
 
-# List of (binom_key, alpha_lower, nonalpha_lower, alpha_pattern, nonalpha_pattern)
-# Word-boundary regex ensures we don't match substrings of longer words.
-entries = []
-for _, row in attested.iterrows():
-    key     = str(row["Alpha"])
-    alpha   = str(row["Alpha"]).lower()
-    nonalpha = str(row["Nonalpha"]).lower()
-    entries.append((
-        key,
-        alpha,
-        nonalpha,
-        re.compile(r"\b" + re.escape(alpha)    + r"\b"),
-        re.compile(r"\b" + re.escape(nonalpha) + r"\b"),
-    ))
+# ── Build Aho-Corasick automaton ──────────────────────────────────────────────
+def build_automaton(entries):
+    """
+    Build an Aho-Corasick automaton over all alpha/nonalpha phrase forms.
 
-logger.info(f"Loaded {len(entries)} attested binomials from {BINOMS_CSV}")
+    entries: list of (binom_key, alpha_lower, nonalpha_lower)
 
-# ── Resume from checkpoint ────────────────────────────────────────────────────
-counts         = {key: {"alpha_seen": 0, "nonalpha_seen": 0} for key, *_ in entries}
-docs_processed = 0
+    Returns (automaton, phrase_to_slots) where phrase_to_slots maps each
+    lowercase phrase to a list of (entry_idx, "alpha"|"nonalpha") so that a
+    single phrase that appears as both the alpha of one binom and the nonalpha
+    of another is counted correctly for both.
+    """
+    phrase_to_slots: dict[str, list] = {}
+    for idx, (_, alpha, nonalpha) in enumerate(entries):
+        phrase_to_slots.setdefault(alpha,    []).append((idx, "alpha"))
+        phrase_to_slots.setdefault(nonalpha, []).append((idx, "nonalpha"))
 
-if CKPT_JSON.exists():
+    A = ahocorasick.Automaton()
+    for phrase, slots in phrase_to_slots.items():
+        A.add_word(phrase, slots)
+    A.make_automaton()
+    return A, phrase_to_slots
+
+
+# ── Worker function (runs in each subprocess) ─────────────────────────────────
+def process_shard(args):
+    shard_idx, n_shards, entries, partial_dir = args
+    partial_path = Path(partial_dir) / f"shard_{shard_idx:04d}.json"
+
+    if partial_path.exists():
+        print(f"[shard {shard_idx:02d}] already complete — skipping", flush=True)
+        return
+
+    automaton, _ = build_automaton(entries)
+    n = len(entries)
+    alpha_counts    = [0] * n
+    nonalpha_counts = [0] * n
+
     try:
-        ckpt = json.loads(CKPT_JSON.read_text(encoding="utf-8"))
-        docs_processed = int(ckpt.get("docs_processed", 0))
-        saved_counts   = ckpt.get("counts", {})
-        for key in counts:
-            if key in saved_counts:
-                counts[key] = saved_counts[key]
-        logger.info(f"Resuming from checkpoint: {docs_processed:,} documents already processed")
-    except Exception as e:
-        logger.warning(f"Could not read checkpoint ({e}) — starting fresh")
-        docs_processed = 0
-else:
-    logger.info("No checkpoint found — starting fresh")
+        dataset = load_dataset(PILE_DATASET, split=PILE_SPLIT, streaming=True)
+        shard   = dataset.shard(num_shards=n_shards, index=shard_idx)
 
-# ── Helper: save checkpoint ───────────────────────────────────────────────────
-def save_checkpoint():
-    tmp = CKPT_JSON.with_suffix(".tmp")
-    tmp.write_text(
-        json.dumps({"docs_processed": docs_processed, "counts": counts}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    tmp.replace(CKPT_JSON)
+        docs = 0
+        for doc in shard:
+            text = doc.get("text", "")
+            if not text:
+                continue
+            text_lower = text.lower()
+            for _, slots in automaton.iter(text_lower):
+                for idx, form_type in slots:
+                    if form_type == "alpha":
+                        alpha_counts[idx] += 1
+                    else:
+                        nonalpha_counts[idx] += 1
+            docs += 1
+            if docs % REPORT_EVERY == 0:
+                print(f"[shard {shard_idx:02d}] {docs:,} docs", flush=True)
 
-# ── Stream The Pile ───────────────────────────────────────────────────────────
-logger.info(f"Loading {PILE_DATASET!r} ({PILE_SUBSET!r}) in streaming mode ...")
-try:
-    dataset = load_dataset(
-        PILE_DATASET,
-        split=PILE_SUBSET,
-        streaming=True,
-    )
-except Exception as e:
-    sys.exit(
-        f"Could not load dataset: {e}\n"
-        "Check that 'datasets' is installed and the dataset is accessible.\n"
-        "You may need: huggingface-cli login"
-    )
+    except KeyboardInterrupt:
+        print(f"[shard {shard_idx:02d}] interrupted at {docs:,} docs — partial not saved",
+              flush=True)
+        return
 
-# Skip already-processed documents when resuming
-if docs_processed > 0:
-    logger.info(f"Skipping first {docs_processed:,} documents (already counted) ...")
-    dataset = dataset.skip(docs_processed)
+    result = {
+        "shard_idx":       shard_idx,
+        "docs_processed":  docs,
+        "alpha_counts":    alpha_counts,
+        "nonalpha_counts": nonalpha_counts,
+    }
+    tmp = partial_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(result), encoding="utf-8")
+    tmp.replace(partial_path)
+    print(f"[shard {shard_idx:02d}] done  ({docs:,} docs) → {partial_path.name}", flush=True)
 
-logger.info("Counting binomial trigram occurrences ...")
-try:
-    for doc in dataset:
-        text = doc.get("text", "")
-        if not text:
-            continue
 
-        text_lower = text.lower()
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main():
+    logger.info(f"Loading binomials from {BINOMS_CSV}")
+    binoms_df = pd.read_csv(BINOMS_CSV)
+    attested  = binoms_df[binoms_df["Attested"] == 1]
+    entries   = [
+        (str(r["Alpha"]), str(r["Alpha"]).lower(), str(r["Nonalpha"]).lower())
+        for _, r in attested.iterrows()
+    ]
+    logger.info(f"  {len(entries)} attested binomials ({len(entries) * 2} patterns in automaton)")
 
-        for key, alpha, nonalpha, alpha_pat, nonalpha_pat in entries:
-            # Fast substring pre-filter before regex (cheap string search first)
-            if alpha in text_lower:
-                counts[key]["alpha_seen"] += len(alpha_pat.findall(text_lower))
-            if nonalpha in text_lower:
-                counts[key]["nonalpha_seen"] += len(nonalpha_pat.findall(text_lower))
+    PARTIAL_DIR.mkdir(exist_ok=True)
 
-        docs_processed += 1
+    # Determine which shards still need processing
+    done_shards = {
+        int(p.stem.split("_")[1])
+        for p in PARTIAL_DIR.glob("shard_*.json")
+    }
+    todo_shards = [i for i in range(N_WORKERS) if i not in done_shards]
 
-        if docs_processed % REPORT_EVERY == 0:
-            logger.info(f"  {docs_processed:,} documents processed ...")
-
-        if docs_processed % SAVE_EVERY == 0:
-            save_checkpoint()
-            logger.info(f"  Checkpoint saved at {docs_processed:,} documents")
-
-except KeyboardInterrupt:
-    logger.info("Interrupted — saving checkpoint before exit ...")
-    save_checkpoint()
-    logger.info(f"Checkpoint saved. Re-run the script to resume from {docs_processed:,} documents.")
-    sys.exit(0)
-
-# Final checkpoint
-save_checkpoint()
-logger.info(f"Finished streaming. {docs_processed:,} documents processed total.")
-
-# ── Compute derived columns & write output ────────────────────────────────────
-rows = []
-for key, alpha, nonalpha, _, _ in entries:
-    a = counts[key]["alpha_seen"]
-    b = counts[key]["nonalpha_seen"]
-    if a > 0 and b > 0:
-        log_freq_ratio = log(a / b)
-        freq_prob_c    = float(expit(log_freq_ratio)) - 0.5
-        log_total      = log(a + b)
+    if not todo_shards:
+        logger.info("All shards already complete — proceeding to merge.")
     else:
-        log_freq_ratio = None
-        freq_prob_c    = None
-        log_total      = None
-    rows.append({
-        "binom":         key,
-        "alpha":         alpha,
-        "nonalpha":      nonalpha,
-        "alpha_seen":    a,
-        "nonalpha_seen": b,
-        "log_freq_ratio": log_freq_ratio,
-        "freq_prob_c":   freq_prob_c,
-        "log_total":     log_total,
-    })
+        logger.info(
+            f"Processing {len(todo_shards)} shards "
+            f"({len(done_shards)} already done) with {len(todo_shards)} workers ..."
+        )
+        worker_args = [
+            (i, N_WORKERS, entries, str(PARTIAL_DIR))
+            for i in todo_shards
+        ]
+        with mp.Pool(processes=len(todo_shards)) as pool:
+            pool.map(process_shard, worker_args)
 
-out_df = pd.DataFrame(rows)
-out_df.to_csv(OUT_CSV, index=False)
+    # ── Merge shard partials ───────────────────────────────────────────────────
+    logger.info("Merging shard results ...")
+    alpha_totals    = [0] * len(entries)
+    nonalpha_totals = [0] * len(entries)
+    total_docs = 0
 
-n_obs   = (out_df["alpha_seen"] + out_df["nonalpha_seen"] > 0).sum()
-n_both  = ((out_df["alpha_seen"] > 0) & (out_df["nonalpha_seen"] > 0)).sum()
-n_total = len(out_df)
-logger.info(f"Saved {n_total} rows → {OUT_CSV}")
-logger.info(f"  {n_obs}/{n_total} binomials observed at least once")
-logger.info(f"  {n_both}/{n_total} binomials observed in both orderings (usable for freq_prob_c)")
+    for i in range(N_WORKERS):
+        pfile = PARTIAL_DIR / f"shard_{i:04d}.json"
+        if not pfile.exists():
+            logger.error(f"Missing shard file: {pfile} — cannot merge. Re-run script.")
+            sys.exit(1)
+        data = json.loads(pfile.read_text(encoding="utf-8"))
+        for j in range(len(entries)):
+            alpha_totals[j]    += data["alpha_counts"][j]
+            nonalpha_totals[j] += data["nonalpha_counts"][j]
+        total_docs += data["docs_processed"]
 
-# Warn about unusable binomials
-unusable = out_df[(out_df["alpha_seen"] == 0) | (out_df["nonalpha_seen"] == 0)]["binom"].tolist()
-if unusable:
-    logger.warning(f"  {len(unusable)} binomials with zero count in one or both orderings "
-                   f"(freq_prob_c = NA): {', '.join(unusable)}")
+    logger.info(f"  Total documents processed across all shards: {total_docs:,}")
+
+    # ── Compute derived columns & write output ─────────────────────────────────
+    rows = []
+    for j, (key, alpha, nonalpha) in enumerate(entries):
+        a = alpha_totals[j]
+        b = nonalpha_totals[j]
+        if a > 0 and b > 0:
+            log_freq_ratio = log(a / b)
+            freq_prob_c    = float(expit(log_freq_ratio)) - 0.5
+            log_total      = log(a + b)
+        else:
+            log_freq_ratio = None
+            freq_prob_c    = None
+            log_total      = None
+        rows.append({
+            "binom":          key,
+            "alpha":          alpha,
+            "nonalpha":       nonalpha,
+            "alpha_seen":     a,
+            "nonalpha_seen":  b,
+            "log_freq_ratio": log_freq_ratio,
+            "freq_prob_c":    freq_prob_c,
+            "log_total":      log_total,
+        })
+
+    out_df = pd.DataFrame(rows)
+    out_df.to_csv(OUT_CSV, index=False)
+
+    n_obs   = (out_df["alpha_seen"] + out_df["nonalpha_seen"] > 0).sum()
+    n_both  = ((out_df["alpha_seen"] > 0) & (out_df["nonalpha_seen"] > 0)).sum()
+    n_total = len(out_df)
+    logger.info(f"Saved {n_total} rows → {OUT_CSV}")
+    logger.info(f"  {n_obs}/{n_total} binomials observed at least once")
+    logger.info(f"  {n_both}/{n_total} binomials observed in both orderings (freq_prob_c defined)")
+
+    unusable = out_df[out_df["freq_prob_c"].isna()]["binom"].tolist()
+    if unusable:
+        logger.warning(
+            f"  {len(unusable)} binomials with zero count in one or both orderings "
+            f"(freq_prob_c = NA): {', '.join(unusable)}"
+        )
+
+
+if __name__ == "__main__":
+    main()
