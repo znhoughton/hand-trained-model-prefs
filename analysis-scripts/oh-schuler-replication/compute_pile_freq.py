@@ -39,9 +39,11 @@ except ImportError:
     sys.exit("Install dependencies: pip install datasets pandas scipy")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# Use "all" to stream every Pile subset, or a specific name like "pile_cc",
-# "books3", "openwebtext2", "wikipedia_en", etc.
-PILE_SUBSET  = "all"
+# monology/pile-uncopyrighted is The Pile in standard Parquet format (no loading
+# script required). It covers all subsets except copyrighted books (Books3,
+# BookCorpus2), which is fine for a web-text frequency proxy.
+PILE_DATASET = "monology/pile-uncopyrighted"
+PILE_SUBSET  = "train"    # this dataset has a single "train" split
 
 SAVE_EVERY   = 50_000    # save progress checkpoint every N documents
 REPORT_EVERY = 10_000    # log progress every N documents
@@ -117,18 +119,16 @@ def save_checkpoint():
     tmp.replace(CKPT_JSON)
 
 # ── Stream The Pile ───────────────────────────────────────────────────────────
-logger.info(f"Loading EleutherAI/pile ({PILE_SUBSET!r}) in streaming mode ...")
+logger.info(f"Loading {PILE_DATASET!r} ({PILE_SUBSET!r}) in streaming mode ...")
 try:
     dataset = load_dataset(
-        "EleutherAI/pile",
-        PILE_SUBSET,
-        split="train",
+        PILE_DATASET,
+        split=PILE_SUBSET,
         streaming=True,
-        trust_remote_code=True,
     )
 except Exception as e:
     sys.exit(
-        f"Could not load The Pile: {e}\n"
+        f"Could not load dataset: {e}\n"
         "Check that 'datasets' is installed and the dataset is accessible.\n"
         "You may need: huggingface-cli login"
     )
