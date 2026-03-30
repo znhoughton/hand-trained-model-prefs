@@ -12,3 +12,7 @@ analysis-scripts/exposure_preference_analysis_cache/
 
 *.ipynb_checkpoints
 *.venv
+
+# Downloaded Pile corpus data (too large for git)
+analysis-scripts/oh-schuler-replication/pile_freq_partials/
+analysis-scripts/oh-schuler-replication/pile_freq_checkpoint.json

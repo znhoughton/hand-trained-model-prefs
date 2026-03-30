@@ -39,17 +39,19 @@ except ImportError:
 
 try:
     from datasets import load_dataset
-    from huggingface_hub import HfFileSystem
+    from huggingface_hub import HfFileSystem, snapshot_download
 except ImportError:
     sys.exit("Install: pip install datasets huggingface_hub pandas scipy")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PILE_DATASET = "monology/pile-uncopyrighted"
-PILE_SPLIT   = "train"
-N_WORKERS    = 32      # set to number of available CPU cores
+N_WORKERS    = 32      # number of parallel workers (local CPU cores)
 
-# Approximate total docs in monology/pile-uncopyrighted (from dataset card).
-# Used only for tqdm ETA — does not affect correctness.
+# Where to download the dataset. Set to a path with sufficient disk space
+# (~800 GB for the full dataset). None = HuggingFace default cache.
+LOCAL_DATA_DIR = None   # e.g. "/scratch/pile_cache"
+
+# Approximate total docs — used only for tqdm ETA, not correctness.
 DATASET_TOTAL_DOCS = 210_607_728
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -113,9 +115,13 @@ def process_shard(args):
     nonalpha_counts = [0] * n
 
     try:
-        # file_list is passed in; load only this worker's .jsonl.zst files
-        shard     = load_dataset("json", data_files={"train": file_list},
-                                 split="train", streaming=True)
+        # file_list contains local paths; stream directly without HF network calls
+        shard = load_dataset(
+            "json",
+            data_files={"train": file_list},
+            split="train",
+            streaming=True,
+        )
         est_total = DATASET_TOTAL_DOCS // n_shards
 
         docs = 0
@@ -172,19 +178,24 @@ def main():
 
     PARTIAL_DIR.mkdir(exist_ok=True)
 
-    # ── Enumerate parquet files and distribute across workers ──────────────────
-    logger.info(f"Listing parquet files in {PILE_DATASET} via HfFileSystem ...")
-    fs = HfFileSystem()
-    # HfFileSystem paths look like: datasets/monology/pile-uncopyrighted/data/...
-    raw_paths = fs.glob(f"datasets/{PILE_DATASET}/train/*.jsonl.zst")
-    if not raw_paths:
-        raw_paths = fs.glob(f"datasets/{PILE_DATASET}/**/*.jsonl.zst")
-    all_files = sorted(f"hf://{p}" for p in raw_paths)
+    # ── Download dataset files locally (once) ─────────────────────────────────
+    logger.info(f"Downloading {PILE_DATASET} to local disk (skips already-cached files) ...")
+    local_dir = snapshot_download(
+        repo_id=PILE_DATASET,
+        repo_type="dataset",
+        local_dir=LOCAL_DATA_DIR,
+        ignore_patterns=["*.md", "*.gitattributes"],
+    )
+    logger.info(f"  Dataset cached at: {local_dir}")
+
+    # ── Enumerate local data files ─────────────────────────────────────────────
+    local_path = Path(local_dir)
+    all_files  = sorted(str(p) for p in local_path.rglob("*.jsonl.zst")
+                        if "train" in p.parts)
     n_files = len(all_files)
-    logger.info(f"  {n_files} .jsonl.zst files found")
+    logger.info(f"  {n_files} local .jsonl.zst train files found")
     if n_files == 0:
-        top = fs.ls(f"datasets/{PILE_DATASET}", detail=False)
-        logger.error(f"No data files found. Repo contents: {top}")
+        logger.error(f"No train .jsonl.zst files found under {local_dir}")
         sys.exit(1)
     logger.info(f"  First file: {all_files[0]}")
 
