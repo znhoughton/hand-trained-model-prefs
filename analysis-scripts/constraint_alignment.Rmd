@@ -1,0 +1,1270 @@
+---
+title: "Constraint-Level Alignment Over Training"
+subtitle: "What proportion of model ordering preferences follow each individual constraint?"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 12, fig.height = 6, dpi = 150,
+                      out.width = "100%")
+```
+
+# Overview
+
+`GenPref` (AbsPref) is a composite of individual constraints on binomial ordering.
+This document asks: as models train, **how much do their ordering preferences align
+with each individual constraint?**
+
+For each constraint at each training checkpoint, we compute:
+
+- **Model alignment**: proportion of items where the model's preferred ordering
+  matches what that constraint would predict
+- **Corpus RelFreq baseline** (dynamic): same proportion, but using corpus relative
+  frequency as the "preference" — shows what you'd expect if the model were just
+  tracking training corpus frequency
+- **Human baseline** (static): proportion where human preference data agrees with
+  each constraint — an upper bound on what a well-calibrated model should reach
+
+A constraint that the model learns *beyond* what corpus frequency teaches will show
+model alignment exceeding the corpus RelFreq baseline.
+
+The **constraints** (all signed: positive = predicts α ordering):
+
+| Constraint | Description |
+|------------|-------------|
+| `Freq`     | Log frequency ratio of the two words (external reference corpus) |
+| `Len`      | Length difference |
+| `Lapse`    | Temporal distance / recency |
+| `BStress`  | Beginning stress |
+| `Form`     | Formal/phonological properties |
+| `Percept`  | Perceptual salience |
+| `Culture`  | Cultural ordering tendencies |
+| `Power`    | Power/animacy |
+| `Intense`  | Intensity |
+| `Icon`     | Iconicity |
+
+---
+
+```{r libraries}
+library(tidyverse)
+library(duckdb)
+library(furrr)
+library(patchwork)
+library(scales)
+library(kableExtra)
+```
+
+```{r config}
+SCRIPT_DIR <- {
+  knitr_input <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  if (!is.null(knitr_input) && nchar(knitr_input) > 0) {
+    dirname(normalizePath(knitr_input, mustWork = FALSE))
+  } else if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    dirname(normalizePath(rstudioapi::getActiveDocumentContext()$path, mustWork = FALSE))
+  } else {
+    normalizePath(".", mustWork = FALSE)
+  }
+}
+
+DATA_DIR          <- normalizePath(file.path(SCRIPT_DIR, "../Data/processed"), mustWork = FALSE)
+TRAIN_CSV         <- file.path(DATA_DIR, "training_attested.csv")
+EXPOSURES_CSV     <- normalizePath(file.path(DATA_DIR, "checkpoint_results_with_exposures.csv"),
+                                   mustWork = FALSE)
+EXPOSURES_CSV_FWD <- gsub("\\\\", "/", EXPOSURES_CSV)
+EXPOSURES_PARQUET     <- sub("\\.csv$", ".parquet", EXPOSURES_CSV)
+EXPOSURES_PARQUET_FWD <- gsub("\\\\", "/", EXPOSURES_PARQUET)
+
+N_CHECKPOINTS <- 20   # number of evenly-spaced checkpoints to sample per model
+SIZE_LEVELS   <- c("125M", "350M", "1.3B")
+SIZE_COLOURS  <- c("125M" = "#74add1", "350M" = "#007030", "1.3B" = "#154733")
+
+CONSTRAINTS <- c("Freq", "Len", "Lapse", "BStress",
+                 "Form", "Percept", "Culture", "Power", "Intense", "Icon")
+
+N_CORES <- parallel::detectCores(logical = FALSE)
+plan(multicore, workers = N_CORES)
+
+stopifnot(file.exists(TRAIN_CSV), file.exists(EXPOSURES_CSV))
+```
+
+```{r helpers}
+parse_corpus <- function(x) case_when(
+  grepl("babylm", x, TRUE) ~ "BabyLM",
+  grepl("opt.c4", x, TRUE) ~ "C4",
+  TRUE ~ NA_character_
+)
+parse_size <- function(x) case_when(
+  grepl("125m",    x, TRUE) ~ "125M",
+  grepl("350m",    x, TRUE) ~ "350M",
+  grepl("1[._]3b", x, TRUE) ~ "1.3B",
+  TRUE ~ NA_character_
+)
+
+sample_steps <- function(model_df, n = N_CHECKPOINTS) {
+  steps <- sort(unique(model_df$step))
+  idx   <- unique(round(seq(1, length(steps), length.out = min(n, length(steps)))))
+  steps[idx]
+}
+
+# Parquet cache (reuse if already exists from casestudy run)
+ensure_parquet <- function() {
+  if (file.exists(EXPOSURES_PARQUET)) return(invisible(NULL))
+  message("Converting exposures CSV to Parquet (one-time)...")
+  con <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  dbExecute(con, sprintf("SET threads = %d", N_CORES))
+  dbExecute(con, sprintf(
+    "COPY (SELECT * FROM read_csv_auto('%s')) TO '%s' (FORMAT PARQUET, COMPRESSION ZSTD)",
+    EXPOSURES_CSV_FWD, EXPOSURES_PARQUET_FWD
+  ))
+}
+
+# Fetch corpus RelFreq (alpha_seen / beta_seen) for a given set of model × step pairs
+batch_dyn_freq <- function(meta_df) {
+  stopifnot(all(c("model", "step") %in% names(meta_df)))
+  con <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con, shutdown = TRUE))
+  dbExecute(con, sprintf("SET threads = %d", N_CORES))
+
+  src <- if (file.exists(EXPOSURES_PARQUET))
+    sprintf("read_parquet('%s')", EXPOSURES_PARQUET_FWD)
+  else
+    sprintf("read_csv_auto('%s')", EXPOSURES_CSV_FWD)
+  dbExecute(con, sprintf("CREATE VIEW exp AS SELECT * FROM %s", src))
+  dbWriteTable(con, "pairs", meta_df |> distinct(model, step), overwrite = TRUE)
+
+  freq_raw <- dbGetQuery(con, "
+    SELECT e.model, e.step, e.binom,
+           ANY_VALUE(e.alpha_seen) AS alpha_seen,
+           ANY_VALUE(e.beta_seen)  AS beta_seen
+    FROM exp e
+    INNER JOIN pairs p ON e.model = p.model AND e.step = p.step
+    GROUP BY e.model, e.step, e.binom
+  ")
+
+  as_tibble(freq_raw) |>
+    mutate(
+      freq_prob_c = if_else(
+        alpha_seen > 0 & beta_seen > 0,
+        plogis(log(alpha_seen / beta_seen)) - 0.5,
+        NA_real_
+      ),
+      log_total = if_else(
+        alpha_seen + beta_seen > 0,
+        log(alpha_seen + beta_seen),
+        NA_real_
+      )
+    )
+}
+
+# Compute per-constraint alignment rates for a data frame that has:
+#   preference (model log-odds), freq_prob_c (corpus RelFreq centred),
+#   hum_pref (human P(alpha)), and all CONSTRAINTS columns.
+# Returns one row per constraint with: model_align, relfreq_align, human_align.
+compute_alignment <- function(df) {
+  map_dfr(CONSTRAINTS, function(cname) {
+    vals <- df[[cname]]
+    # Drop ties (constraint == 0) so sign is well-defined
+    ok <- !is.na(vals) & vals != 0 &
+          !is.na(df$preference) & !is.na(df$freq_prob_c) & !is.na(df$hum_pref)
+    d <- df[ok, ]
+    if (nrow(d) == 0) return(tibble(constraint = cname,
+                                    model_align   = NA_real_,
+                                    relfreq_align = NA_real_,
+                                    human_align   = NA_real_,
+                                    n             = 0L))
+    c_sign   <- sign(d[[cname]])
+    tibble(
+      constraint    = cname,
+      model_align   = mean(sign(d$preference) == c_sign),
+      relfreq_align = mean(sign(d$freq_prob_c) == c_sign),
+      human_align   = mean(sign(d$hum_pref - 0.5) == c_sign),
+      n             = nrow(d)
+    )
+  })
+}
+```
+
+---
+
+# Data Loading
+
+```{r parquet-cache}
+ensure_parquet()
+```
+
+```{r load-train}
+message("Loading training data...")
+train <- read_csv(TRAIN_CSV, show_col_types = FALSE)
+
+MODELS_LIST <- sort(unique(train$model))
+MODELS_LIST <- MODELS_LIST[!is.na(parse_corpus(MODELS_LIST))]
+message(sprintf("%d models: %s", length(MODELS_LIST), paste(MODELS_LIST, collapse = ", ")))
+```
+
+```{r ck-index}
+# Sampled checkpoint index: N_CHECKPOINTS evenly-spaced steps per model
+ck_meta <- map_dfr(MODELS_LIST, function(m) {
+  steps <- sample_steps(filter(train, model == m))
+  tibble(model = m, ck_idx = seq_along(steps), step = steps)
+})
+message(sprintf("Sampled %d total checkpoint × model rows", nrow(ck_meta)))
+```
+
+```{r load-exposures}
+message("Fetching corpus RelFreq at sampled checkpoints (single DuckDB scan)...")
+t0 <- proc.time()
+freq_sampled <- batch_dyn_freq(ck_meta)
+message(sprintf("  Done in %.1f s (%d rows)", (proc.time() - t0)[["elapsed"]], nrow(freq_sampled)))
+```
+
+```{r join-data}
+# Merge training data (preferences + constraints) with corpus RelFreq at each checkpoint.
+# Constraint columns are item-level constants; take them from the training data directly.
+dat <- train |>
+  inner_join(ck_meta |> select(model, step, ck_idx), by = c("model", "step")) |>
+  left_join(freq_sampled, by = c("model", "step", "binom")) |>
+  mutate(
+    corpus     = parse_corpus(model),
+    model_size = factor(parse_size(model), levels = SIZE_LEVELS)
+  ) |>
+  filter(!is.na(corpus), !is.na(model_size))
+
+# Attach training token count: use the maximum tokens seen at that checkpoint
+# (tokens column in the training CSV is checkpoint-specific)
+message(sprintf("Joined dataset: %d rows, %d models, %d unique binomials, %d unique steps",
+  nrow(dat), n_distinct(dat$model), n_distinct(dat$binom), n_distinct(dat$step)))
+```
+
+---
+
+# Alignment Over Training
+
+For each sampled checkpoint we compute, per corpus × model size:
+- **Model alignment**: proportion of items where `sign(preference) == sign(constraint)`
+- **Corpus RelFreq baseline**: proportion of items where `sign(freq_prob_c) == sign(constraint)`
+- **Human baseline**: proportion of items where `sign(hum_pref − 0.5) == sign(constraint)` (constant)
+
+Items where the constraint value is exactly zero are excluded (no directional prediction).
+
+```{r compute-alignment}
+message("Computing constraint alignment at each sampled checkpoint...")
+t0 <- proc.time()
+
+align_traj <- dat |>
+  group_by(corpus, model_size, model, step, ck_idx, tokens) |>
+  group_modify(~ compute_alignment(.x)) |>
+  ungroup()
+
+message(sprintf("  Done in %.1f s", (proc.time() - t0)[["elapsed"]]))
+```
+
+```{r summarise-alignment}
+# Summarise across models within corpus × size × checkpoint
+# (multiple models may share the same size × corpus combination)
+align_summary <- align_traj |>
+  group_by(corpus, model_size, ck_idx, tokens, constraint) |>
+  summarise(
+    model_align   = mean(model_align,   na.rm = TRUE),
+    relfreq_align = mean(relfreq_align, na.rm = TRUE),
+    human_align   = mean(human_align,   na.rm = TRUE),
+    n             = sum(n),
+    .groups       = "drop"
+  ) |>
+  # Constraint as ordered factor for consistent facet ordering
+  mutate(constraint = factor(constraint, levels = CONSTRAINTS))
+```
+
+## Trajectory plots
+
+Each panel shows one constraint. Solid coloured lines = model alignment rate (per size).
+Dashed gold line = what you'd expect if the model used corpus RelFreq as its preference
+(dynamic baseline that changes as the model sees more data).
+Dotted purple line = human alignment rate (static upper reference).
+
+```{r plot-align-traj, fig.height=14}
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(align_summary, corpus == corp)
+  if (nrow(d) == 0) next
+
+  # One row per constraint × model_size with all three lines
+  d_model   <- d
+  d_relfreq <- d |> distinct(corpus, ck_idx, tokens, constraint, relfreq_align)
+  d_human   <- d |> distinct(corpus, constraint, human_align)
+
+  p <- ggplot(d_model, aes(x = tokens, y = model_align,
+                            colour = model_size, group = model_size)) +
+    # Human baseline (static horizontal dotted)
+    geom_hline(data = d_human,
+               aes(yintercept = human_align),
+               colour = "#9e3d8e", linetype = "dotted", linewidth = 0.7,
+               inherit.aes = FALSE) +
+    # RelFreq baseline (dynamic dashed gold; same across model sizes so use any)
+    geom_line(data = d_relfreq |>
+                filter(!is.na(relfreq_align)) |>
+                distinct(ck_idx, tokens, constraint, relfreq_align),
+              aes(x = tokens, y = relfreq_align),
+              colour = "#cc8800", linetype = "dashed", linewidth = 0.8,
+              inherit.aes = FALSE) +
+    # Model alignment trajectories
+    geom_line(linewidth = 0.85) +
+    geom_point(aes(shape = model_size), size = 1.8, stroke = 0.5) +
+    geom_hline(yintercept = 0.5, colour = "grey60", linetype = "solid",
+               linewidth = 0.35) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_shape_manual(
+      values = c("125M" = 21, "350M" = 22, "1.3B" = 24),
+      name   = "Model size"
+    ) +
+    scale_x_continuous("Training tokens",
+                       labels = label_number(scale_cut = cut_short_scale())) +
+    scale_y_continuous("Proportion following constraint",
+                       limits = c(0, 1), breaks = seq(0, 1, 0.25),
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_wrap(~ constraint, ncol = 2) +
+    labs(
+      title    = sprintf("%s — constraint alignment over training", corp),
+      subtitle = paste(
+        "Solid coloured lines = model alignment per size.",
+        "Gold dashed = corpus RelFreq baseline.",
+        "Purple dotted = human preference baseline.",
+        "Grey solid = 50% (chance)."
+      )
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      strip.text      = element_text(face = "bold"),
+      legend.position = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+---
+
+# Final Checkpoint Summary
+
+At the final training checkpoint, how does each model size's alignment compare to the
+RelFreq baseline and human baseline, per constraint and corpus?
+
+```{r final-align}
+final_align <- align_traj |>
+  group_by(corpus, model_size, model, constraint) |>
+  filter(ck_idx == max(ck_idx)) |>
+  ungroup() |>
+  group_by(corpus, model_size, constraint) |>
+  summarise(
+    model_align   = mean(model_align,   na.rm = TRUE),
+    relfreq_align = mean(relfreq_align, na.rm = TRUE),
+    human_align   = mean(human_align,   na.rm = TRUE),
+    .groups       = "drop"
+  ) |>
+  mutate(
+    above_relfreq = model_align > relfreq_align,
+    constraint    = factor(constraint, levels = CONSTRAINTS)
+  )
+```
+
+```{r plot-final-bar, fig.height=8}
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(final_align, corpus == corp)
+  if (nrow(d) == 0) next
+
+  d_human <- d |> distinct(constraint, human_align)
+
+  p <- ggplot(d, aes(x = constraint, y = model_align, fill = model_size)) +
+    geom_col(position = position_dodge(width = 0.75), width = 0.65) +
+    # RelFreq baseline: one point per constraint (same across model sizes)
+    geom_point(
+      data = d |> distinct(constraint, relfreq_align),
+      aes(x = constraint, y = relfreq_align),
+      inherit.aes = FALSE,
+      shape = 18, size = 4, colour = "#cc8800"
+    ) +
+    # Human baseline
+    geom_point(
+      data = d_human,
+      aes(x = constraint, y = human_align),
+      inherit.aes = FALSE,
+      shape = 17, size = 3.5, colour = "#9e3d8e"
+    ) +
+    geom_hline(yintercept = 0.5, linetype = "dashed",
+               colour = "grey50", linewidth = 0.5) +
+    scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_y_continuous("Proportion following constraint",
+                       limits = c(0, 1), breaks = seq(0, 1, 0.25),
+                       labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      title    = sprintf("%s — constraint alignment at final checkpoint", corp),
+      subtitle = paste(
+        "Bars = model alignment per size.",
+        "Gold diamond = corpus RelFreq baseline.",
+        "Purple triangle = human preference baseline.",
+        "Dashed = 50% chance."
+      ),
+      x = NULL
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      axis.text.x     = element_text(angle = 30, hjust = 1, face = "bold"),
+      legend.position = "bottom"
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Table: final checkpoint alignment rates
+
+```{r final-table}
+final_align |>
+  mutate(across(c(model_align, relfreq_align, human_align), \(x) round(x, 3)),
+         above_relfreq = if_else(above_relfreq, "Yes", "No")) |>
+  rename(
+    Corpus        = corpus,
+    Size          = model_size,
+    Constraint    = constraint,
+    `Model align` = model_align,
+    `RelFreq base` = relfreq_align,
+    `Human base`  = human_align,
+    `Above RelFreq?` = above_relfreq
+  ) |>
+  kbl(caption = paste(
+    "Constraint alignment at final training checkpoint.",
+    "Model align = proportion of items where model preference direction matches constraint.",
+    "RelFreq base = same proportion using corpus RelFreq as the preference.",
+    "Human base = same using human preference data."
+  )) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE, font_size = 11) |>
+  collapse_rows(columns = 1:2, valign = "middle")
+```
+
+---
+
+# Model Alignment vs. RelFreq Baseline: Gap Over Training
+
+How much does each model *exceed* (or fall below) the RelFreq baseline for each
+constraint, and does this gap grow over training?
+
+`gap = model_align − relfreq_align`
+
+Positive gap means the model follows this constraint more than corpus frequency alone
+would predict.
+
+```{r plot-gap-traj, fig.height=14}
+gap_summary <- align_summary |>
+  mutate(gap = model_align - relfreq_align)
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(gap_summary, corpus == corp)
+  if (nrow(d) == 0) next
+
+  p <- ggplot(d, aes(x = tokens, y = gap,
+                      colour = model_size, group = model_size)) +
+    geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.5) +
+    geom_line(linewidth = 0.85) +
+    geom_point(aes(shape = model_size), size = 1.8, stroke = 0.5) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_shape_manual(
+      values = c("125M" = 21, "350M" = 22, "1.3B" = 24),
+      name   = "Model size"
+    ) +
+    scale_x_continuous("Training tokens",
+                       labels = label_number(scale_cut = cut_short_scale())) +
+    scale_y_continuous("Alignment gap (model − RelFreq baseline)",
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_wrap(~ constraint, ncol = 2) +
+    labs(
+      title    = sprintf("%s — gap between model alignment and RelFreq baseline", corp),
+      subtitle = "Positive = model follows constraint more than corpus frequency alone predicts. Zero line = no difference from RelFreq."
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      strip.text       = element_text(face = "bold"),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+---
+
+# Alignment by Corpus Exposure
+
+Does constraint alignment depend on how many times the model has seen a given
+binomial in training? A binomial seen 1,000 times gives the model much stronger
+evidence than one seen 5 times. If models learn constraints from repeated exposure,
+we expect alignment to be higher for high-exposure binomials — especially for
+constraints that go *beyond* corpus frequency.
+
+We use `log(α_seen + β_seen)` at each checkpoint as the exposure measure.
+
+## Setup: exposure classification
+
+Classify each binomial as **low / mid / high** exposure based on tertiles of
+`log_total` at the **final checkpoint**, computed within corpus. This gives a
+stable label that reflects a binomial's overall presence in the training corpus.
+
+```{r exposure-classification}
+# Final-checkpoint exposure per model × corpus × binom
+final_exposure <- dat |>
+  group_by(corpus, model_size, model, binom) |>
+  filter(ck_idx == max(ck_idx)) |>
+  ungroup() |>
+  select(corpus, model_size, model, binom, log_total) |>
+  filter(!is.na(log_total))
+
+# Tertile cutpoints within corpus (pooled across model sizes — corpus is shared)
+exposure_cuts <- final_exposure |>
+  group_by(corpus) |>
+  summarise(
+    q33 = quantile(log_total, 1/3, na.rm = TRUE),
+    q67 = quantile(log_total, 2/3, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+final_exposure <- final_exposure |>
+  left_join(exposure_cuts, by = "corpus") |>
+  mutate(
+    exposure_grp = case_when(
+      log_total <= q33 ~ "Low exposure",
+      log_total <= q67 ~ "Mid exposure",
+      TRUE             ~ "High exposure"
+    ),
+    exposure_grp = factor(exposure_grp,
+                          levels = c("Low exposure", "Mid exposure", "High exposure"))
+  ) |>
+  select(corpus, model_size, model, binom, log_total, exposure_grp)
+
+# Print tertile boundaries
+exposure_cuts |>
+  mutate(across(c(q33, q67), \(x) round(x, 2))) |>
+  rename(Corpus = corpus,
+         `log_total at 33rd pct` = q33,
+         `log_total at 67th pct` = q67) |>
+  kbl(caption = "Exposure tertile boundaries (log(α_seen + β_seen) at final checkpoint, pooled across model sizes).") |>
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+```
+
+## Alignment at final checkpoint by exposure group
+
+For each constraint, compare alignment across the three exposure groups.
+If models learn a constraint from repeated exposure, alignment should increase
+from low → mid → high. If alignment is already high at low exposure, the model
+may be using a generalised rule rather than item-specific memory.
+
+```{r align-by-exposure-final}
+# Join exposure classification onto the full dataset, then filter to final checkpoint
+dat_with_exp <- dat |>
+  left_join(final_exposure |> select(corpus, model_size, model, binom, exposure_grp),
+            by = c("corpus", "model_size", "model", "binom")) |>
+  filter(!is.na(exposure_grp))
+
+align_exp_final <- dat_with_exp |>
+  group_by(corpus, model_size, model, exposure_grp) |>
+  filter(ck_idx == max(ck_idx)) |>
+  group_modify(~ compute_alignment(.x)) |>
+  ungroup() |>
+  group_by(corpus, model_size, exposure_grp, constraint) |>
+  summarise(
+    model_align   = mean(model_align,   na.rm = TRUE),
+    relfreq_align = mean(relfreq_align, na.rm = TRUE),
+    human_align   = mean(human_align,   na.rm = TRUE),
+    n_valid       = sum(n,              na.rm = TRUE),
+    .groups       = "drop"
+  ) |>
+  # NaN arises when all constituent values were NA (n_valid == 0); replace with NA
+  mutate(
+    model_align   = if_else(n_valid == 0, NA_real_, model_align),
+    relfreq_align = if_else(n_valid == 0, NA_real_, relfreq_align),
+    human_align   = if_else(n_valid == 0, NA_real_, human_align),
+    constraint    = factor(constraint, levels = CONSTRAINTS)
+  )
+```
+
+```{r plot-align-by-exposure, fig.height=10}
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(align_exp_final, corpus == corp) |>
+    complete(exposure_grp, model_size, constraint,
+             fill = list(n_valid = 0L, model_align = NA_real_,
+                         relfreq_align = NA_real_, human_align = NA_real_)) |>
+    mutate(has_data = !is.na(model_align) & coalesce(n_valid, 0L) > 0)
+  if (nrow(d) == 0) next
+
+  d_relfreq <- d |> filter(has_data) |> distinct(constraint, exposure_grp, relfreq_align)
+  d_human   <- d |> filter(has_data) |> distinct(constraint, human_align)
+  d_nodata  <- d |> filter(!has_data)
+
+  p <- ggplot(d, aes(x = exposure_grp, y = model_align, fill = model_size)) +
+    # No-data placeholder: grey outline bar
+    geom_col(data = d_nodata,
+             aes(x = exposure_grp, y = 0.01),
+             position = position_dodge(width = 0.75), width = 0.65,
+             fill = NA, colour = "grey70", linetype = "dashed",
+             inherit.aes = FALSE) +
+    geom_text(data = d_nodata,
+              aes(x = exposure_grp, y = 0.005, group = model_size, label = "n=0"),
+              position = position_dodge(width = 0.75),
+              size = 2.2, colour = "grey60", inherit.aes = FALSE) +
+    geom_col(data = filter(d, has_data),
+             position = position_dodge(width = 0.75), width = 0.65, alpha = 0.9) +
+    # RelFreq baseline per exposure group
+    geom_point(
+      data = d_relfreq,
+      aes(x = exposure_grp, y = relfreq_align),
+      inherit.aes = FALSE,
+      shape = 18, size = 3.5, colour = "#cc8800"
+    ) +
+    # Human baseline (constant across exposure groups)
+    geom_hline(data = d_human,
+               aes(yintercept = human_align),
+               colour = "#9e3d8e", linetype = "dotted", linewidth = 0.7,
+               inherit.aes = FALSE) +
+    geom_hline(yintercept = 0.5, linetype = "dashed",
+               colour = "grey50", linewidth = 0.4) +
+    scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_y_continuous("Proportion following constraint",
+                       limits = c(0, 1), breaks = seq(0, 1, 0.25),
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_wrap(~ constraint, ncol = 2) +
+    labs(
+      title    = sprintf("%s — constraint alignment by corpus exposure (final checkpoint)", corp),
+      subtitle = paste(
+        "Bars = model alignment per size.",
+        "Gold diamond = corpus RelFreq baseline (varies by exposure group).",
+        "Purple dotted = human baseline. Dashed = 50% chance."
+      ),
+      x = NULL
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      strip.text       = element_text(face = "bold"),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank(),
+      axis.text.x      = element_text(angle = 20, hjust = 1)
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Alignment trajectories by exposure group
+
+Does the model reach high constraint alignment earlier (in terms of training tokens)
+for high-exposure binomials? Here we split the trajectory by exposure group and
+show how model alignment evolves over training for each group separately.
+
+```{r align-traj-by-exposure}
+align_traj_exp <- dat_with_exp |>
+  group_by(corpus, model_size, model, ck_idx, tokens, exposure_grp) |>
+  group_modify(~ compute_alignment(.x)) |>
+  ungroup() |>
+  group_by(corpus, model_size, ck_idx, tokens, exposure_grp, constraint) |>
+  summarise(
+    model_align   = mean(model_align,   na.rm = TRUE),
+    relfreq_align = mean(relfreq_align, na.rm = TRUE),
+    n_valid       = sum(n,              na.rm = TRUE),
+    .groups       = "drop"
+  ) |>
+  mutate(
+    model_align   = if_else(n_valid == 0, NA_real_, model_align),
+    relfreq_align = if_else(n_valid == 0, NA_real_, relfreq_align),
+    constraint    = factor(constraint, levels = CONSTRAINTS)
+  )
+```
+
+```{r plot-traj-by-exposure, fig.height=16}
+# Facet: constraint (rows) × exposure_grp (columns)
+# Lines: model_size (coloured); RelFreq baseline (gold dashed)
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(align_traj_exp, corpus == corp)
+  if (nrow(d) == 0) next
+
+  d_relfreq <- d |>
+    distinct(ck_idx, tokens, constraint, exposure_grp, relfreq_align)
+
+  p <- ggplot(d, aes(x = tokens, y = model_align,
+                      colour = model_size, group = model_size)) +
+    geom_hline(yintercept = 0.5, colour = "grey60", linewidth = 0.35) +
+    geom_line(data = d_relfreq,
+              aes(x = tokens, y = relfreq_align),
+              colour = "#cc8800", linetype = "dashed", linewidth = 0.7,
+              inherit.aes = FALSE) +
+    geom_line(linewidth = 0.75) +
+    geom_point(aes(shape = model_size), size = 1.5, stroke = 0.5) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_shape_manual(
+      values = c("125M" = 21, "350M" = 22, "1.3B" = 24),
+      name   = "Model size"
+    ) +
+    scale_x_continuous("Training tokens",
+                       labels = label_number(scale_cut = cut_short_scale())) +
+    scale_y_continuous("Proportion following constraint",
+                       limits = c(0, 1), breaks = c(0.25, 0.5, 0.75, 1),
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_grid(constraint ~ exposure_grp) +
+    labs(
+      title    = sprintf("%s — constraint alignment over training, by exposure group", corp),
+      subtitle = "Exposure groups based on final-checkpoint log(α_seen + β_seen) tertiles within corpus. Gold dashed = RelFreq baseline."
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      strip.text       = element_text(face = "bold", size = 9),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Gap by exposure group at sampled training checkpoints
+
+Same bar chart as above but at four evenly-spaced checkpoints across training rather
+than only the final checkpoint. No averaging is done — each panel shows the gap at
+exactly that checkpoint.
+
+```{r plot-gap-exposure-stages, fig.height=12}
+# Sample 4 checkpoints per model × corpus nearest to 25/50/75/100% of total tokens
+stage_fracs  <- c(0.25, 0.50, 0.75, 1.00)
+stage_labels <- c("25%", "50%", "75%", "100%")
+
+ck_stage_lookup <- align_traj_exp |>
+  distinct(corpus, model_size, ck_idx, tokens) |>
+  group_by(corpus, model_size) |>
+  mutate(max_tokens = max(tokens)) |>
+  ungroup() |>
+  crossing(stage_frac = stage_fracs) |>
+  mutate(dist = abs(tokens - stage_frac * max_tokens)) |>
+  group_by(corpus, model_size, stage_frac) |>
+  slice_min(dist, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  mutate(stage_label = stage_labels[match(stage_frac, stage_fracs)])
+
+# Median token count per corpus × stage for display labels (models may differ slightly)
+stage_med_tok <- ck_stage_lookup |>
+  group_by(corpus, stage_frac) |>
+  summarise(med_tok = median(tokens), .groups = "drop") |>
+  mutate(
+    stage_label     = stage_labels[match(stage_frac, stage_fracs)],
+    stage_tok_label = sprintf("%s\n(%s tokens)", stage_label,
+                              scales::label_number(scale_cut = scales::cut_short_scale())(med_tok))
+  )
+
+gap_stages <- align_traj_exp |>
+  inner_join(select(ck_stage_lookup, corpus, model_size, ck_idx, stage_label, stage_frac),
+             by = c("corpus", "model_size", "ck_idx")) |>
+  left_join(select(stage_med_tok, corpus, stage_frac, stage_tok_label),
+            by = c("corpus", "stage_frac")) |>
+  mutate(
+    stage_tok_label = fct_reorder(stage_tok_label, stage_frac),
+    gap             = model_align - relfreq_align,
+    constraint      = factor(constraint, levels = CONSTRAINTS)
+  )
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(gap_stages, corpus == corp) |>
+    mutate(stage_tok_label = droplevels(stage_tok_label)) |>
+    complete(exposure_grp, model_size, constraint, stage_tok_label,
+             fill = list(n_valid = 0L, gap = NA_real_)) |>
+    mutate(has_data = !is.na(gap) & coalesce(n_valid, 0L) > 0)
+  if (nrow(d) == 0) next
+
+  d_nodata <- filter(d, !has_data)
+
+  p <- ggplot(d, aes(x = exposure_grp, y = gap, fill = model_size)) +
+    geom_col(data = d_nodata,
+             aes(x = exposure_grp, y = 0.005),
+             position = position_dodge(width = 0.75), width = 0.65,
+             fill = NA, colour = "grey70", linetype = "dashed",
+             inherit.aes = FALSE) +
+    geom_text(data = d_nodata,
+              aes(x = exposure_grp, y = 0.003, group = model_size, label = "n=0"),
+              position = position_dodge(width = 0.75),
+              size = 1.8, colour = "grey60", inherit.aes = FALSE) +
+    geom_col(data = filter(d, has_data),
+             position = position_dodge(width = 0.75), width = 0.65, alpha = 0.9) +
+    geom_hline(yintercept = 0, colour = "grey40", linewidth = 0.5) +
+    scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_y_continuous("Alignment gap (model \u2212 RelFreq baseline)",
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_grid(constraint ~ stage_tok_label) +
+    labs(
+      title    = sprintf("%s \u2014 alignment gap by exposure group at sampled checkpoints", corp),
+      subtitle = "Checkpoints nearest to 25/50/75/100% of total training tokens per model. No averaging.",
+      x        = NULL
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      strip.text       = element_text(face = "bold", size = 9),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank(),
+      axis.text.x      = element_text(angle = 20, hjust = 1)
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Gap trajectory by exposure group (constraint × model size grid)
+
+Facet grid: constraint (rows) × model size (columns). Lines show how the gap
+between model alignment and the RelFreq baseline evolves over training, separately
+for each exposure group. Diverging lines indicate that how much of a binomial the
+model has seen affects whether it learns the constraint beyond corpus frequency.
+
+```{r plot-gap-traj-by-exposure, fig.height=22}
+gap_traj_exp <- align_traj_exp |>
+  mutate(gap = model_align - relfreq_align)
+
+exp_colours <- c(
+  "Low exposure"  = "#74add1",
+  "Mid exposure"  = "#f46d43",
+  "High exposure" = "#1a9850"
+)
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(gap_traj_exp, corpus == corp)
+  if (nrow(d) == 0) next
+
+  p <- ggplot(d, aes(x = tokens, y = gap,
+                      colour = exposure_grp, group = exposure_grp)) +
+    geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.5) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.2, stroke = 0.4) +
+    scale_colour_manual(values = exp_colours, name = "Exposure group") +
+    scale_x_continuous("Training tokens",
+                       labels = label_number(scale_cut = cut_short_scale())) +
+    scale_y_continuous("Gap (model align \u2212 RelFreq baseline)",
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_grid(constraint ~ model_size) +
+    labs(
+      title    = sprintf("%s \u2014 alignment gap over training by exposure group", corp),
+      subtitle = "Each panel = one constraint \u00d7 model size. Lines = exposure tertiles. Zero = model tracks corpus frequency exactly."
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      strip.text       = element_text(face = "bold", size = 9),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Gap (model − RelFreq baseline) by exposure group at final checkpoint
+
+A positive gap means the model follows the constraint more than corpus frequency
+predicts. Does this gap grow with exposure, suggesting the model has extracted a
+generalizable rule from repeated examples?
+
+```{r plot-gap-by-exposure, fig.height=10}
+gap_exp_final <- align_exp_final |>
+  mutate(gap = model_align - relfreq_align)
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(gap_exp_final, corpus == corp) |>
+    complete(exposure_grp, model_size, constraint,
+             fill = list(n_valid = 0L, gap = NA_real_)) |>
+    mutate(has_data = !is.na(gap) & coalesce(n_valid, 0L) > 0)
+  if (nrow(d) == 0) next
+
+  d_nodata <- filter(d, !has_data)
+
+  p <- ggplot(d, aes(x = exposure_grp, y = gap, fill = model_size)) +
+    geom_col(data = d_nodata,
+             aes(x = exposure_grp, y = 0.005),
+             position = position_dodge(width = 0.75), width = 0.65,
+             fill = NA, colour = "grey70", linetype = "dashed",
+             inherit.aes = FALSE) +
+    geom_text(data = d_nodata,
+              aes(x = exposure_grp, y = 0.003, group = model_size, label = "n=0"),
+              position = position_dodge(width = 0.75),
+              size = 2.2, colour = "grey60", inherit.aes = FALSE) +
+    geom_col(data = filter(d, has_data),
+             position = position_dodge(width = 0.75), width = 0.65, alpha = 0.9) +
+    geom_hline(yintercept = 0, colour = "grey40", linewidth = 0.5) +
+    scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_y_continuous("Alignment gap (model − RelFreq baseline)",
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_wrap(~ constraint, ncol = 2) +
+    labs(
+      title    = sprintf("%s — alignment gap by exposure group (final checkpoint)", corp),
+      subtitle = "Positive = model follows constraint more than corpus frequency predicts. Zero = no benefit beyond RelFreq.",
+      x        = NULL
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      strip.text       = element_text(face = "bold"),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank(),
+      axis.text.x      = element_text(angle = 20, hjust = 1)
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+---
+
+# Alternative Gap × Exposure Visualizations
+
+## Option 1: Median split (high vs. low exposure)
+
+Collapsing to two groups removes the ambiguous middle tertile and produces a
+cleaner contrast: binomials the model has seen more than average vs. less than
+average. Each panel = one constraint × model size; two lines per panel.
+
+```{r binary-exposure-setup}
+binary_cuts <- final_exposure |>
+  group_by(corpus) |>
+  summarise(med = median(log_total, na.rm = TRUE), .groups = "drop")
+
+exposure_binary_labels <- final_exposure |>
+  left_join(binary_cuts, by = "corpus") |>
+  mutate(
+    exposure_binary = factor(
+      if_else(log_total > med, "High exposure", "Low exposure"),
+      levels = c("Low exposure", "High exposure")
+    )
+  ) |>
+  select(corpus, model_size, model, binom, exposure_binary)
+
+dat_with_binary <- dat_with_exp |>
+  left_join(exposure_binary_labels,
+            by = c("corpus", "model_size", "model", "binom"))
+
+align_traj_binary <- dat_with_binary |>
+  filter(!is.na(exposure_binary)) |>
+  group_by(corpus, model_size, model, ck_idx, tokens, exposure_binary) |>
+  group_modify(~ compute_alignment(.x)) |>
+  ungroup() |>
+  group_by(corpus, model_size, ck_idx, tokens, exposure_binary, constraint) |>
+  summarise(
+    model_align   = mean(model_align,   na.rm = TRUE),
+    relfreq_align = mean(relfreq_align, na.rm = TRUE),
+    .groups       = "drop"
+  ) |>
+  mutate(
+    gap        = model_align - relfreq_align,
+    constraint = factor(constraint, levels = CONSTRAINTS)
+  )
+```
+
+```{r plot-gap-traj-binary, fig.height=22}
+binary_colours <- c("Low exposure" = "#74add1", "High exposure" = "#1a9850")
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(align_traj_binary, corpus == corp)
+  if (nrow(d) == 0) next
+
+  p <- ggplot(d, aes(x = tokens, y = gap,
+                      colour = exposure_binary, group = exposure_binary)) +
+    geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.5) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 1.3, stroke = 0.4) +
+    scale_colour_manual(values = binary_colours, name = "Exposure") +
+    scale_x_continuous("Training tokens",
+                       labels = label_number(scale_cut = cut_short_scale())) +
+    scale_y_continuous("Gap (model align \u2212 RelFreq baseline)",
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_grid(constraint ~ model_size) +
+    labs(
+      title    = sprintf("%s \u2014 alignment gap over training (median split)", corp),
+      subtitle = "High = above-median log(total exposure) at final checkpoint. Zero = no difference from corpus frequency."
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      strip.text       = element_text(face = "bold", size = 9),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+## Option 2: Separate plots per exposure group
+
+Each plot shows one exposure group across all constraints (rows) and model sizes
+(columns), coloured by model size. Comparing across the three plots shows how
+the gap trajectory shifts with exposure without cluttering any single panel.
+
+```{r plot-gap-traj-per-expgrp, fig.height=22}
+for (corp in c("BabyLM", "C4")) {
+  for (exp_grp in levels(gap_traj_exp$exposure_grp)) {
+    d <- filter(gap_traj_exp, corpus == corp, exposure_grp == exp_grp)
+    if (nrow(d) == 0) next
+
+    p <- ggplot(d, aes(x = tokens, y = gap,
+                        colour = model_size, group = model_size)) +
+      geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.5) +
+      geom_line(linewidth = 0.9) +
+      geom_point(aes(shape = model_size), size = 1.5, stroke = 0.4) +
+      scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+      scale_shape_manual(
+        values = c("125M" = 21, "350M" = 22, "1.3B" = 24),
+        name   = "Model size"
+      ) +
+      scale_x_continuous("Training tokens",
+                         labels = label_number(scale_cut = cut_short_scale())) +
+      scale_y_continuous("Gap (model align \u2212 RelFreq baseline)",
+                         labels = scales::percent_format(accuracy = 1)) +
+      facet_grid(constraint ~ model_size) +
+      labs(
+        title    = sprintf("%s \u2014 %s", corp, exp_grp),
+        subtitle = "Alignment gap over training. Zero = model tracks corpus frequency exactly."
+      ) +
+      theme_bw(base_size = 10) +
+      theme(
+        strip.text       = element_text(face = "bold", size = 9),
+        legend.position  = "none",
+        panel.grid.minor = element_blank()
+      )
+    print(p)
+    cat("\n\n")
+  }
+}
+```
+
+## Option 3: High − low exposure contrast
+
+Subtract the low-exposure gap from the high-exposure gap at each checkpoint.
+Positive = model exceeds the RelFreq baseline more for frequently-seen binomials
+(exposure-driven learning). Near zero = model generalizes equally regardless of
+how often it has seen the item.
+
+```{r gap-contrast-compute}
+gap_contrast <- gap_traj_exp |>
+  filter(exposure_grp %in% c("Low exposure", "High exposure")) |>
+  select(corpus, model_size, ck_idx, tokens, constraint, exposure_grp, gap) |>
+  pivot_wider(names_from  = exposure_grp,
+              values_from = gap) |>
+  rename(gap_high = `High exposure`, gap_low = `Low exposure`) |>
+  mutate(
+    contrast   = gap_high - gap_low,
+    constraint = factor(constraint, levels = CONSTRAINTS)
+  )
+```
+
+```{r plot-gap-contrast, fig.height=14}
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(gap_contrast, corpus == corp)
+  if (nrow(d) == 0) next
+
+  p <- ggplot(d, aes(x = tokens, y = contrast,
+                      colour = model_size, group = model_size)) +
+    geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.5) +
+    geom_line(linewidth = 0.9) +
+    geom_point(aes(shape = model_size), size = 1.8, stroke = 0.5) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_shape_manual(
+      values = c("125M" = 21, "350M" = 22, "1.3B" = 24),
+      name   = "Model size"
+    ) +
+    scale_x_continuous("Training tokens",
+                       labels = label_number(scale_cut = cut_short_scale())) +
+    scale_y_continuous("High \u2212 Low gap contrast",
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_wrap(~ constraint, ncol = 2) +
+    labs(
+      title    = sprintf("%s \u2014 exposure contrast: high \u2212 low alignment gap", corp),
+      subtitle = "Positive = model exceeds RelFreq baseline more for high-exposure items (exposure-driven). Near zero = generalizes regardless of exposure."
+    ) +
+    theme_bw(base_size = 11) +
+    theme(
+      strip.text       = element_text(face = "bold"),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+---
+
+# Gap as a Continuous Function of Exposure
+
+For each binomial at the final checkpoint, we compute a per-item gap:
+`+1` if the model follows the constraint but RelFreq would not,
+`−1` if RelFreq follows it but the model does not, and
+`0` if both agree or both disagree.
+A GAM smooth over log-total exposure reveals whether the gap grows, shrinks, or is
+flat as a function of how many times the model has seen the binomial.
+
+```{r item-gap-setup}
+MIN_GAM_N <- 10L   # GAM s(x, bs="cs") needs at least this many points to fit
+
+dat_final_item <- dat |>
+  group_by(model) |>
+  filter(ck_idx == max(ck_idx)) |>
+  ungroup() |>
+  filter(!is.na(log_total), is.finite(log_total))
+
+item_gap_long <- dat_final_item |>
+  pivot_longer(all_of(CONSTRAINTS), names_to = "constraint", values_to = "c_val") |>
+  filter(!is.na(c_val), c_val != 0,
+         !is.na(preference), !is.na(freq_prob_c)) |>
+  mutate(
+    model_aligns   = as.numeric(sign(preference)  == sign(c_val)),
+    relfreq_aligns = as.numeric(sign(freq_prob_c) == sign(c_val)),
+    gap            = model_aligns - relfreq_aligns,
+    constraint     = factor(constraint, levels = CONSTRAINTS)
+  )
+
+# Item counts per corpus × model_size × constraint
+item_gap_n <- item_gap_long |> count(corpus, model_size, constraint)
+
+# Report and remove combinations too sparse for GAM
+item_gap_dropped <- filter(item_gap_n, n < MIN_GAM_N)
+if (nrow(item_gap_dropped) > 0) {
+  message(sprintf(
+    "GAM smooth omitted (n < %d) for: %s",
+    MIN_GAM_N,
+    paste(sprintf("%s / %s / %s (n=%d)",
+                  item_gap_dropped$corpus, item_gap_dropped$model_size,
+                  item_gap_dropped$constraint, item_gap_dropped$n),
+          collapse = "; ")
+  ))
+}
+item_gap_long <- semi_join(item_gap_long, filter(item_gap_n, n >= MIN_GAM_N),
+                           by = c("corpus", "model_size", "constraint"))
+
+# Diagnostic: item counts per corpus × model_size × constraint
+item_gap_n |>
+  pivot_wider(names_from = constraint, values_from = n, values_fill = 0L) |>
+  knitr::kable(caption = "Item counts per corpus × model size × constraint (after filtering zero/NA values)")
+```
+
+```{r plot-gap-smooth-checkpoints, fig.height=22}
+# Target token counts for checkpoint columns (nearest available checkpoint per model)
+TOK_TARGETS <- c(1e9, 5e9, 10e9)
+tok_target_labels <- c("~1B tokens", "~5B tokens", "~10B tokens")
+
+ck_tok_lookup <- dat |>
+  distinct(corpus, model_size, model, ck_idx, tokens) |>
+  crossing(tok_target = TOK_TARGETS) |>
+  mutate(dist = abs(tokens - tok_target)) |>
+  group_by(corpus, model_size, model, tok_target) |>
+  slice_min(dist, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  mutate(tok_label = factor(
+    tok_target_labels[match(tok_target, TOK_TARGETS)],
+    levels = tok_target_labels
+  ))
+
+item_gap_stages <- dat |>
+  filter(!is.na(log_total), is.finite(log_total)) |>
+  inner_join(select(ck_tok_lookup, corpus, model_size, model, ck_idx, tok_target, tok_label),
+             by = c("corpus", "model_size", "model", "ck_idx")) |>
+  pivot_longer(all_of(CONSTRAINTS), names_to = "constraint", values_to = "c_val") |>
+  filter(!is.na(c_val), c_val != 0,
+         !is.na(preference), !is.na(freq_prob_c)) |>
+  mutate(
+    model_aligns   = as.numeric(sign(preference)  == sign(c_val)),
+    relfreq_aligns = as.numeric(sign(freq_prob_c) == sign(c_val)),
+    gap            = model_aligns - relfreq_aligns,
+    constraint     = factor(constraint, levels = CONSTRAINTS)
+  )
+
+# Report and remove combinations too sparse for GAM (per stage)
+item_gap_stages_n <- item_gap_stages |>
+  count(corpus, model_size, constraint, tok_target)
+
+item_gap_stages_dropped <- filter(item_gap_stages_n, n < MIN_GAM_N)
+if (nrow(item_gap_stages_dropped) > 0) {
+  message(sprintf(
+    "GAM smooth omitted at checkpoint (n < %d) for: %s",
+    MIN_GAM_N,
+    paste(sprintf("%s / %s / %s / %s (n=%d)",
+                  item_gap_stages_dropped$corpus, item_gap_stages_dropped$model_size,
+                  item_gap_stages_dropped$constraint,
+                  tok_target_labels[match(item_gap_stages_dropped$tok_target, TOK_TARGETS)],
+                  item_gap_stages_dropped$n),
+          collapse = "; ")
+  ))
+}
+item_gap_stages <- semi_join(item_gap_stages,
+                             filter(item_gap_stages_n, n >= MIN_GAM_N),
+                             by = c("corpus", "model_size", "constraint", "tok_target"))
+
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(item_gap_stages, corpus == corp)
+  if (nrow(d) == 0) next
+
+  p <- ggplot(d, aes(x = log_total, y = gap, colour = model_size, fill = model_size)) +
+    geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.4) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"),
+                alpha = 0.15, linewidth = 0.9) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("log(tokens seen)", breaks = scales::pretty_breaks(4)) +
+    scale_y_continuous("Alignment gap (model \u2212 RelFreq)",
+                       limits = c(-1, 1),
+                       breaks = c(-1, -0.5, 0, 0.5, 1),
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_grid(constraint ~ tok_label, scales = "free_x") +
+    labs(
+      title    = sprintf("%s \u2014 alignment gap as a function of exposure at sampled checkpoints", corp),
+      subtitle = "GAM smooth with 95% CI. Columns = checkpoint nearest to 1B / 5B / 10B training tokens."
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      strip.text       = element_text(face = "bold", size = 9),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
+
+```{r plot-gap-smooth, fig.height=22}
+for (corp in c("BabyLM", "C4")) {
+  d <- filter(item_gap_long, corpus == corp)
+  if (nrow(d) == 0) next
+
+  p <- ggplot(d, aes(x = log_total, y = gap, colour = model_size, fill = model_size)) +
+    geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.4) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"),
+                alpha = 0.15, linewidth = 0.9) +
+    scale_colour_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_fill_manual(values = SIZE_COLOURS, name = "Model size") +
+    scale_x_continuous("log(tokens seen)", breaks = scales::pretty_breaks(4)) +
+    scale_y_continuous("Alignment gap (model \u2212 RelFreq)",
+                       limits = c(-1, 1),
+                       breaks = c(-1, -0.5, 0, 0.5, 1),
+                       labels = scales::percent_format(accuracy = 1)) +
+    facet_grid(constraint ~ model_size) +
+    labs(
+      title    = sprintf("%s \u2014 alignment gap as a function of corpus exposure (final checkpoint)", corp),
+      subtitle = paste(
+        "GAM smooth with 95% CI.",
+        "x = log total times the binomial appeared in the training corpus at the final checkpoint.",
+        "Positive gap = model follows constraint more than corpus frequency predicts."
+      )
+    ) +
+    theme_bw(base_size = 10) +
+    theme(
+      strip.text       = element_text(face = "bold", size = 9),
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+  cat("\n\n")
+}
+```
