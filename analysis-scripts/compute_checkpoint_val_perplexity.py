@@ -125,21 +125,20 @@ def main():
     # ── Load already-computed results (resume safety) ─────────────────────────
     # Validate each row has a real perplexity value — a crash mid-write could
     # have left a corrupted file or rows with NaN.
+    done      = pd.DataFrame()
+    done_keys = set()
     if OUT_CSV.exists():
         try:
-            raw = pd.read_csv(OUT_CSV)
+            raw  = pd.read_csv(OUT_CSV)
             done = raw.dropna(subset=["val_perplexity"])
             n_corrupt = len(raw) - len(done)
             if n_corrupt:
                 print(f"⚠️  Dropped {n_corrupt} corrupt/incomplete rows from {OUT_CSV}")
+            if not done.empty:
+                done_keys = set(zip(done["corpus"], done["params"], done["step"]))
+            print(f"Resuming: {len(done)} valid rows already computed, skipping those.")
         except Exception as e:
             print(f"⚠️  Could not read {OUT_CSV} ({e}) — starting fresh.")
-            done = pd.DataFrame()
-        done_keys = set(zip(done["corpus"], done["params"], done["step"]))
-        print(f"Resuming: {len(done)} valid rows already computed, skipping those.")
-    else:
-        done      = pd.DataFrame()
-        done_keys = set()
 
     # ── Tokeniser (shared across all models) ─────────────────────────────────
     print("Loading tokeniser ...")
