@@ -59,9 +59,9 @@ MODEL_CONFIGS = {
     "facebook/opt-2.7b":             {"params": "2700M",  "family": "OPT",      "label": "OPT-2.7B",     "skip": False},
     "facebook/opt-6.7b":             {"params": "6700M",  "family": "OPT",      "label": "OPT-6.7B",     "skip": False},
     "facebook/opt-13b":              {"params": "13000M", "family": "OPT",      "label": "OPT-13B",      "skip": False},
-    "facebook/opt-30b":              {"params": "30000M", "family": "OPT",      "label": "OPT-30B",      "skip": False},
-    "facebook/opt-66b":              {"params": "66000M", "family": "OPT",      "label": "OPT-66B",      "skip": False},
-    "facebook/opt-175b":             {"params": "175000M","family": "OPT",      "label": "OPT-175B",     "skip": False},
+    "facebook/opt-30b":              {"params": "30000M", "family": "OPT",      "label": "OPT-30B",      "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
+    "facebook/opt-66b":              {"params": "66000M", "family": "OPT",      "label": "OPT-66B",      "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
+    "facebook/opt-175b":             {"params": "175000M","family": "OPT",      "label": "OPT-175B",     "skip": True},                        # ~350 GB — exceeds 2×80 GB
 }
 
 # ── Sentence-frame prompts (same set as model-prefs-all-ckpts.py) ─────────────
@@ -129,17 +129,23 @@ def get_device() -> str:
     return "cpu"
 
 
+def _first_device(model) -> torch.device:
+    """Return the device of the model's first parameter (works with device_map='auto')."""
+    return next(model.parameters()).device
+
+
 @torch.inference_mode()
-def batch_logprobs(model, tokenizer, texts: list[str], device: str,
+def batch_logprobs(model, tokenizer, texts: list[str],
                    batch_size: int = 64) -> list[float]:
     """Total sequence log-probability for each text string."""
+    first_dev = _first_device(model)
     all_lp = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         enc = tokenizer(batch, padding="longest", return_tensors="pt",
                         pad_to_multiple_of=8)
-        input_ids      = enc["input_ids"].to(device)
-        attention_mask = enc["attention_mask"].to(device)
+        input_ids      = enc["input_ids"].to(first_dev)
+        attention_mask = enc["attention_mask"].to(first_dev)
 
         outputs    = model(input_ids, attention_mask=attention_mask)
         logprobs   = torch.log_softmax(outputs.logits[:, :-1, :], dim=-1)
@@ -153,7 +159,7 @@ def batch_logprobs(model, tokenizer, texts: list[str], device: str,
 
 
 def score_binomials(model, tokenizer, binoms_df: pd.DataFrame,
-                    model_id: str, device: str) -> pd.DataFrame:
+                    model_id: str) -> pd.DataFrame:
     """
     For every (prompt, binomial) pair compute log P(α) − log P(β).
     Returns a DataFrame with one row per binomial, preference = mean over prompts.
@@ -162,8 +168,7 @@ def score_binomials(model, tokenizer, binoms_df: pd.DataFrame,
     for prompt in tqdm(LIST_OF_PROMPTS, desc="  prompts", leave=False):
         alpha_texts    = (prompt + binoms_df["Alpha"]).tolist()
         nonalpha_texts = (prompt + binoms_df["Nonalpha"]).tolist()
-        combined = alpha_texts + nonalpha_texts
-        lps = batch_logprobs(model, tokenizer, combined, device)
+        lps = batch_logprobs(model, tokenizer, alpha_texts + nonalpha_texts)
         n = len(alpha_texts)
         for i, row in enumerate(binoms_df.itertuples(index=False)):
             rows.append({
@@ -174,51 +179,44 @@ def score_binomials(model, tokenizer, binoms_df: pd.DataFrame,
             })
 
     df = pd.DataFrame(rows)
-    # Average preference across prompts
-    return (df.groupby(["model", "binom"], as_index=False)["preference"].mean())
+    return df.groupby(["model", "binom"], as_index=False)["preference"].mean()
 
 
 @torch.inference_mode()
-def compute_validation_perplexity(model, tokenizer, device: str,
-                                   max_tokens: int = 4096) -> float:
+def compute_validation_perplexity(model, tokenizer, max_tokens: int = 4096) -> float:
     """
     Validation perplexity on the WikiText-2 test set.
-    We concatenate the test text and stride through it with the model's
-    context window, taking the NLL only on the non-overlapping portion.
+    Strides through a concatenated test text with the model's context window.
+    Works with both single-GPU and device_map='auto' multi-GPU models.
     """
+    first_dev = _first_device(model)
+
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1",
                            split="test", trust_remote_code=True)
     text = "\n".join(t for t in dataset["text"] if t.strip())
 
-    enc = tokenizer(text, return_tensors="pt")
-    input_ids = enc["input_ids"][0]
+    input_ids = tokenizer(text, return_tensors="pt")["input_ids"][0]
+    input_ids = input_ids[:max_tokens]
 
-    # Truncate to max_tokens to keep it fast on CPU
-    input_ids = input_ids[:max_tokens].to(device)
-
-    stride      = 512
-    seq_len     = input_ids.size(0)
-    max_ctx     = getattr(model.config, "n_positions",
-                          getattr(model.config, "max_position_embeddings", 1024))
-    window      = min(max_ctx, 1024)
-
+    stride   = 512
+    seq_len  = input_ids.size(0)
+    max_ctx  = getattr(model.config, "n_positions",
+                       getattr(model.config, "max_position_embeddings", 1024))
+    window   = min(max_ctx, 1024)
     nll_sum  = 0.0
     n_tokens = 0
     prev_end = 0
 
     for begin in range(0, seq_len, stride):
-        end     = min(begin + window, seq_len)
-        chunk   = input_ids[begin:end].unsqueeze(0)
-        # Only score tokens after the overlap with the previous window
+        end        = min(begin + window, seq_len)
         target_len = end - max(begin, prev_end)
         if target_len <= 0:
             prev_end = end
             continue
 
+        chunk   = input_ids[begin:end].unsqueeze(0).to(first_dev)
         outputs = model(chunk, labels=chunk)
-        # outputs.loss is mean NLL over the whole chunk; recover total
         chunk_nll = outputs.loss.item() * (end - begin - 1)
-        # Approximate: attribute the last target_len tokens' NLL
         nll_sum  += chunk_nll * target_len / (end - begin - 1)
         n_tokens += target_len
         prev_end  = end
@@ -260,14 +258,22 @@ def main():
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
 
+        multi_gpu = cfg.get("multi_gpu", False)
         dtype = torch.float16 if device == "cuda" else torch.float32
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=dtype
-        ).to(device).eval()
+        if multi_gpu:
+            # Spread layers across all available GPUs automatically
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id, torch_dtype=dtype, device_map="auto"
+            ).eval()
+            print(f"  Loaded with device_map='auto' across {torch.cuda.device_count()} GPUs")
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_id, torch_dtype=dtype
+            ).to(device).eval()
 
         # ── Binomial preferences ──
         print("  Scoring binomial preferences ...")
-        prefs_df = score_binomials(model, tokenizer, binoms_df, model_id, device)
+        prefs_df = score_binomials(model, tokenizer, binoms_df, model_id)
         prefs_df["model_family"] = cfg["family"]
         prefs_df["model_params"] = cfg["params"]
         prefs_df["model_label"]  = cfg["label"]
@@ -275,7 +281,7 @@ def main():
 
         # ── Validation perplexity (WikiText-2 test) ──
         print("  Computing validation perplexity (WikiText-2 test) ...")
-        ppl = compute_validation_perplexity(model, tokenizer, device)
+        ppl = compute_validation_perplexity(model, tokenizer)
         print(f"  Perplexity: {ppl:.2f}")
         all_ppl.append({
             "model":        model_id,
