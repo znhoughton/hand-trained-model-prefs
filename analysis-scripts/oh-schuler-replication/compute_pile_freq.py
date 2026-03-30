@@ -33,6 +33,11 @@ except ImportError:
     sys.exit("Install: pip install pyahocorasick")
 
 try:
+    from tqdm import tqdm
+except ImportError:
+    sys.exit("Install: pip install tqdm")
+
+try:
     from datasets import load_dataset
 except ImportError:
     sys.exit("Install: pip install datasets pandas scipy")
