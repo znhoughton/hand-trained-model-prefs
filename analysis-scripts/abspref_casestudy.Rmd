@@ -1909,74 +1909,154 @@ if (!file.exists(VAL_PPL_CSV)) {
 For each binomial, we compare two proportions:
 
 - **Human proportion α**: fraction of human participants who chose the α ordering (e.g., "salt and pepper" over "pepper and salt"), computed across all individual trials in `all_human_data.csv`.
-- **Model proportion α**: across the 20 sampled training checkpoints, fraction where `preference > 0` (favouring α), computed **separately per corpus × model size** (6 panels total).
+- **Model proportion α**: out of the 51 sentence-frame prompts used to score each binomial, the fraction where the model's log-odds preference was positive (i.e., `preference > 0`), computed from the raw per-prompt checkpoint CSVs, **separately per corpus × model size**.
 
-If models track human preferences, points should cluster near the diagonal. Points above the diagonal indicate the model over-predicts α relative to humans; below indicates under-prediction.
+Each point is one binomial. Plot 1 uses the final training checkpoint; Plot 2 shows how the model–human correlation (Pearson *r*) evolves across training.
 
 ```{r model-vs-human-alpha-prop}
+CKPT_DIR <- normalizePath(
+  file.path(dirname(DATA_DIR), "checkpoint_results"),
+  mustWork = FALSE
+)
+N_PROMPTS <- 51L   # number of sentence-frame prompts in model-prefs-all-ckpts.py
+
+# Helper: load per-prompt preferences for one (model, step) checkpoint CSV
+load_ckpt_raw <- function(model_name, step) {
+  short <- sub("znhoughton/", "", model_name)
+  path  <- file.path(CKPT_DIR, sprintf("%s_step-%d.csv", short, step))
+  if (!file.exists(path)) {
+    warning("Checkpoint CSV not found: ", path)
+    return(NULL)
+  }
+  read_csv(path, show_col_types = FALSE, col_select = c(binom, preference))
+}
+
 # Human proportion α per binomial (pooled across all participants)
 human_alpha_prop <- human_trials |>
   group_by(binom) |>
-  summarise(
-    prop_human_alpha = mean(resp_alpha),
-    n_humans         = n(),
-    .groups          = "drop"
-  )
+  summarise(prop_human_alpha = mean(resp_alpha), n_humans = n(), .groups = "drop")
 
-# Model proportion α per binomial: fraction of sampled checkpoints with preference > 0,
-# computed separately per corpus × model_size (not collapsed across sizes).
-model_alpha_prop <- train |>
+# ── Plot 1: final checkpoint ──────────────────────────────────────────────────
+message("Loading final-checkpoint CSVs for model-vs-human plot ...")
+raw_final <- final_ck_meta |>
   mutate(
     corpus     = parse_corpus(model),
     model_size = factor(parse_size(model), levels = SIZE_LEVELS)
   ) |>
-  filter(!is.na(corpus), !is.na(model_size), !is.na(preference)) |>
-  inner_join(ck_meta |> select(model, step), by = c("model", "step")) |>
+  filter(!is.na(corpus), !is.na(model_size)) |>
+  rowwise() |>
+  reframe({
+    d <- load_ckpt_raw(model, step)
+    if (is.null(d)) tibble() else
+      mutate(d, corpus = corpus, model_size = model_size, step = step)
+  })
+
+prop_final <- raw_final |>
+  filter(!is.na(preference)) |>
   group_by(corpus, model_size, binom) |>
   summarise(
     prop_model_alpha = mean(preference > 0),
-    n_checkpoints    = n(),
+    n_prompts        = n(),
     .groups          = "drop"
-  )
-
-prop_comparison <- model_alpha_prop |>
+  ) |>
   inner_join(human_alpha_prop, by = "binom")
 
-# Pearson r per corpus × model_size for annotation
-cors <- prop_comparison |>
+cors_final <- prop_final |>
   group_by(corpus, model_size) |>
-  summarise(
-    r   = cor(prop_human_alpha, prop_model_alpha),
-    lbl = sprintf("r = %.2f", r),
-    .groups = "drop"
-  )
+  summarise(r = cor(prop_human_alpha, prop_model_alpha),
+            lbl = sprintf("r = %.2f", r), .groups = "drop")
 
-ggplot(prop_comparison,
-       aes(x = prop_human_alpha, y = prop_model_alpha)) +
-  facet_grid(model_size ~ corpus) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_point(size = 1.5, alpha = 0.40, colour = "#2166ac") +
+prop_plot_theme <- list(
+  facet_grid(model_size ~ corpus),
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", colour = "grey50"),
+  geom_point(size = 1.5, alpha = 0.40, colour = "#2166ac"),
   geom_smooth(method = "loess", formula = y ~ x, se = TRUE,
               linetype = "dashed", linewidth = 0.9,
-              colour = "#b2182b", fill = "#b2182b", alpha = 0.12) +
-  geom_text(data = cors, aes(label = lbl),
-            x = 0.08, y = 0.95, hjust = 0, vjust = 1,
-            size = 3.5, fontface = "italic", inherit.aes = FALSE) +
-  scale_x_continuous("Proportion of humans choosing α ordering",
-                     limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
-  scale_y_continuous("Proportion of checkpoints preferring α (pref > 0)",
-                     limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+              colour = "#b2182b", fill = "#b2182b", alpha = 0.12),
+  scale_x_continuous("Proportion of humans choosing \u03b1 ordering",
+                     limits = c(0, 1), breaks = seq(0, 1, 0.25)),
+  scale_y_continuous(sprintf("Proportion of %d prompts where model prefers \u03b1", N_PROMPTS),
+                     limits = c(0, 1), breaks = seq(0, 1, 0.25)),
+  theme_classic(base_size = 12),
+  theme(strip.background = element_blank(),
+        strip.text       = element_text(face = "bold", size = 11),
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.4),
+        axis.line        = element_line(colour = "grey40"),
+        axis.ticks       = element_line(colour = "grey40"))
+)
+
+ggplot(prop_final, aes(x = prop_human_alpha, y = prop_model_alpha)) +
+  prop_plot_theme +
+  geom_text(data = cors_final, aes(label = lbl),
+            x = 0.05, y = 0.97, hjust = 0, vjust = 1,
+            size = 3.2, fontface = "italic", inherit.aes = FALSE) +
   labs(
-    title    = "Model vs. human α-ordering proportions (per binomial)",
-    subtitle = "Each point = one binomial. Rows = model size. Dotted = perfect agreement. Dashed = loess fit."
+    title    = "Model vs. human \u03b1-ordering proportions \u2014 final checkpoint",
+    subtitle = "Each point = one binomial. Dotted = perfect agreement. Dashed = loess fit."
+  )
+
+# ── Plot 2: trajectory of model–human correlation over training ───────────────
+message("Loading sampled-checkpoint CSVs for trajectory plot (may take a moment) ...")
+raw_traj <- ck_meta |>
+  mutate(
+    corpus     = parse_corpus(model),
+    model_size = factor(parse_size(model), levels = SIZE_LEVELS)
+  ) |>
+  filter(!is.na(corpus), !is.na(model_size)) |>
+  rowwise() |>
+  reframe({
+    d <- load_ckpt_raw(model, step)
+    if (is.null(d)) tibble() else
+      mutate(d, corpus = corpus, model_size = model_size, step = step)
+  })
+
+r_traj <- raw_traj |>
+  filter(!is.na(preference)) |>
+  group_by(corpus, model_size, step, binom) |>
+  summarise(prop_model_alpha = mean(preference > 0), .groups = "drop") |>
+  inner_join(human_alpha_prop, by = "binom") |>
+  group_by(corpus, model_size, step) |>
+  summarise(r = cor(prop_human_alpha, prop_model_alpha), .groups = "drop") |>
+  left_join(
+    loss_curves |> rename(lc_step = step),
+    by = c("corpus", "model_size"),
+    relationship = "many-to-many"
+  ) |>
+  mutate(step_dist = abs(step - lc_step)) |>
+  group_by(corpus, model_size, step) |>
+  slice_min(step_dist, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(-lc_step, -step_dist)
+
+ggplot(r_traj,
+       aes(x = perplexity, y = r,
+           colour = model_size, shape = model_size)) +
+  facet_wrap(~ corpus, scales = "free_x") +
+  geom_line(linewidth = 0.7, alpha = 0.8) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_x_continuous(
+    "Training perplexity (lower \u2192 better trained)",
+    trans  = "log2",
+    labels = scales::trans_format("log2", scales::math_format(2^.x))
   ) +
-  theme_classic(base_size = 12) +
+  scale_y_continuous("Pearson r (model prop \u03b1 vs human prop \u03b1)") +
+  scale_colour_manual(values = size_colours, name = "Model size") +
+  scale_shape_manual(values  = size_shapes,  name = "Model size") +
+  labs(
+    title    = "Model\u2013human \u03b1-ordering agreement over training",
+    subtitle = sprintf(
+      "r = Pearson correlation between model prop \u03b1 (%d prompts) and human prop \u03b1, per checkpoint.",
+      N_PROMPTS
+    )
+  ) +
+  theme_classic(base_size = 13) +
   theme(
     strip.background = element_blank(),
-    strip.text       = element_text(face = "bold", size = 11),
+    strip.text       = element_text(face = "bold", size = 13),
     panel.grid.major = element_line(colour = "grey92", linewidth = 0.4),
     axis.line        = element_line(colour = "grey40"),
-    axis.ticks       = element_line(colour = "grey40")
+    axis.ticks       = element_line(colour = "grey40"),
+    legend.position  = "right"
   )
 ```
 

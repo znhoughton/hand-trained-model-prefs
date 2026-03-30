@@ -123,10 +123,20 @@ def main():
           f"{ck_meta['step'].nunique()} unique steps")
 
     # ── Load already-computed results (resume safety) ─────────────────────────
+    # Validate each row has a real perplexity value — a crash mid-write could
+    # have left a corrupted file or rows with NaN.
     if OUT_CSV.exists():
-        done = pd.read_csv(OUT_CSV)
+        try:
+            raw = pd.read_csv(OUT_CSV)
+            done = raw.dropna(subset=["val_perplexity"])
+            n_corrupt = len(raw) - len(done)
+            if n_corrupt:
+                print(f"⚠️  Dropped {n_corrupt} corrupt/incomplete rows from {OUT_CSV}")
+        except Exception as e:
+            print(f"⚠️  Could not read {OUT_CSV} ({e}) — starting fresh.")
+            done = pd.DataFrame()
         done_keys = set(zip(done["corpus"], done["params"], done["step"]))
-        print(f"Resuming: {len(done)} rows already computed, skipping those.")
+        print(f"Resuming: {len(done)} valid rows already computed, skipping those.")
     else:
         done      = pd.DataFrame()
         done_keys = set()
@@ -172,6 +182,7 @@ def main():
             print(f"\n  → Checkpoint step={step}  (revision={revision})")
 
             tmp_cache = tempfile.mkdtemp(prefix="hf_ckpt_val_")
+            model = None
             try:
                 model = AutoModelForCausalLM.from_pretrained(
                     model_id,
@@ -191,21 +202,25 @@ def main():
                     "val_perplexity": ppl,
                 })
 
-                # Save incrementally after each checkpoint
+                # Atomic incremental save after each checkpoint
                 all_rows = (
                     pd.concat([done, pd.DataFrame(new_rows)], ignore_index=True)
                     if not done.empty
                     else pd.DataFrame(new_rows)
                 )
-                all_rows.to_csv(OUT_CSV, index=False)
+                tmp_out = str(OUT_CSV) + ".tmp"
+                all_rows.to_csv(tmp_out, index=False)
+                os.replace(tmp_out, OUT_CSV)
 
             except Exception as e:
                 print(f"  ⚠️  Failed step={step}: {e}")
             finally:
-                del model
+                if model is not None:
+                    del model
                 if DEVICE == "cuda":
                     torch.cuda.empty_cache()
                 shutil.rmtree(tmp_cache, ignore_errors=True)
+                print(f"     🗑️  Checkpoint cache deleted.")
 
     print(f"\n✅ Done. Results saved to {OUT_CSV}")
 

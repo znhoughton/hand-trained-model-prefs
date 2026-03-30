@@ -23,6 +23,9 @@ Requirements:
 
 import os
 import math
+import datetime
+import tempfile
+import shutil
 from pathlib import Path
 
 import torch
@@ -38,6 +41,8 @@ DATA_DIR     = BASE_DIR / "Data"
 HUMAN_CSV    = DATA_DIR / "all_human_data.csv"
 OUT_PREFS    = SCRIPT_DIR / "oh_schuler_prefs.csv"
 OUT_PPL      = SCRIPT_DIR / "oh_schuler_perplexity.csv"
+STAGING_DIR  = SCRIPT_DIR / "staging"
+STAGING_DIR.mkdir(exist_ok=True)
 
 # ── Models (Oh & Schuler 2023: GPT-2, GPT-Neo, OPT) ─────────────────────────
 # 16 models total across three families.
@@ -129,6 +134,32 @@ def get_device() -> str:
     return "cpu"
 
 
+def atomic_csv_write(df: pd.DataFrame, path: Path) -> None:
+    """Write CSV atomically: write to .tmp then rename, so crashes can't corrupt."""
+    tmp = str(path) + ".tmp"
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def get_completed_prompts(staging_path: Path, expected_binoms: set) -> set:
+    """
+    Return the set of prompts that are fully complete — i.e., every expected
+    binomial has a scored row. Prompts where the script crashed mid-batch and
+    only some binomials were written are treated as incomplete.
+    """
+    if not staging_path.exists():
+        return set()
+    try:
+        df = pd.read_csv(staging_path)
+    except Exception:
+        return set()
+    completed = set()
+    for prompt, grp in df.groupby("prompt"):
+        if expected_binoms.issubset(set(grp["binom"])):
+            completed.add(prompt)
+    return completed
+
+
 def _first_device(model) -> torch.device:
     """Return the device of the model's first parameter (works with device_map='auto')."""
     return next(model.parameters()).device
@@ -159,27 +190,47 @@ def batch_logprobs(model, tokenizer, texts: list[str],
 
 
 def score_binomials(model, tokenizer, binoms_df: pd.DataFrame,
-                    model_id: str) -> pd.DataFrame:
+                    model_id: str, staging_path: Path) -> pd.DataFrame:
     """
-    For every (prompt, binomial) pair compute log P(α) − log P(β).
-    Returns a DataFrame with one row per binomial, preference = mean over prompts.
+    Score every (prompt, binomial) pair. Results are saved prompt-by-prompt to
+    staging_path so a crash only loses at most one prompt's work. Already-complete
+    prompts (all binomials present) are skipped without reloading the model.
+
+    Returns averaged preferences (one row per binomial).
     """
-    rows = []
-    for prompt in tqdm(LIST_OF_PROMPTS, desc="  prompts", leave=False):
+    expected_binoms  = set(binoms_df["Alpha"])
+    completed        = get_completed_prompts(staging_path, expected_binoms)
+    missing_prompts  = [p for p in LIST_OF_PROMPTS if p not in completed]
+
+    print(f"  Prompts: {len(completed)} already complete, {len(missing_prompts)} to run.")
+
+    for prompt in tqdm(missing_prompts, desc="  prompts", leave=False):
         alpha_texts    = [prompt + str(t) for t in binoms_df["Alpha"]]
         nonalpha_texts = [prompt + str(t) for t in binoms_df["Nonalpha"]]
         lps = batch_logprobs(model, tokenizer, alpha_texts + nonalpha_texts)
-        n = len(alpha_texts)
-        for i, row in enumerate(binoms_df.itertuples(index=False)):
-            rows.append({
-                "model":      model_id,
-                "binom":      row.Alpha,
-                "prompt":     prompt,
-                "preference": lps[i] - lps[n + i],
-            })
+        n   = len(alpha_texts)
 
-    df = pd.DataFrame(rows)
-    return df.groupby(["model", "binom"], as_index=False)["preference"].mean()
+        prompt_rows = [
+            {"model": model_id, "binom": row.Alpha,
+             "prompt": prompt, "preference": lps[i] - lps[n + i]}
+            for i, row in enumerate(binoms_df.itertuples(index=False))
+        ]
+        prompt_df = pd.DataFrame(prompt_rows)
+
+        # Atomic append to staging: read → concat → atomic write
+        if staging_path.exists():
+            try:
+                existing = pd.read_csv(staging_path)
+                combined = pd.concat([existing, prompt_df], ignore_index=True)
+            except Exception:
+                combined = prompt_df   # staging corrupted — restart from this prompt
+        else:
+            combined = prompt_df
+        atomic_csv_write(combined, staging_path)
+
+    # Aggregate across all prompts from staging
+    full = pd.read_csv(staging_path)
+    return full.groupby(["model", "binom"], as_index=False)["preference"].mean()
 
 
 @torch.inference_mode()
@@ -260,70 +311,135 @@ def main():
 
     print(f"  {len(binoms_df)} unique binomials retained  (log → {LOG_PATH})\n")
 
-    all_prefs = []
-    all_ppl   = []
+    expected_binoms = set(binoms_df["Alpha"])
+
+    # Load existing outputs for resume detection
+    done_prefs = pd.read_csv(OUT_PREFS) if OUT_PREFS.exists() else pd.DataFrame()
+    done_ppl   = pd.read_csv(OUT_PPL)   if OUT_PPL.exists()   else pd.DataFrame()
+    done_ppl_models = set(done_ppl["model"]) if not done_ppl.empty else set()
 
     for model_id, cfg in MODEL_CONFIGS.items():
         if cfg.get("skip", False):
-            print(f"Skipping {model_id} (skip=True — insufficient VRAM)")
+            print(f"Skipping {model_id} (skip=True)")
             continue
+
+        model_safe   = model_id.replace("/", "_")
+        staging_path = STAGING_DIR / f"{model_safe}_staging.csv"
 
         print("=" * 60)
         print(f"Model: {model_id}  ({cfg['family']}, {cfg['params']})")
         print("=" * 60)
+
+        # ── Check if this model is already fully done in both output files ────
+        completed_prompts = get_completed_prompts(staging_path, expected_binoms)
+        prefs_done = (not done_prefs.empty and
+                      model_id in done_prefs.get("model", pd.Series()).values and
+                      expected_binoms.issubset(
+                          set(done_prefs[done_prefs["model"] == model_id]["binom"])))
+        ppl_done = model_id in done_ppl_models
+
+        if prefs_done and ppl_done:
+            print("  ✅ Already fully scored and saved — skipping.\n")
+            continue
+
+        all_prompts_staged = len(completed_prompts) == len(LIST_OF_PROMPTS)
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
 
-        multi_gpu = cfg.get("multi_gpu", False)
-        dtype = torch.float16 if device == "cuda" else torch.float32
-        if multi_gpu:
-            # Spread layers across all available GPUs automatically
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id, torch_dtype=dtype, device_map="auto"
-            ).eval()
-            print(f"  Loaded with device_map='auto' across {torch.cuda.device_count()} GPUs")
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id, torch_dtype=dtype
-            ).to(device).eval()
+        model     = None
+        tmp_cache = tempfile.mkdtemp(prefix="hf_prefs_")
+        try:
+            if not all_prompts_staged:
+                # Need model to score missing prompts
+                multi_gpu = cfg.get("multi_gpu", False)
+                dtype     = torch.float16 if device == "cuda" else torch.float32
+                print("  Loading model ...")
+                if multi_gpu:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_id, torch_dtype=dtype, device_map="auto",
+                        cache_dir=tmp_cache,
+                    ).eval()
+                    print(f"  Loaded with device_map='auto' across {torch.cuda.device_count()} GPUs")
+                else:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_id, torch_dtype=dtype, cache_dir=tmp_cache,
+                    ).to(device).eval()
+            else:
+                print("  All prompts already in staging — skipping model load.")
 
-        # ── Binomial preferences ──
-        print("  Scoring binomial preferences ...")
-        prefs_df = score_binomials(model, tokenizer, binoms_df, model_id)
-        prefs_df["model_family"] = cfg["family"]
-        prefs_df["model_params"] = cfg["params"]
-        prefs_df["model_label"]  = cfg["label"]
-        all_prefs.append(prefs_df)
+            # ── Binomial preferences ──────────────────────────────────────────
+            if not prefs_done:
+                print("  Scoring binomial preferences ...")
+                prefs_df = score_binomials(
+                    model, tokenizer, binoms_df, model_id, staging_path
+                )
+                prefs_df["model_family"] = cfg["family"]
+                prefs_df["model_params"] = cfg["params"]
+                prefs_df["model_label"]  = cfg["label"]
 
-        # ── Validation perplexity (WikiText-2 test) ──
-        print("  Computing validation perplexity (WikiText-2 test) ...")
-        ppl = compute_validation_perplexity(model, tokenizer)
-        print(f"  Perplexity: {ppl:.2f}")
-        all_ppl.append({
-            "model":        model_id,
-            "model_family": cfg["family"],
-            "model_params": cfg["params"],
-            "model_label":  cfg["label"],
-            "perplexity":   ppl,
-        })
+                # Atomic incremental save: append this model's rows
+                combined_prefs = (
+                    pd.concat([done_prefs, prefs_df], ignore_index=True)
+                    if not done_prefs.empty else prefs_df
+                )
+                atomic_csv_write(combined_prefs, OUT_PREFS)
+                done_prefs = combined_prefs
+                print(f"  ✅ Preferences saved → {OUT_PREFS}")
 
-        del model
-        if device == "cuda":
-            torch.cuda.empty_cache()
+            # ── Validation perplexity ─────────────────────────────────────────
+            if not ppl_done:
+                if model is None:
+                    # Rare case: prefs already done but ppl missing — need model
+                    multi_gpu = cfg.get("multi_gpu", False)
+                    dtype     = torch.float16 if device == "cuda" else torch.float32
+                    print("  Loading model for perplexity ...")
+                    if multi_gpu:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_id, torch_dtype=dtype, device_map="auto",
+                            cache_dir=tmp_cache,
+                        ).eval()
+                    else:
+                        model = AutoModelForCausalLM.from_pretrained(
+                            model_id, torch_dtype=dtype, cache_dir=tmp_cache,
+                        ).to(device).eval()
+
+                print("  Computing validation perplexity (WikiText-2 test) ...")
+                ppl = compute_validation_perplexity(model, tokenizer)
+                print(f"  Perplexity: {ppl:.2f}")
+
+                ppl_row = pd.DataFrame([{
+                    "model":        model_id,
+                    "model_family": cfg["family"],
+                    "model_params": cfg["params"],
+                    "model_label":  cfg["label"],
+                    "perplexity":   ppl,
+                }])
+                combined_ppl = (
+                    pd.concat([done_ppl, ppl_row], ignore_index=True)
+                    if not done_ppl.empty else ppl_row
+                )
+                atomic_csv_write(combined_ppl, OUT_PPL)
+                done_ppl = combined_ppl
+                done_ppl_models.add(model_id)
+                print(f"  ✅ Perplexity saved → {OUT_PPL}")
+
+        finally:
+            if model is not None:
+                del model
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            shutil.rmtree(tmp_cache, ignore_errors=True)
+            print(f"  🗑️  Model cache deleted.")
+
         print()
 
-    # ── Save ──────────────────────────────────────────────────────────────────
-    prefs_out = pd.concat(all_prefs, ignore_index=True)
-    prefs_out.to_csv(OUT_PREFS, index=False)
-    print(f"Saved preferences → {OUT_PREFS}")
-
-    ppl_out = pd.DataFrame(all_ppl)
-    ppl_out.to_csv(OUT_PPL, index=False)
-    print(f"Saved perplexities → {OUT_PPL}")
-    print("\nDone.")
+    print("\n✅ All models done.")
+    print(f"   Preferences → {OUT_PREFS}")
+    print(f"   Perplexity  → {OUT_PPL}")
+    print(f"   Staging dir → {STAGING_DIR}  (can be deleted if no longer needed)")
 
 
 if __name__ == "__main__":
