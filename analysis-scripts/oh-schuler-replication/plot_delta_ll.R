@@ -18,7 +18,13 @@
 library(tidyverse)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-SCRIPT_DIR <- normalizePath(dirname(sys.frame(1)$ofile), mustWork = FALSE)
+SCRIPT_DIR <- tryCatch(
+  normalizePath(dirname(rstudioapi::getSourceEditorContext()$path), mustWork = FALSE),
+  error = function(e) tryCatch(
+    normalizePath(dirname(sys.frame(1)$ofile), mustWork = FALSE),
+    error = function(e2) normalizePath(".")
+  )
+)
 BASE_DIR   <- normalizePath(file.path(SCRIPT_DIR, "..", ".."), mustWork = FALSE)
 DATA_DIR   <- file.path(BASE_DIR, "Data")
 
@@ -147,18 +153,14 @@ print(slope_tests)
 # ── Plot ──────────────────────────────────────────────────────────────────────
 p <- ggplot(results,
             aes(x = perplexity, y = delta_ll,
-                colour = model_family, shape = model_family)) +
-  facet_wrap(~ model_family, scales = "free_x") +
-  geom_smooth(method = "lm", formula = y ~ x, se = FALSE,
-              linetype = "dashed", linewidth = 0.9) +
-  geom_point(aes(size = params_M), alpha = 0.9) +
-  geom_text(aes(label = model_label),
-            hjust = -0.1, vjust = 0.4,
+                colour = model_family)) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE,
+              linetype = "dashed", linewidth = 0.9,
+              aes(group = model_family)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text(aes(label = model_params),
+            hjust = -0.12, vjust = 0.4,
             size = 3, fontface = "bold", show.legend = FALSE) +
-  geom_text(data = slope_tests, aes(label = lbl),
-            x = -Inf, y = Inf, hjust = -0.05, vjust = 1.4,
-            size = 3.2, fontface = "italic", colour = "grey30",
-            inherit.aes = FALSE) +
   scale_x_continuous(
     "Validation perplexity on WikiText-2 (lower \u2192 better)",
     trans  = "log2",
@@ -166,22 +168,16 @@ p <- ggplot(results,
   ) +
   scale_y_continuous("\u0394LL") +
   scale_colour_manual(values = family_colours, name = "Model family") +
-  scale_shape_manual(values = c("GPT-2" = 16L, "GPT-Neo" = 17L, "OPT" = 15L),
-                     name = "Model family") +
-  scale_size_continuous(name = "Parameters (M)", range = c(2, 6)) +
-  guides(colour = guide_legend(override.aes = list(size = 3)),
-         shape  = guide_legend(override.aes = list(size = 3))) +
+  guides(colour = guide_legend(override.aes = list(size = 3))) +
   labs(
     title    = "\u0394LL vs. validation perplexity — Oh & Schuler (2023) models",
     subtitle = paste0(
       "\u0394LL = logLik(resp_alpha \u223c RelFreq + model pref) \u2212 logLik(resp_alpha \u223c RelFreq). ",
-      "One point per model. Dashed = OLS fit per family."
+      "One point per model; labels = parameter count. Dashed = OLS fit per family."
     )
   ) +
   theme_classic(base_size = 13) +
   theme(
-    strip.background = element_blank(),
-    strip.text       = element_text(face = "bold", size = 13),
     panel.grid.major = element_line(colour = "grey92", linewidth = 0.4),
     axis.line        = element_line(colour = "grey40"),
     axis.ticks       = element_line(colour = "grey40"),

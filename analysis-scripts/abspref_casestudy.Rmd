@@ -1745,6 +1745,35 @@ slope_tests <- dat_plot |>
 cat("\nSlope tests: log2(perplexity) → ΔLL\n")
 print(slope_tests |> select(corpus, model_size, slope, se, t, p, sig, n), n = Inf)
 
+# ── Between-size comparison: do model sizes have significantly different ΔLL curves? ──
+# lm(delta_ll ~ log2(perplexity) * model_size) per corpus tests:
+#   - main effect of model_size: overall level differences across sizes
+#   - interaction log2(perplexity):model_size: slope differences across sizes
+#   - pairwise contrasts: which specific pairs differ (Holm-corrected)
+cat("\n── Between-size comparison (interaction model) per corpus ──\n")
+if (!requireNamespace("emmeans", quietly = TRUE)) {
+  message("  \u26a0  emmeans not installed \u2014 skipping pairwise contrasts (install.packages('emmeans'))")
+} else {
+  size_comparison <- dat_plot |>
+    group_by(corpus) |>
+    group_modify(function(d, k) {
+      if (n_distinct(d$model_size) < 2)
+        return(tibble(contrast = NA_character_, estimate = NA_real_, SE = NA_real_,
+                      t.ratio = NA_real_, p.value = NA_real_))
+      d <- d |> mutate(model_size = factor(model_size))
+      fit  <- lm(delta_ll ~ log2(perplexity) * model_size, data = d)
+      cat(sprintf("\n  %s \u2014 ANOVA:\n", k$corpus))
+      aov_tbl <- anova(fit)
+      print(aov_tbl)
+      emm      <- emmeans::emmeans(fit, ~ model_size)
+      pairs_df <- as.data.frame(pairs(emm, adjust = "holm"))
+      pairs_df
+    }) |>
+    ungroup()
+  cat("\nPairwise contrasts (model_size, Holm-adjusted, at mean log2 perplexity):\n")
+  print(size_comparison |> select(corpus, contrast, estimate, SE, t.ratio, p.value), n = Inf)
+}
+
 # Label the best-trained (lowest-perplexity) checkpoint per (corpus, model_size)
 label_pts <- dat_plot |>
   group_by(corpus, model_size) |>
@@ -1760,7 +1789,7 @@ ggplot(dat_plot,
               linetype = "dashed", linewidth = 0.9, alpha = 0.12) +
   geom_text(data = label_pts,
             aes(label = model_size),
-            hjust = 1.2, vjust = -0.4,
+            hjust = -0.15, vjust = -0.4,
             size  = 3.8, fontface = "bold",
             show.legend = FALSE) +
   scale_x_continuous(
@@ -1871,7 +1900,7 @@ if (!file.exists(VAL_PPL_CSV)) {
                   linetype = "dashed", linewidth = 0.9, alpha = 0.12) +
       geom_text(data = label_pts_val,
                 aes(label = model_size),
-                hjust = 1.2, vjust = -0.4,
+                hjust = -0.15, vjust = -0.4,
                 size  = 3.8, fontface = "bold",
                 show.legend = FALSE) +
       scale_x_continuous(
