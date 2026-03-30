@@ -39,8 +39,9 @@ except ImportError:
 
 try:
     from datasets import load_dataset
+    from huggingface_hub import list_repo_files
 except ImportError:
-    sys.exit("Install: pip install datasets pandas scipy")
+    sys.exit("Install: pip install datasets huggingface_hub pandas scipy")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PILE_DATASET = "monology/pile-uncopyrighted"
@@ -99,7 +100,7 @@ def build_automaton(entries):
 
 # ── Worker function (runs in each subprocess) ─────────────────────────────────
 def process_shard(args):
-    shard_idx, n_shards, entries, partial_dir = args
+    shard_idx, n_shards, entries, partial_dir, file_list = args
     partial_path = Path(partial_dir) / f"shard_{shard_idx:04d}.json"
 
     if partial_path.exists():
@@ -112,8 +113,9 @@ def process_shard(args):
     nonalpha_counts = [0] * n
 
     try:
-        dataset = load_dataset(PILE_DATASET, split=PILE_SPLIT, streaming=True)
-        shard   = dataset.shard(num_shards=n_shards, index=shard_idx)
+        # file_list is passed in; load only this worker's parquet files
+        shard     = load_dataset("parquet", data_files={"train": file_list},
+                                 split="train", streaming=True)
         est_total = DATASET_TOTAL_DOCS // n_shards
 
         docs = 0
@@ -170,12 +172,32 @@ def main():
 
     PARTIAL_DIR.mkdir(exist_ok=True)
 
+    # ── Enumerate parquet files and distribute across workers ──────────────────
+    logger.info(f"Listing parquet files in {PILE_DATASET} ...")
+    all_files = sorted(
+        f"hf://datasets/{PILE_DATASET}/{f}"
+        for f in list_repo_files(PILE_DATASET, repo_type="dataset")
+        if f.endswith(".parquet")
+    )
+    n_files = len(all_files)
+    logger.info(f"  {n_files} parquet files found")
+
+    # Clamp N_WORKERS to number of available files
+    n_workers = min(N_WORKERS, n_files)
+    if n_workers < N_WORKERS:
+        logger.warning(f"  Only {n_files} files — reducing workers to {n_workers}")
+
+    # Round-robin assignment of files to workers
+    file_groups = [[] for _ in range(n_workers)]
+    for i, f in enumerate(all_files):
+        file_groups[i % n_workers].append(f)
+
     # Determine which shards still need processing
     done_shards = {
         int(p.stem.split("_")[1])
         for p in PARTIAL_DIR.glob("shard_*.json")
     }
-    todo_shards = [i for i in range(N_WORKERS) if i not in done_shards]
+    todo_shards = [i for i in range(n_workers) if i not in done_shards]
 
     if not todo_shards:
         logger.info("All shards already complete — proceeding to merge.")
@@ -185,11 +207,11 @@ def main():
             f"({len(done_shards)} already done) with {len(todo_shards)} workers ..."
         )
         worker_args = [
-            (i, N_WORKERS, entries, str(PARTIAL_DIR))
+            (i, n_workers, entries, str(PARTIAL_DIR), file_groups[i])
             for i in todo_shards
         ]
         with mp.Pool(processes=len(todo_shards)) as pool:
-            with tqdm(total=N_WORKERS, initial=len(done_shards),
+            with tqdm(total=n_workers, initial=len(done_shards),
                       desc="shards complete", unit="shard",
                       position=8, leave=True) as overall:
                 for _ in pool.imap_unordered(process_shard, worker_args):
@@ -201,7 +223,7 @@ def main():
     nonalpha_totals = [0] * len(entries)
     total_docs = 0
 
-    for i in range(N_WORKERS):
+    for i in range(n_workers):
         pfile = PARTIAL_DIR / f"shard_{i:04d}.json"
         if not pfile.exists():
             logger.error(f"Missing shard file: {pfile} — cannot merge. Re-run script.")
