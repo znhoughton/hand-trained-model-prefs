@@ -46,7 +46,10 @@ except ImportError:
 PILE_DATASET = "monology/pile-uncopyrighted"
 PILE_SPLIT   = "train"
 N_WORKERS    = 32      # set to number of available CPU cores
-REPORT_EVERY = 50_000  # log progress every N documents per shard
+
+# Approximate total docs in monology/pile-uncopyrighted (from dataset card).
+# Used only for tqdm ETA — does not affect correctness.
+DATASET_TOTAL_DOCS = 210_607_728
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR  = Path(__file__).resolve().parent
