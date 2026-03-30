@@ -39,7 +39,7 @@ except ImportError:
 
 try:
     from datasets import load_dataset
-    from huggingface_hub import list_repo_files
+    from huggingface_hub import HfFileSystem
 except ImportError:
     sys.exit("Install: pip install datasets huggingface_hub pandas scipy")
 
@@ -173,14 +173,22 @@ def main():
     PARTIAL_DIR.mkdir(exist_ok=True)
 
     # ── Enumerate parquet files and distribute across workers ──────────────────
-    logger.info(f"Listing parquet files in {PILE_DATASET} ...")
-    all_files = sorted(
-        f"hf://datasets/{PILE_DATASET}/{f}"
-        for f in list_repo_files(PILE_DATASET, repo_type="dataset")
-        if f.endswith(".parquet")
-    )
+    logger.info(f"Listing parquet files in {PILE_DATASET} via HfFileSystem ...")
+    fs = HfFileSystem()
+    # HfFileSystem paths look like: datasets/monology/pile-uncopyrighted/data/...
+    raw_paths = fs.glob(f"datasets/{PILE_DATASET}/**/*.parquet")
+    if not raw_paths:
+        # Some repos store files without a subdirectory
+        raw_paths = fs.glob(f"datasets/{PILE_DATASET}/*.parquet")
+    all_files = sorted(f"hf://{p}" for p in raw_paths)
     n_files = len(all_files)
     logger.info(f"  {n_files} parquet files found")
+    if n_files == 0:
+        # Debug: show what IS in the repo
+        top = fs.ls(f"datasets/{PILE_DATASET}", detail=False)
+        logger.error(f"No parquet files found. Repo top-level contents: {top}")
+        sys.exit(1)
+    logger.info(f"  First file: {all_files[0]}")
 
     # Clamp N_WORKERS to number of available files
     n_workers = min(N_WORKERS, n_files)
