@@ -22,6 +22,7 @@
 
 library(tidyverse)
 library(patchwork)
+library(lme4)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR <- tryCatch(
@@ -34,7 +35,8 @@ SCRIPT_DIR <- tryCatch(
 BASE_DIR   <- normalizePath(file.path(SCRIPT_DIR, "..", ".."), mustWork = FALSE)
 DATA_DIR   <- file.path(BASE_DIR, "Data")
 
-PREFS_CSV     <- file.path(SCRIPT_DIR, "oh_schuler_prefs.csv")
+PREFS_CSV          <- file.path(SCRIPT_DIR, "oh_schuler_prefs.csv")
+PREFS_BY_PROMPT_CSV <- file.path(SCRIPT_DIR, "oh_schuler_prefs_by_prompt.csv")
 PPL_CSV       <- file.path(SCRIPT_DIR, "oh_schuler_perplexity.csv")
 HUMAN_CSV     <- file.path(DATA_DIR, "all_human_data.csv")
 BINOMS_CSV    <- file.path(DATA_DIR, "nonce_and_attested_binoms.csv")
@@ -67,6 +69,15 @@ human_trials <- human_trials_all |> filter(binom %in% attested_binoms)
 
 model_prefs_all <- read_csv(PREFS_CSV, show_col_types = FALSE)
 model_prefs     <- model_prefs_all |> filter(binom %in% attested_binoms)
+
+# Per-prompt preferences for mixed model (if available)
+has_by_prompt <- file.exists(PREFS_BY_PROMPT_CSV)
+if (has_by_prompt) {
+  model_prefs_by_prompt <- read_csv(PREFS_BY_PROMPT_CSV, show_col_types = FALSE) |>
+    filter(binom %in% attested_binoms)
+} else {
+  message("⚠  Per-prompt preferences not found — right panel will use averaged data with lm().")
+}
 
 ppl <- read_csv(PPL_CSV, show_col_types = FALSE)
 
@@ -146,8 +157,12 @@ if (use_pile_freq) {
 # ── Helper: choose RelFreq predictor per model family ─────────────────────────
 # OPT  → Pile freq_prob_c (if available)
 # GPT-2 / GPT-Neo → Google Books RelFreq (no comparable training-data proxy)
+# OPT and OLMo were both trained on large web corpora → use Pile freq when available.
+# GPT-2 / GPT-Neo → fall back to Google Books RelFreq.
+PILE_FREQ_FAMILIES <- c("OPT", "OLMo")
+
 choose_freq <- function(d, family) {
-  if (use_pile_freq && family == "OPT" && "freq_prob_c_pile" %in% names(d)) {
+  if (use_pile_freq && family %in% PILE_FREQ_FAMILIES && "freq_prob_c_pile" %in% names(d)) {
     d$freq_use <- d$freq_prob_c_pile
   } else {
     d$freq_use <- d$RelFreq
@@ -175,15 +190,21 @@ delta_ll <- dat |>
   }) |>
   ungroup()
 
-# ── Fit item-level regression for AbsPref coefficient ─────────────────────────
-message("Fitting AbsPref item-level regressions ...")
-abspref_coef <- model_prefs |>
+# ── Fit item-level mixed model for AbsPref coefficient ────────────────────────
+# Uses per-prompt data (one row per binom×prompt) with random intercepts for
+# binom and prompt. Falls back to lm() on averaged data if by-prompt CSV absent.
+message("Fitting AbsPref mixed models ...")
+
+# Source data for the right-panel regression
+rp_source <- if (has_by_prompt) model_prefs_by_prompt else model_prefs
+
+abspref_coef <- rp_source |>
   group_by(model, model_family, model_params, model_label) |>
   group_modify(function(d, k) {
     d <- d |> left_join(binom_items, by = "binom")
 
     # Choose RelFreq and OverallFreq based on model family & availability
-    if (use_pile_freq && k$model_family == "OPT" &&
+    if (use_pile_freq && k$model_family %in% PILE_FREQ_FAMILIES &&
         "RelFreq_pile" %in% names(d) && "OverallFreq_pile" %in% names(d)) {
       d$rf  <- d$RelFreq_pile
       d$ovf <- d$OverallFreq_pile
@@ -195,14 +216,41 @@ abspref_coef <- model_prefs |>
     d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
     if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d)))
 
-    fit <- lm(preference ~ AbsPref + rf + ovf + AbsPref:ovf + rf:ovf, data = d)
-    cf  <- summary(fit)$coefficients
-    if (!"AbsPref" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d)))
+    # Center all predictors
+    d <- d |> mutate(
+      AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
+      rf_c      = as.numeric(scale(rf,      scale = FALSE)),
+      ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+    )
+
+    if (has_by_prompt && "prompt" %in% names(d)) {
+      fit <- tryCatch(
+        lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+               AbsPref_c:ovf_c + rf_c:ovf_c +
+               (1 | binom) + (1 | prompt),
+             data = d, REML = TRUE),
+        error = function(e) NULL
+      )
+      if (is.null(fit)) {
+        # Fall back to lm if lmer fails (e.g., singular fit)
+        fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
+                    AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+        cf  <- summary(fit)$coefficients
+      } else {
+        cf <- summary(fit)$coefficients
+      }
+    } else {
+      fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
+                  AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+      cf  <- summary(fit)$coefficients
+    }
+
+    if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d)))
     tibble(
-      estimate = cf["AbsPref", "Estimate"],
-      se       = cf["AbsPref", "Std. Error"],
-      t        = cf["AbsPref", "t value"],
-      p        = cf["AbsPref", "Pr(>|t|)"],
+      estimate = cf["AbsPref_c", "Estimate"],
+      se       = cf["AbsPref_c", "Std. Error"],
+      t        = cf["AbsPref_c", "t value"],
+      p        = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
       n        = nrow(d)
     )
   }) |>
@@ -215,7 +263,7 @@ results <- delta_ll |>
   filter(!is.na(perplexity)) |>
   mutate(
     params_M     = as.numeric(sub("M$", "", model_params)),
-    model_family = factor(model_family, levels = c("GPT-2", "GPT-Neo", "OPT"))
+    model_family = factor(model_family, levels = c("GPT-2", "GPT-Neo", "OPT", "OLMo"))
   ) |>
   arrange(model_family, params_M)
 
@@ -224,7 +272,7 @@ print(results |> select(model_family, model_label, model_params, perplexity, del
       n = Inf)
 
 # ── Plot aesthetics ───────────────────────────────────────────────────────────
-family_colours <- c("GPT-2" = "#2166ac", "GPT-Neo" = "#4dac26", "OPT" = "#b2182b")
+family_colours <- c("GPT-2" = "#2166ac", "GPT-Neo" = "#4dac26", "OPT" = "#b2182b", "OLMo" = "#d6604d")
 
 shared_layers <- list(
   scale_x_continuous(
@@ -233,6 +281,7 @@ shared_layers <- list(
     labels = scales::trans_format("log2", scales::math_format(2^.x))
   ),
   scale_colour_manual(values = family_colours, name = "Model family"),
+  scale_fill_manual(values = family_colours, name = "Model family"),
   guides(colour = guide_legend(override.aes = list(size = 3))),
   theme_classic(base_size = 13),
   theme(
@@ -284,10 +333,11 @@ p_left <- ggplot(filter(results, !is.na(delta_ll)),
 
 # ── Right panel: AbsPref coefficient ─────────────────────────────────────────
 p_right <- ggplot(filter(results, !is.na(estimate)),
-                  aes(x = perplexity, y = estimate, colour = model_family)) +
+                  aes(x = perplexity, y = estimate, colour = model_family,
+                      fill = model_family)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE,
-              linetype = "dashed", linewidth = 0.9,
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
+              linetype = "dashed", linewidth = 0.9, alpha = 0.15,
               aes(group = model_family)) +
   geom_point(size = 3, alpha = 0.9) +
   geom_text(aes(label = model_params),

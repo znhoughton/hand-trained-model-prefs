@@ -39,8 +39,9 @@ SCRIPT_DIR   = Path(__file__).parent
 BASE_DIR     = SCRIPT_DIR.parent.parent          # hand-trained-model-prefs/
 DATA_DIR     = BASE_DIR / "Data"
 HUMAN_CSV    = DATA_DIR / "all_human_data.csv"
-OUT_PREFS    = SCRIPT_DIR / "oh_schuler_prefs.csv"
-OUT_PPL      = SCRIPT_DIR / "oh_schuler_perplexity.csv"
+OUT_PREFS         = SCRIPT_DIR / "oh_schuler_prefs.csv"           # averaged across prompts
+OUT_PREFS_BY_PROMPT = SCRIPT_DIR / "oh_schuler_prefs_by_prompt.csv"  # per-prompt (for mixed models)
+OUT_PPL           = SCRIPT_DIR / "oh_schuler_perplexity.csv"
 STAGING_DIR  = SCRIPT_DIR / "staging"
 STAGING_DIR.mkdir(exist_ok=True)
 
@@ -49,24 +50,28 @@ STAGING_DIR.mkdir(exist_ok=True)
 # OPT ≥ 13B require multi-GPU or significant VRAM; set skip=True to omit them.
 MODEL_CONFIGS = {
     # GPT-2 family
-    "gpt2":                          {"params": "124M",   "family": "GPT-2",    "label": "GPT-2",        "skip": False},
-    "gpt2-medium":                   {"params": "355M",   "family": "GPT-2",    "label": "GPT-2 medium", "skip": False},
-    "gpt2-large":                    {"params": "774M",   "family": "GPT-2",    "label": "GPT-2 large",  "skip": False},
-    "gpt2-xl":                       {"params": "1542M",  "family": "GPT-2",    "label": "GPT-2 XL",     "skip": False},
+    "gpt2":                          {"params": "124M",    "family": "GPT-2",   "label": "GPT-2",         "skip": False},
+    "gpt2-medium":                   {"params": "355M",    "family": "GPT-2",   "label": "GPT-2 medium",  "skip": False},
+    "gpt2-large":                    {"params": "774M",    "family": "GPT-2",   "label": "GPT-2 large",   "skip": False},
+    "gpt2-xl":                       {"params": "1542M",   "family": "GPT-2",   "label": "GPT-2 XL",      "skip": False},
     # GPT-Neo family (EleutherAI)
-    "EleutherAI/gpt-neo-125m":       {"params": "125M",   "family": "GPT-Neo",  "label": "GPT-Neo 125M", "skip": False},
-    "EleutherAI/gpt-neo-1.3B":       {"params": "1300M",  "family": "GPT-Neo",  "label": "GPT-Neo 1.3B", "skip": False},
-    "EleutherAI/gpt-neo-2.7B":       {"params": "2700M",  "family": "GPT-Neo",  "label": "GPT-Neo 2.7B", "skip": False},
+    "EleutherAI/gpt-neo-125m":       {"params": "125M",    "family": "GPT-Neo", "label": "GPT-Neo 125M",  "skip": False},
+    "EleutherAI/gpt-neo-1.3B":       {"params": "1300M",   "family": "GPT-Neo", "label": "GPT-Neo 1.3B",  "skip": False},
+    "EleutherAI/gpt-neo-2.7B":       {"params": "2700M",   "family": "GPT-Neo", "label": "GPT-Neo 2.7B",  "skip": False},
     # OPT family (Meta)
-    "facebook/opt-125m":             {"params": "125M",   "family": "OPT",      "label": "OPT-125M",     "skip": False},
-    "facebook/opt-350m":             {"params": "350M",   "family": "OPT",      "label": "OPT-350M",     "skip": False},
-    "facebook/opt-1.3b":             {"params": "1300M",  "family": "OPT",      "label": "OPT-1.3B",     "skip": False},
-    "facebook/opt-2.7b":             {"params": "2700M",  "family": "OPT",      "label": "OPT-2.7B",     "skip": False},
-    "facebook/opt-6.7b":             {"params": "6700M",  "family": "OPT",      "label": "OPT-6.7B",     "skip": False},
-    "facebook/opt-13b":              {"params": "13000M", "family": "OPT",      "label": "OPT-13B",      "skip": False},
-    "facebook/opt-30b":              {"params": "30000M", "family": "OPT",      "label": "OPT-30B",      "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
-    "facebook/opt-66b":              {"params": "66000M", "family": "OPT",      "label": "OPT-66B",      "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
-    "facebook/opt-175b":             {"params": "175000M","family": "OPT",      "label": "OPT-175B",     "skip": False, "multi_gpu": True},
+    "facebook/opt-125m":             {"params": "125M",    "family": "OPT",     "label": "OPT-125M",      "skip": False},
+    "facebook/opt-350m":             {"params": "350M",    "family": "OPT",     "label": "OPT-350M",      "skip": False},
+    "facebook/opt-1.3b":             {"params": "1300M",   "family": "OPT",     "label": "OPT-1.3B",      "skip": False},
+    "facebook/opt-2.7b":             {"params": "2700M",   "family": "OPT",     "label": "OPT-2.7B",      "skip": False},
+    "facebook/opt-6.7b":             {"params": "6700M",   "family": "OPT",     "label": "OPT-6.7B",      "skip": False},
+    "facebook/opt-13b":              {"params": "13000M",  "family": "OPT",     "label": "OPT-13B",       "skip": False},
+    "facebook/opt-30b":              {"params": "30000M",  "family": "OPT",     "label": "OPT-30B",       "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
+    "facebook/opt-66b":              {"params": "66000M",  "family": "OPT",     "label": "OPT-66B",       "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
+    "facebook/opt-175b":             {"params": "175000M", "family": "OPT",     "label": "OPT-175B",      "skip": False, "multi_gpu": True},
+    # OLMo family (AllenAI) — trained on Dolma, a curated open web corpus
+    "allenai/OLMo-1B":               {"params": "1000M",   "family": "OLMo",    "label": "OLMo-1B",       "skip": False},
+    "allenai/OLMo-7B":               {"params": "7000M",   "family": "OLMo",    "label": "OLMo-7B",       "skip": False},
+    "allenai/OLMo-2-1124-13B":       {"params": "13000M",  "family": "OLMo",    "label": "OLMo-2-13B",    "skip": False, "multi_gpu": True},
 }
 
 # ── Sentence-frame prompts (same set as model-prefs-all-ckpts.py) ─────────────
@@ -314,7 +319,8 @@ def main():
     expected_binoms = set(binoms_df["Alpha"])
 
     # Load existing outputs for resume detection
-    done_prefs = pd.read_csv(OUT_PREFS) if OUT_PREFS.exists() else pd.DataFrame()
+    done_prefs         = pd.read_csv(OUT_PREFS)           if OUT_PREFS.exists()           else pd.DataFrame()
+    done_prefs_by_prompt = pd.read_csv(OUT_PREFS_BY_PROMPT) if OUT_PREFS_BY_PROMPT.exists() else pd.DataFrame()
     done_ppl   = pd.read_csv(OUT_PPL)   if OUT_PPL.exists()   else pd.DataFrame()
     done_ppl_models = set(done_ppl["model"]) if not done_ppl.empty else set()
 
@@ -380,7 +386,7 @@ def main():
                 prefs_df["model_params"] = cfg["params"]
                 prefs_df["model_label"]  = cfg["label"]
 
-                # Atomic incremental save: append this model's rows
+                # Atomic incremental save: append this model's rows (averaged)
                 combined_prefs = (
                     pd.concat([done_prefs, prefs_df], ignore_index=True)
                     if not done_prefs.empty else prefs_df
@@ -388,6 +394,19 @@ def main():
                 atomic_csv_write(combined_prefs, OUT_PREFS)
                 done_prefs = combined_prefs
                 print(f"  ✅ Preferences saved → {OUT_PREFS}")
+
+                # Also save per-prompt preferences for mixed-model analysis
+                raw_staging = pd.read_csv(staging_path)
+                raw_staging["model_family"] = cfg["family"]
+                raw_staging["model_params"] = cfg["params"]
+                raw_staging["model_label"]  = cfg["label"]
+                combined_by_prompt = (
+                    pd.concat([done_prefs_by_prompt, raw_staging], ignore_index=True)
+                    if not done_prefs_by_prompt.empty else raw_staging
+                )
+                atomic_csv_write(combined_by_prompt, OUT_PREFS_BY_PROMPT)
+                done_prefs_by_prompt = combined_by_prompt
+                print(f"  ✅ Per-prompt preferences saved → {OUT_PREFS_BY_PROMPT}")
 
             # ── Validation perplexity ─────────────────────────────────────────
             if not ppl_done:
