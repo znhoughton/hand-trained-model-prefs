@@ -366,12 +366,13 @@ def main():
                 if multi_gpu:
                     model = AutoModelForCausalLM.from_pretrained(
                         model_id, torch_dtype=dtype, device_map="auto",
-                        cache_dir=tmp_cache,
+                        low_cpu_mem_usage=True, cache_dir=tmp_cache,
                     ).eval()
                     print(f"  Loaded with device_map='auto' across {torch.cuda.device_count()} GPUs")
                 else:
                     model = AutoModelForCausalLM.from_pretrained(
-                        model_id, torch_dtype=dtype, cache_dir=tmp_cache,
+                        model_id, torch_dtype=dtype,
+                        low_cpu_mem_usage=True, cache_dir=tmp_cache,
                     ).to(device).eval()
             else:
                 print("  All prompts already in staging — skipping model load.")
@@ -418,11 +419,12 @@ def main():
                     if multi_gpu:
                         model = AutoModelForCausalLM.from_pretrained(
                             model_id, torch_dtype=dtype, device_map="auto",
-                            cache_dir=tmp_cache,
+                            low_cpu_mem_usage=True, cache_dir=tmp_cache,
                         ).eval()
                     else:
                         model = AutoModelForCausalLM.from_pretrained(
-                            model_id, torch_dtype=dtype, cache_dir=tmp_cache,
+                            model_id, torch_dtype=dtype,
+                            low_cpu_mem_usage=True, cache_dir=tmp_cache,
                         ).to(device).eval()
 
                 print("  Computing validation perplexity (WikiText-2 test) ...")
