@@ -176,10 +176,9 @@ def main():
     logger.info(f"Listing parquet files in {PILE_DATASET} via HfFileSystem ...")
     fs = HfFileSystem()
     # HfFileSystem paths look like: datasets/monology/pile-uncopyrighted/data/...
-    raw_paths = fs.glob(f"datasets/{PILE_DATASET}/**/*.parquet")
+    raw_paths = fs.glob(f"datasets/{PILE_DATASET}/train/*.parquet")
     if not raw_paths:
-        # Some repos store files without a subdirectory
-        raw_paths = fs.glob(f"datasets/{PILE_DATASET}/*.parquet")
+        raw_paths = fs.glob(f"datasets/{PILE_DATASET}/**/*.parquet")
     all_files = sorted(f"hf://{p}" for p in raw_paths)
     n_files = len(all_files)
     logger.info(f"  {n_files} parquet files found")
