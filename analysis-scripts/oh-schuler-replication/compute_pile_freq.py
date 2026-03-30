@@ -114,22 +114,31 @@ def process_shard(args):
     try:
         dataset = load_dataset(PILE_DATASET, split=PILE_SPLIT, streaming=True)
         shard   = dataset.shard(num_shards=n_shards, index=shard_idx)
+        est_total = DATASET_TOTAL_DOCS // n_shards
 
         docs = 0
-        for doc in shard:
-            text = doc.get("text", "")
-            if not text:
-                continue
-            text_lower = text.lower()
-            for _, slots in automaton.iter(text_lower):
-                for idx, form_type in slots:
-                    if form_type == "alpha":
-                        alpha_counts[idx] += 1
-                    else:
-                        nonalpha_counts[idx] += 1
-            docs += 1
-            if docs % REPORT_EVERY == 0:
-                print(f"[shard {shard_idx:02d}] {docs:,} docs", flush=True)
+        with tqdm(
+            total=est_total,
+            desc=f"shard {shard_idx:02d}",
+            unit="doc",
+            unit_scale=True,
+            position=shard_idx % 8,   # stagger bars so ≤8 show at once
+            leave=True,
+            dynamic_ncols=True,
+        ) as pbar:
+            for doc in shard:
+                text = doc.get("text", "")
+                if not text:
+                    continue
+                text_lower = text.lower()
+                for _, slots in automaton.iter(text_lower):
+                    for idx, form_type in slots:
+                        if form_type == "alpha":
+                            alpha_counts[idx] += 1
+                        else:
+                            nonalpha_counts[idx] += 1
+                docs += 1
+                pbar.update(1)
 
     except KeyboardInterrupt:
         print(f"[shard {shard_idx:02d}] interrupted at {docs:,} docs — partial not saved",
@@ -180,7 +189,11 @@ def main():
             for i in todo_shards
         ]
         with mp.Pool(processes=len(todo_shards)) as pool:
-            pool.map(process_shard, worker_args)
+            with tqdm(total=N_WORKERS, initial=len(done_shards),
+                      desc="shards complete", unit="shard",
+                      position=8, leave=True) as overall:
+                for _ in pool.imap_unordered(process_shard, worker_args):
+                    overall.update(1)
 
     # ── Merge shard partials ───────────────────────────────────────────────────
     logger.info("Merging shard results ...")
