@@ -31,35 +31,24 @@ OUT_PNG    <- file.path(SCRIPT_DIR, "delta_ll_plot.png")
 # ── Load data ─────────────────────────────────────────────────────────────────
 message("Loading data ...")
 
-# Individual human trial data
 human_trials <- read_csv(HUMAN_CSV, show_col_types = FALSE) |>
-  mutate(
-    binom      = Alpha,
-    resp_alpha = as.integer(resp == "alpha")
-  ) |>
+  mutate(binom = Alpha, resp_alpha = as.integer(resp == "alpha")) |>
   select(binom, resp_alpha, RelFreq)
 
-# Model preferences (already averaged over prompts)
 model_prefs <- read_csv(PREFS_CSV, show_col_types = FALSE)
+ppl         <- read_csv(PPL_CSV,   show_col_types = FALSE)
 
-# Validation perplexities
-ppl <- read_csv(PPL_CSV, show_col_types = FALSE)
+message(sprintf("  %d human trials, %d unique binomials, %d models",
+                nrow(human_trials), n_distinct(human_trials$binom),
+                n_distinct(model_prefs$model)))
 
-message(sprintf(
-  "  %d human trials, %d unique binomials, %d models",
-  nrow(human_trials),
-  n_distinct(human_trials$binom),
-  n_distinct(model_prefs$model)
-))
-
-# ── Join trials with model preferences ───────────────────────────────────────
+# ── Join & compute ΔLL per model ─────────────────────────────────────────────
 dat <- human_trials |>
-  inner_join(model_prefs, by = "binom")   # RelFreq from human data (static corpus freq)
+  inner_join(model_prefs, by = "binom")
 
-# ── ΔLL per model ─────────────────────────────────────────────────────────────
 message("Fitting logistic regressions ...")
 delta_ll <- dat |>
-  group_by(model, model_params, model_label) |>
+  group_by(model, model_family, model_params, model_label) |>
   group_modify(function(d, k) {
     baseline_mod <- glm(resp_alpha ~ RelFreq,              family = binomial, data = d)
     full_mod     <- glm(resp_alpha ~ RelFreq + preference, family = binomial, data = d)
@@ -71,74 +60,73 @@ delta_ll <- dat |>
   }) |>
   ungroup()
 
-# ── Join perplexity ───────────────────────────────────────────────────────────
 results <- delta_ll |>
   left_join(ppl |> select(model, perplexity), by = "model")
 
 message("\nResults:")
-print(results |> select(model_label, model_params, perplexity, delta_ll, n_items))
+print(results |> select(model_family, model_label, model_params, perplexity, delta_ll),
+      n = Inf)
 
 # ── Plot aesthetics ───────────────────────────────────────────────────────────
-# Order models by parameter count for colour scale
-param_order  <- c("117M", "345M", "762M", "1542M")
-model_colours <- c(
-  "117M"  = "#2166ac",
-  "345M"  = "#74add1",
-  "762M"  = "#f4a582",
-  "1542M" = "#b2182b"
-)
-model_shapes <- c(
-  "117M"  = 16L,
-  "345M"  = 17L,
-  "762M"  = 15L,
-  "1542M" = 18L
-)
-
+# Numeric param count for ordering within each family
 results <- results |>
-  mutate(model_params = factor(model_params, levels = param_order))
+  mutate(
+    params_M = as.numeric(sub("M$", "", model_params)),
+    model_family = factor(model_family, levels = c("GPT-2", "GPT-Neo", "OPT"))
+  ) |>
+  arrange(model_family, params_M)
 
-# ── Significance test (slope of log2 perplexity → ΔLL) ───────────────────────
-# With only 4 points, treat this as descriptive; report r and p from cor.test.
-ct <- cor.test(log2(results$perplexity), results$delta_ll)
-slope_lbl <- sprintf(
-  "r = %.2f, t(%d) = %.2f, p %s %.3f",
-  ct$estimate, ct$parameter, ct$statistic,
-  ifelse(ct$p.value < .001, "<", "="),
-  max(ct$p.value, 0.001)
-)
-message("\nCorrelation (log2 perplexity × ΔLL): ", slope_lbl)
+family_colours <- c("GPT-2" = "#2166ac", "GPT-Neo" = "#4dac26", "OPT" = "#b2182b")
+
+# ── Significance test per family ──────────────────────────────────────────────
+slope_tests <- results |>
+  group_by(model_family) |>
+  group_modify(function(d, k) {
+    if (nrow(d) < 3) return(tibble(r = NA_real_, p = NA_real_))
+    ct <- cor.test(log2(d$perplexity), d$delta_ll)
+    tibble(r = ct$estimate, p = ct$p.value, df = ct$parameter)
+  }) |>
+  ungroup() |>
+  mutate(lbl = sprintf("r = %.2f, p %s %.3f",
+                       r,
+                       ifelse(p < .001, "<", "="),
+                       pmax(p, 0.001)))
+
+message("\nSlope tests (log2 perplexity × ΔLL) by family:")
+print(slope_tests)
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 p <- ggplot(results,
             aes(x = perplexity, y = delta_ll,
-                colour = model_params, shape = model_params)) +
+                colour = model_family, shape = model_family)) +
+  facet_wrap(~ model_family, scales = "free_x") +
   geom_smooth(method = "lm", formula = y ~ x, se = FALSE,
-              linetype = "dashed", linewidth = 0.9,
-              colour = "grey50", aes(group = 1)) +  # single line across all models
-  geom_point(size = 4) +
+              linetype = "dashed", linewidth = 0.9) +
+  geom_point(aes(size = params_M), alpha = 0.9) +
   geom_text(aes(label = model_label),
-            hjust = -0.12, vjust = 0.4,
-            size = 3.5, fontface = "bold",
-            show.legend = FALSE) +
-  annotate("text", x = Inf, y = -Inf,
-           label = slope_lbl,
-           hjust = 1.05, vjust = -0.5,
-           size = 3.5, fontface = "italic", colour = "grey30") +
+            hjust = -0.1, vjust = 0.4,
+            size = 3, fontface = "bold", show.legend = FALSE) +
+  geom_text(data = slope_tests, aes(label = lbl),
+            x = -Inf, y = Inf, hjust = -0.05, vjust = 1.4,
+            size = 3.2, fontface = "italic", colour = "grey30",
+            inherit.aes = FALSE) +
   scale_x_continuous(
     "Validation perplexity on WikiText-2 (lower \u2192 better)",
     trans  = "log2",
     labels = scales::trans_format("log2", scales::math_format(2^.x))
   ) +
   scale_y_continuous("\u0394LL") +
-  scale_colour_manual(values = model_colours, name = "Parameters") +
-  scale_shape_manual(values  = model_shapes,  name = "Parameters") +
+  scale_colour_manual(values = family_colours, name = "Model family") +
+  scale_shape_manual(values = c("GPT-2" = 16L, "GPT-Neo" = 17L, "OPT" = 15L),
+                     name = "Model family") +
+  scale_size_continuous(name = "Parameters (M)", range = c(2, 6)) +
   guides(colour = guide_legend(override.aes = list(size = 3)),
          shape  = guide_legend(override.aes = list(size = 3))) +
   labs(
-    title    = "\u0394LL vs. validation perplexity — GPT-2 family (Oh & Schuler 2023 models)",
+    title    = "\u0394LL vs. validation perplexity — Oh & Schuler (2023) models",
     subtitle = paste0(
       "\u0394LL = logLik(resp_alpha \u223c RelFreq + model pref) \u2212 logLik(resp_alpha \u223c RelFreq). ",
-      "One point per model. Dashed = OLS fit."
+      "One point per model. Dashed = OLS fit per family."
     )
   ) +
   theme_classic(base_size = 13) +

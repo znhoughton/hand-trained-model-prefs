@@ -39,13 +39,29 @@ HUMAN_CSV    = DATA_DIR / "all_human_data.csv"
 OUT_PREFS    = SCRIPT_DIR / "oh_schuler_prefs.csv"
 OUT_PPL      = SCRIPT_DIR / "oh_schuler_perplexity.csv"
 
-# ── Models (Oh & Schuler 2023 use the GPT-2 family) ──────────────────────────
-# Parameter counts are approximate; used only for labelling.
+# ── Models (Oh & Schuler 2023: GPT-2, GPT-Neo, OPT) ─────────────────────────
+# 16 models total across three families.
+# OPT ≥ 13B require multi-GPU or significant VRAM; set skip=True to omit them.
 MODEL_CONFIGS = {
-    "gpt2":              {"params": "117M",  "label": "GPT-2 small"},
-    "gpt2-medium":       {"params": "345M",  "label": "GPT-2 medium"},
-    "gpt2-large":        {"params": "762M",  "label": "GPT-2 large"},
-    "gpt2-xl":           {"params": "1542M", "label": "GPT-2 XL"},
+    # GPT-2 family
+    "gpt2":                          {"params": "124M",   "family": "GPT-2",    "label": "GPT-2",        "skip": False},
+    "gpt2-medium":                   {"params": "355M",   "family": "GPT-2",    "label": "GPT-2 medium", "skip": False},
+    "gpt2-large":                    {"params": "774M",   "family": "GPT-2",    "label": "GPT-2 large",  "skip": False},
+    "gpt2-xl":                       {"params": "1542M",  "family": "GPT-2",    "label": "GPT-2 XL",     "skip": False},
+    # GPT-Neo family (EleutherAI)
+    "EleutherAI/gpt-neo-125m":       {"params": "125M",   "family": "GPT-Neo",  "label": "GPT-Neo 125M", "skip": False},
+    "EleutherAI/gpt-neo-1.3B":       {"params": "1300M",  "family": "GPT-Neo",  "label": "GPT-Neo 1.3B", "skip": False},
+    "EleutherAI/gpt-neo-2.7B":       {"params": "2700M",  "family": "GPT-Neo",  "label": "GPT-Neo 2.7B", "skip": False},
+    # OPT family (Meta)
+    "facebook/opt-125m":             {"params": "125M",   "family": "OPT",      "label": "OPT-125M",     "skip": False},
+    "facebook/opt-350m":             {"params": "350M",   "family": "OPT",      "label": "OPT-350M",     "skip": False},
+    "facebook/opt-1.3b":             {"params": "1300M",  "family": "OPT",      "label": "OPT-1.3B",     "skip": False},
+    "facebook/opt-2.7b":             {"params": "2700M",  "family": "OPT",      "label": "OPT-2.7B",     "skip": False},
+    "facebook/opt-6.7b":             {"params": "6700M",  "family": "OPT",      "label": "OPT-6.7B",     "skip": False},
+    "facebook/opt-13b":              {"params": "13000M", "family": "OPT",      "label": "OPT-13B",      "skip": False},
+    "facebook/opt-30b":              {"params": "30000M", "family": "OPT",      "label": "OPT-30B",      "skip": False},
+    "facebook/opt-66b":              {"params": "66000M", "family": "OPT",      "label": "OPT-66B",      "skip": False},
+    "facebook/opt-175b":             {"params": "175000M","family": "OPT",      "label": "OPT-175B",     "skip": False},
 }
 
 # ── Sentence-frame prompts (same set as model-prefs-all-ckpts.py) ─────────────
@@ -231,8 +247,12 @@ def main():
     all_ppl   = []
 
     for model_id, cfg in MODEL_CONFIGS.items():
+        if cfg.get("skip", False):
+            print(f"Skipping {model_id} (skip=True — insufficient VRAM)")
+            continue
+
         print("=" * 60)
-        print(f"Model: {model_id}  ({cfg['params']})")
+        print(f"Model: {model_id}  ({cfg['family']}, {cfg['params']})")
         print("=" * 60)
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -248,6 +268,7 @@ def main():
         # ── Binomial preferences ──
         print("  Scoring binomial preferences ...")
         prefs_df = score_binomials(model, tokenizer, binoms_df, model_id, device)
+        prefs_df["model_family"] = cfg["family"]
         prefs_df["model_params"] = cfg["params"]
         prefs_df["model_label"]  = cfg["label"]
         all_prefs.append(prefs_df)
@@ -258,6 +279,7 @@ def main():
         print(f"  Perplexity: {ppl:.2f}")
         all_ppl.append({
             "model":        model_id,
+            "model_family": cfg["family"],
             "model_params": cfg["params"],
             "model_label":  cfg["label"],
             "perplexity":   ppl,
