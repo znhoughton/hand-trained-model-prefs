@@ -113,8 +113,8 @@ def process_shard(args):
     nonalpha_counts = [0] * n
 
     try:
-        # file_list is passed in; load only this worker's parquet files
-        shard     = load_dataset("parquet", data_files={"train": file_list},
+        # file_list is passed in; load only this worker's .jsonl.zst files
+        shard     = load_dataset("json", data_files={"train": file_list},
                                  split="train", streaming=True)
         est_total = DATASET_TOTAL_DOCS // n_shards
 
@@ -176,16 +176,15 @@ def main():
     logger.info(f"Listing parquet files in {PILE_DATASET} via HfFileSystem ...")
     fs = HfFileSystem()
     # HfFileSystem paths look like: datasets/monology/pile-uncopyrighted/data/...
-    raw_paths = fs.glob(f"datasets/{PILE_DATASET}/train/*.parquet")
+    raw_paths = fs.glob(f"datasets/{PILE_DATASET}/train/*.jsonl.zst")
     if not raw_paths:
-        raw_paths = fs.glob(f"datasets/{PILE_DATASET}/**/*.parquet")
+        raw_paths = fs.glob(f"datasets/{PILE_DATASET}/**/*.jsonl.zst")
     all_files = sorted(f"hf://{p}" for p in raw_paths)
     n_files = len(all_files)
-    logger.info(f"  {n_files} parquet files found")
+    logger.info(f"  {n_files} .jsonl.zst files found")
     if n_files == 0:
-        # Debug: show what IS in the repo
         top = fs.ls(f"datasets/{PILE_DATASET}", detail=False)
-        logger.error(f"No parquet files found. Repo top-level contents: {top}")
+        logger.error(f"No data files found. Repo contents: {top}")
         sys.exit(1)
     logger.info(f"  First file: {all_files[0]}")
 
