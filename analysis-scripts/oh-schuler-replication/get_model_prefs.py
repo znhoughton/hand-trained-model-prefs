@@ -24,7 +24,6 @@ Requirements:
 import os
 import math
 import datetime
-import tempfile
 import shutil
 from pathlib import Path
 
@@ -350,13 +349,18 @@ def main():
 
         all_prompts_staged = len(completed_prompts) == len(LIST_OF_PROMPTS)
 
+        # ── Track success flags for cache cleanup ─────────────────────────────
+        prefs_done_now = prefs_done  # already done before this run
+        ppl_done_now   = ppl_done
+
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
 
         model     = None
-        tmp_cache = tempfile.mkdtemp(prefix="hf_prefs_")
+        tmp_cache = str(Path.home() / ".cache" / "hf_prefs" / model_safe)
+        Path(tmp_cache).mkdir(parents=True, exist_ok=True)
         try:
             if not all_prompts_staged:
                 # Need model to score missing prompts
@@ -365,8 +369,12 @@ def main():
                 print("  Loading model ...")
                 if multi_gpu:
                     model = AutoModelForCausalLM.from_pretrained(
-                        model_id, torch_dtype=dtype, device_map="auto",
-                        low_cpu_mem_usage=True, cache_dir=tmp_cache,
+                        model_id,
+                        dtype=torch.float16,
+                        device_map="auto",
+                        low_cpu_mem_usage=True,
+                        cache_dir=tmp_cache,
+                        max_memory={0: "75GiB", 1: "75GiB"},
                     ).eval()
                     print(f"  Loaded with device_map='auto' across {torch.cuda.device_count()} GPUs")
                 else:
@@ -408,6 +416,7 @@ def main():
                 atomic_csv_write(combined_by_prompt, OUT_PREFS_BY_PROMPT)
                 done_prefs_by_prompt = combined_by_prompt
                 print(f"  ✅ Per-prompt preferences saved → {OUT_PREFS_BY_PROMPT}")
+                prefs_done_now = True  # ← mark prefs as successfully completed
 
             # ── Validation perplexity ─────────────────────────────────────────
             if not ppl_done:
@@ -418,8 +427,9 @@ def main():
                     print("  Loading model for perplexity ...")
                     if multi_gpu:
                         model = AutoModelForCausalLM.from_pretrained(
-                            model_id, torch_dtype=dtype, device_map="auto",
+                            model_id, dtype=torch.float16, device_map="auto",
                             low_cpu_mem_usage=True, cache_dir=tmp_cache,
+                            max_memory={0: "75GiB", 1: "75GiB"},
                         ).eval()
                     else:
                         model = AutoModelForCausalLM.from_pretrained(
@@ -446,12 +456,18 @@ def main():
                 done_ppl = combined_ppl
                 done_ppl_models.add(model_id)
                 print(f"  ✅ Perplexity saved → {OUT_PPL}")
+                ppl_done_now = True  # ← mark perplexity as successfully completed
 
         finally:
             if model is not None:
                 del model
             if device == "cuda":
                 torch.cuda.empty_cache()
+
+        # Only delete the cache if both tasks completed successfully this run.
+        # If either failed (e.g. OOM), the cache is preserved so we don't
+        # re-download on the next attempt.
+        if prefs_done_now and ppl_done_now:
             shutil.rmtree(tmp_cache, ignore_errors=True)
             print(f"  🗑️  Model cache deleted.")
 
