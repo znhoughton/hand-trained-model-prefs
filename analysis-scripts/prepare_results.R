@@ -313,6 +313,33 @@ TERM_LABELS_BTRAJ <- c(
 extract_traj_and_save("pref_btraj_", TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "pref_btraj_coefs.csv")
 extract_traj_and_save("sg_btraj_",   TERM_LEVELS_BTRAJ, TERM_LABELS_BTRAJ, "sg_btraj_coefs.csv")
 
+# ── Pythia / OLMo AbsPref trajectory (from olmo_pythia_analyses.Rmd) ──────────
+# Fits use prefix "abspref_traj_" with terms: AbsPref_c, rf_c, ovf_c, interactions.
+# Token counts come from abspref_traj_meta.csv written by olmo_pythia_analyses.Rmd.
+abspref_meta_csv <- file.path(OUT_DIR, "abspref_traj_meta.csv")
+if (file.exists(abspref_meta_csv)) {
+  abspref_traj_meta <- read_csv(abspref_meta_csv, show_col_types = FALSE)
+  # Extend TRAJ_META with Pythia/OLMo entries so extract_traj_and_save resolves tokens
+  TRAJ_META <- bind_rows(
+    TRAJ_META,
+    abspref_traj_meta |> select(slug, ck_idx, tokens)
+  ) |> distinct(slug, ck_idx, .keep_all = TRUE)
+  message(sprintf("Extended TRAJ_META with abspref_traj_meta: %d total rows", nrow(TRAJ_META)))
+} else {
+  message("abspref_traj_meta.csv not found — run olmo_pythia_analyses.Rmd first to generate it.")
+}
+
+TERM_LEVELS_ABSPREF <- c(
+  "AbsPref_c", "rf_c", "ovf_c",
+  "AbsPref_c:ovf_c", "rf_c:ovf_c"
+)
+TERM_LABELS_ABSPREF <- c(
+  "AbsPref (GenPref)", "RelFreq", "OverallFreq (ln)",
+  "AbsPref \u00d7 OverallFreq", "RelFreq \u00d7 OverallFreq"
+)
+extract_traj_and_save("abspref_traj_", TERM_LEVELS_ABSPREF, TERM_LABELS_ABSPREF,
+                      "abspref_traj_coefs.csv")
+
 # ── Constraint–preference correlation trajectories ────────────────────────────
 # Computed directly from training_attested.csv (no brms loading needed).
 # Saves constraint_cor_traj.csv: one row per model × sampled checkpoint × constraint.

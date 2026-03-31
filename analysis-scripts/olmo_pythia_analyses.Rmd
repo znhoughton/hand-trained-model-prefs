@@ -518,7 +518,7 @@ ggplot(all_prop, aes(x = human_prop_alpha, y = model_prop_alpha)) +
 compute_r_traj <- function(ck_df, corpus_label, model_size_levels) {
   ck_df |>
     filter(binom %in% attested_binoms) |>
-    group_by(model, model_size, step, tokens) |>
+    group_by(model, model_size, step, tokens, binom) |>
     summarise(model_prop_alpha = mean(preference > 0), .groups = "drop") |>
     left_join(human_prop, by = "binom") |>
     group_by(model_size, step, tokens) |>
@@ -1068,6 +1068,12 @@ abspref_traj_meta <- bind_rows(
 message(sprintf("abspref_traj_meta: %d rows (%d models × up to %d checkpoints)",
                 nrow(abspref_traj_meta), n_distinct(abspref_traj_meta$slug),
                 N_TRAJ_CHECKPOINTS))
+
+# Save to results dir so prepare_results.R can use token counts as x-axis values
+RESULTS_DIR <- normalizePath(file.path(DATA_DIR, "results"), mustWork = FALSE)
+dir.create(RESULTS_DIR, showWarnings = FALSE, recursive = TRUE)
+readr::write_csv(abspref_traj_meta,
+                 file.path(RESULTS_DIR, "abspref_traj_meta.csv"))
 ```
 
 ```{r fit-abspref-traj}
