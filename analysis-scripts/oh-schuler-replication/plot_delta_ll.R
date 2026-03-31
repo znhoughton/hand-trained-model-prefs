@@ -35,12 +35,14 @@ SCRIPT_DIR <- tryCatch(
 BASE_DIR   <- normalizePath(file.path(SCRIPT_DIR, "..", ".."), mustWork = FALSE)
 DATA_DIR   <- file.path(BASE_DIR, "Data")
 
-PREFS_CSV          <- file.path(SCRIPT_DIR, "oh_schuler_prefs.csv")
+PREFS_CSV           <- file.path(SCRIPT_DIR, "oh_schuler_prefs.csv")
 PREFS_BY_PROMPT_CSV <- file.path(SCRIPT_DIR, "oh_schuler_prefs_by_prompt.csv")
-PPL_CSV       <- file.path(SCRIPT_DIR, "oh_schuler_perplexity.csv")
-HUMAN_CSV     <- file.path(DATA_DIR, "all_human_data.csv")
-BINOMS_CSV    <- file.path(DATA_DIR, "nonce_and_attested_binoms.csv")
-PILE_FREQ_CSV <- file.path(SCRIPT_DIR, "pile_corpus_freq.csv")
+PPL_CSV             <- file.path(SCRIPT_DIR, "oh_schuler_perplexity.csv")
+HUMAN_CSV           <- file.path(DATA_DIR, "all_human_data.csv")
+BINOMS_CSV          <- file.path(DATA_DIR, "nonce_and_attested_binoms.csv")
+PILE_FREQ_CSV       <- file.path(SCRIPT_DIR, "pile_corpus_freq.csv")
+TRAIN_CSV           <- file.path(BASE_DIR, "Data", "processed", "training_attested.csv")
+PYTHIA_PPL_CSV      <- file.path(BASE_DIR, "Data", "training_quality", "perplexity_results.csv")
 OUT_PDF       <- file.path(SCRIPT_DIR, "delta_ll_plot.pdf")
 OUT_PNG       <- file.path(SCRIPT_DIR, "delta_ll_plot.png")
 
@@ -256,14 +258,84 @@ abspref_coef <- rp_source |>
   }) |>
   ungroup()
 
+# ── Pythia final-checkpoint ΔLL ───────────────────────────────────────────────
+# Pythia data lives in training_attested.csv (already processed). Dynamic
+# per-checkpoint exposures are NOT available for Pythia, so we use static
+# RelFreq (Google Books) as the baseline predictor.
+pythia_results <- NULL
+if (file.exists(TRAIN_CSV)) {
+  message("Loading Pythia final-checkpoint data from training_attested.csv ...")
+
+  parse_pythia_size <- function(x) dplyr::case_when(
+    grepl("160m",    x, TRUE) ~ "160M",
+    grepl("410m",    x, TRUE) ~ "410M",
+    grepl("1[._]4b", x, TRUE) ~ "1400M",
+    grepl("2[._]8b", x, TRUE) ~ "2800M",
+    TRUE ~ NA_character_
+  )
+
+  train_all <- read_csv(TRAIN_CSV, show_col_types = FALSE)
+
+  pythia_final <- train_all |>
+    filter(grepl("pythia", model, TRUE)) |>
+    group_by(model) |>
+    filter(step == max(step)) |>
+    ungroup() |>
+    filter(binom %in% attested_binoms) |>
+    mutate(
+      model_family = "Pythia",
+      model_params = parse_pythia_size(model),
+      model_label  = paste0("Pythia-", parse_pythia_size(model))
+    ) |>
+    filter(!is.na(model_params))
+
+  # Join static RelFreq from human trials
+  pythia_dat <- human_trials |>
+    select(binom, resp_alpha, RelFreq) |>
+    inner_join(pythia_final |> select(model, model_family, model_params, model_label,
+                                      binom, preference),
+               by = "binom")
+
+  pythia_delta_ll <- pythia_dat |>
+    group_by(model, model_family, model_params, model_label) |>
+    group_modify(function(d, k) {
+      d <- filter(d, !is.na(RelFreq), !is.na(preference))
+      if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
+      baseline <- glm(resp_alpha ~ RelFreq,              family = binomial, data = d)
+      full     <- glm(resp_alpha ~ RelFreq + preference, family = binomial, data = d)
+      tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+             n_trials = nrow(d), n_items = n_distinct(d$binom))
+    }) |>
+    ungroup()
+
+  # Pythia perplexity — from oh_schuler_perplexity.csv (WikiText-2, same benchmark
+  # as all other models in this plot). Computed by get_model_prefs.py with ppl_only=True.
+  pythia_results <- pythia_delta_ll |>
+    left_join(ppl |> select(model, perplexity), by = "model") |>
+    mutate(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_,
+           params_M = as.numeric(sub("M$", "", model_params)))
+
+  message(sprintf("  Pythia: %d models", nrow(pythia_results)))
+} else {
+  message("training_attested.csv not found — Pythia points omitted.")
+}
+
 # ── Combine and join perplexity ───────────────────────────────────────────────
 results <- delta_ll |>
   left_join(abspref_coef, by = c("model", "model_family", "model_params", "model_label")) |>
   left_join(ppl |> select(model, perplexity), by = "model") |>
   filter(!is.na(perplexity)) |>
+  mutate(params_M = as.numeric(sub("M$", "", model_params)))
+
+if (!is.null(pythia_results) && nrow(pythia_results) > 0) {
+  results <- bind_rows(results, pythia_results |> filter(!is.na(perplexity)))
+}
+
+results <- results |>
   mutate(
-    params_M     = as.numeric(sub("M$", "", model_params)),
-    model_family = factor(model_family, levels = c("GPT-2", "GPT-Neo", "OPT", "OLMo-1", "OLMo-2", "OLMo-3"))
+    model_family = factor(model_family,
+                          levels = c("GPT-2", "GPT-Neo", "OPT",
+                                     "OLMo-1", "OLMo-2", "OLMo-3", "Pythia"))
   ) |>
   arrange(model_family, params_M)
 
@@ -278,7 +350,8 @@ family_colours <- c(
   "OPT"    = "#b2182b",
   "OLMo-1" = "#d6604d",
   "OLMo-2" = "#f4a582",
-  "OLMo-3" = "#92c5de"
+  "OLMo-3" = "#92c5de",
+  "Pythia" = "#762a83"
 )
 
 shared_layers <- list(

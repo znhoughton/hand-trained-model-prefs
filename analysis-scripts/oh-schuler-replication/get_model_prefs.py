@@ -67,6 +67,12 @@ MODEL_CONFIGS = {
     "facebook/opt-30b":              {"params": "30000M",  "family": "OPT",     "label": "OPT-30B",       "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
     "facebook/opt-66b":              {"params": "66000M",  "family": "OPT",     "label": "OPT-66B",       "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
     "facebook/opt-175b":             {"params": "175000M", "family": "OPT",     "label": "OPT-175B",      "skip": True,  "multi_gpu": True},  # not publicly available on HuggingFace
+    # Pythia family (EleutherAI) — trained on The Pile
+    # Binomial prefs already in training_attested.csv; added here for WikiText-2 perplexity only.
+    "EleutherAI/pythia-160m":        {"params": "160M",    "family": "Pythia",  "label": "Pythia-160M",      "skip": False, "ppl_only": True},
+    "EleutherAI/pythia-410m":        {"params": "410M",    "family": "Pythia",  "label": "Pythia-410M",      "skip": False, "ppl_only": True},
+    "EleutherAI/pythia-1.4b":        {"params": "1400M",   "family": "Pythia",  "label": "Pythia-1.4B",      "skip": False, "ppl_only": True},
+    "EleutherAI/pythia-2.8b":        {"params": "2800M",   "family": "Pythia",  "label": "Pythia-2.8B",      "skip": False, "ppl_only": True},
     # OLMo Gen 1 (AllenAI, Feb 2024) — trained on Dolma
     "allenai/OLMo-1B-hf":            {"params": "1000M",   "family": "OLMo-1",  "label": "OLMo-1B",          "skip": False},
     "allenai/OLMo-7B-hf":            {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B",          "skip": False},
@@ -345,19 +351,26 @@ def main():
         print(f"Model: {model_id}  ({cfg['family']}, {cfg['params']})")
         print("=" * 60)
 
+        ppl_only = cfg.get("ppl_only", False)
+
         # ── Check if this model is already fully done in both output files ────
         completed_prompts = get_completed_prompts(staging_path, expected_binoms)
-        prefs_done = (not done_prefs.empty and
-                      model_id in done_prefs.get("model", pd.Series()).values and
-                      expected_binoms.issubset(
-                          set(done_prefs[done_prefs["model"] == model_id]["binom"])))
+        prefs_done = ppl_only or (
+            not done_prefs.empty and
+            model_id in done_prefs.get("model", pd.Series()).values and
+            expected_binoms.issubset(
+                set(done_prefs[done_prefs["model"] == model_id]["binom"]))
+        )
         ppl_done = model_id in done_ppl_models
 
         if prefs_done and ppl_done:
             print("  ✅ Already fully scored and saved — skipping.\n")
             continue
 
-        all_prompts_staged = len(completed_prompts) == len(LIST_OF_PROMPTS)
+        if ppl_only:
+            print("  [ppl_only] Binomial scoring skipped — computing WikiText-2 perplexity only.")
+
+        all_prompts_staged = ppl_only or len(completed_prompts) == len(LIST_OF_PROMPTS)
 
         # ── Track success flags for cache cleanup ─────────────────────────────
         prefs_done_now = prefs_done  # already done before this run

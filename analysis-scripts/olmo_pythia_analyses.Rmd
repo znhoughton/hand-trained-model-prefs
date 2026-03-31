@@ -1,0 +1,784 @@
+---
+title: "Pythia & OLMo: Abstract Preference vs. Corpus Frequency"
+subtitle: "Replication of abspref_casestudy analyses for Pythia (The Pile) and OLMo-3 (Dolma)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 12, fig.height = 6, dpi = 150,
+                      out.width = "100%")
+```
+
+# Overview
+
+This document replicates the core analyses from `abspref_casestudy.Rmd` for two
+additional model families:
+
+- **Pythia** (EleutherAI): 160M, 410M, 1.4B, 2.8B — trained on The Pile.
+  Checkpoint data is in `training_attested.csv` (18 pre-selected steps per model).
+- **OLMo-3** (AllenAI): 7B, 32B — trained on Dolma.
+  Checkpoint data is in per-step CSVs under `Data/checkpoint_results/`.
+  31 checkpoints available; 20 are sampled evenly on a log scale.
+
+Analyses:
+1. **ΔLL vs. perplexity** across training checkpoints (Oh & Schuler 2023 method)
+2. **Model vs. human α-proportion** scatter (final checkpoint & over training)
+3. **Disagreement items** — where RelFreq predicts the wrong direction
+4. **Training trajectories** — case-study binomials over training
+
+------------------------------------------------------------------------
+
+```{r libraries}
+library(tidyverse)
+library(patchwork)
+library(ggrepel)
+library(scales)
+library(kableExtra)
+library(lme4)
+```
+
+```{r config}
+SCRIPT_DIR <- {
+  knitr_input <- tryCatch(knitr::current_input(), error = function(e) NULL)
+  if (!is.null(knitr_input) && nchar(knitr_input) > 0) {
+    dirname(normalizePath(knitr_input, mustWork = FALSE))
+  } else if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable()) {
+    dirname(normalizePath(rstudioapi::getActiveDocumentContext()$path, mustWork = FALSE))
+  } else {
+    normalizePath(".", mustWork = FALSE)
+  }
+}
+
+DATA_DIR    <- normalizePath(file.path(SCRIPT_DIR, "../Data/processed"), mustWork = FALSE)
+BASE_DIR    <- normalizePath(file.path(SCRIPT_DIR, ".."),               mustWork = FALSE)
+RAW_DIR     <- file.path(BASE_DIR, "Data")
+
+TRAIN_CSV        <- file.path(DATA_DIR, "training_attested.csv")
+HUMAN_CSV        <- file.path(RAW_DIR,  "all_human_data.csv")
+BINOMS_CSV       <- file.path(RAW_DIR,  "nonce_and_attested_binoms.csv")
+CK_RESULTS_DIR   <- file.path(RAW_DIR,  "checkpoint_results")
+PILE_FREQ_CSV    <- file.path(SCRIPT_DIR, "oh-schuler-replication", "pile_corpus_freq.csv")
+
+# Sampling: number of checkpoints to keep per model for trajectory analyses
+N_TRAJ_CHECKPOINTS <- 20
+
+# ── Pythia model metadata ─────────────────────────────────────────────────────
+PYTHIA_SIZES  <- c("160M", "410M", "1.4B", "2.8B")
+PYTHIA_COLOURS <- c("160M" = "#c6dbef", "410M" = "#6baed6",
+                    "1.4B" = "#2171b5", "2.8B" = "#08306b")
+
+# ── OLMo model metadata ───────────────────────────────────────────────────────
+OLMO_SIZES   <- c("7B", "32B")
+OLMO_COLOURS <- c("7B" = "#fd8d3c", "32B" = "#bd0026")
+
+stopifnot(file.exists(TRAIN_CSV), file.exists(HUMAN_CSV), dir.exists(CK_RESULTS_DIR))
+```
+
+```{r helpers}
+# ── Model name parsers ────────────────────────────────────────────────────────
+parse_pythia_size <- function(x) case_when(
+  grepl("160m",  x, TRUE) ~ "160M",
+  grepl("410m",  x, TRUE) ~ "410M",
+  grepl("1[._]4b", x, TRUE) ~ "1.4B",
+  grepl("2[._]8b", x, TRUE) ~ "2.8B",
+  TRUE ~ NA_character_
+)
+
+parse_olmo_size <- function(x) case_when(
+  grepl("7b",  x, TRUE) ~ "7B",
+  grepl("32b", x, TRUE) ~ "32B",
+  TRUE ~ NA_character_
+)
+
+# ── Log-scale step sampler ────────────────────────────────────────────────────
+# Samples n steps from a sorted vector, evenly spaced on a log scale so that
+# early training (rapid change) is better represented than late training.
+sample_steps_log <- function(steps, n = N_TRAJ_CHECKPOINTS) {
+  steps <- sort(unique(steps))
+  if (length(steps) <= n) return(steps)
+  # Add 1 before log to handle step 0
+  log_steps <- log(steps + 1)
+  breaks    <- seq(min(log_steps), max(log_steps), length.out = n)
+  selected  <- vapply(breaks, function(b) steps[which.min(abs(log_steps - b))], numeric(1))
+  unique(selected)
+}
+
+# ── freq_prob_c from Pile frequencies (if available) ─────────────────────────
+use_pile_freq <- file.exists(PILE_FREQ_CSV)
+if (use_pile_freq) {
+  pile_freq <- read_csv(PILE_FREQ_CSV, show_col_types = FALSE) |>
+    select(binom, pile_freq_prob_c = freq_prob_c, pile_log_total = log_total)
+  message(sprintf("Pile corpus frequencies loaded: %d binomials", nrow(pile_freq)))
+} else {
+  message("Pile corpus frequencies not found — using Google Books RelFreq as fallback.")
+}
+```
+
+------------------------------------------------------------------------
+
+# Data Loading
+
+```{r load-pythia}
+message("Loading Pythia data from training_attested.csv ...")
+train_all <- read_csv(TRAIN_CSV, show_col_types = FALSE)
+
+pythia_raw <- train_all |>
+  filter(grepl("pythia", model, TRUE)) |>
+  mutate(
+    model_family = "Pythia",
+    model_size   = factor(parse_pythia_size(model), levels = PYTHIA_SIZES),
+    corpus       = "The Pile"   # all Pythia models trained on The Pile
+  ) |>
+  filter(!is.na(model_size))
+
+message(sprintf("  Pythia: %d rows, %d models, %d unique steps",
+                nrow(pythia_raw),
+                n_distinct(pythia_raw$model),
+                n_distinct(pythia_raw$step)))
+```
+
+```{r load-olmo}
+message("Loading OLMo-3 checkpoint CSVs ...")
+olmo_files <- list.files(CK_RESULTS_DIR, pattern = "^Olmo.*\\.csv$",
+                         full.names = TRUE)
+
+# Sample steps log-uniformly per model
+olmo_all_steps <- tibble(path = olmo_files) |>
+  mutate(
+    fname      = basename(path),
+    model_name = sub("_stage.*", "", fname),          # e.g. "Olmo-3-1025-7B"
+    step       = as.integer(sub(".*step(\\d+)\\.csv$", "\\1", fname))
+  )
+
+selected_olmo <- olmo_all_steps |>
+  group_by(model_name) |>
+  group_modify(function(d, k) {
+    kept <- sample_steps_log(d$step, N_TRAJ_CHECKPOINTS)
+    filter(d, step %in% kept)
+  }) |>
+  ungroup()
+
+message(sprintf("  OLMo: %d files selected from %d total",
+                nrow(selected_olmo), nrow(olmo_all_steps)))
+
+olmo_raw <- selected_olmo |>
+  group_by(model_name) |>
+  group_modify(function(d, k) {
+    map_dfr(d$path, read_csv, show_col_types = FALSE)
+  }) |>
+  ungroup() |>
+  mutate(
+    model_family = "OLMo-3",
+    model_size   = factor(parse_olmo_size(model), levels = OLMO_SIZES),
+    corpus       = "Dolma"
+  ) |>
+  filter(!is.na(model_size))
+
+message(sprintf("  OLMo loaded: %d rows", nrow(olmo_raw)))
+```
+
+```{r load-human}
+human_trials <- read_csv(HUMAN_CSV, show_col_types = FALSE) |>
+  mutate(
+    binom      = Alpha,
+    resp_alpha = as.integer(resp == "alpha")
+  ) |>
+  select(binom, resp_alpha, RelFreq, GenPref, OverallFreq)
+
+binoms_meta <- read_csv(BINOMS_CSV, show_col_types = FALSE) |>
+  select(binom = Alpha, Attested)
+
+attested_binoms <- binoms_meta |> filter(Attested == 1) |> pull(binom)
+human_attested  <- human_trials |> filter(binom %in% attested_binoms)
+
+message(sprintf("Human data: %d trials, %d attested binomials",
+                nrow(human_attested), n_distinct(human_attested$binom)))
+```
+
+```{r attach-freq}
+# Attach corpus frequency to model preference data.
+#
+# Dynamic per-checkpoint exposure frequencies (alpha_seen/beta_seen) are NOT
+# available for Pythia or OLMo in the current data — only our custom OPT models
+# have them via checkpoint_results_with_exposures.csv. Therefore we use:
+#   - Pile freq_prob_c (from compute_pile_freq.py) if available — best proxy for
+#     both Pythia (The Pile) and OLMo (Dolma, similar web-text distribution)
+#   - Google Books RelFreq as fallback if Pile CSV not yet computed
+# In both cases the frequency is static (not checkpoint-specific).
+
+static_binom_freq <- human_trials |>
+  select(binom, RelFreq) |>
+  distinct()
+
+if (use_pile_freq) {
+  static_binom_freq <- static_binom_freq |>
+    left_join(pile_freq, by = "binom")
+}
+
+attach_corpus_freq <- function(df) {
+  df <- df |> left_join(static_binom_freq, by = "binom")
+  if (use_pile_freq) {
+    # Use Pile freq_prob_c; fall back to centred Google Books RelFreq if NA
+    df <- df |> mutate(freq_use = coalesce(pile_freq_prob_c, RelFreq - 0.5))
+  } else {
+    df <- df |> mutate(freq_use = RelFreq - 0.5)
+  }
+  df
+}
+
+# Final-checkpoint data (per model: latest step available)
+pythia_final <- pythia_raw |>
+  group_by(model) |>
+  filter(step == max(step)) |>
+  ungroup() |>
+  attach_corpus_freq()
+
+olmo_final <- olmo_raw |>
+  group_by(model) |>
+  filter(step == max(step)) |>
+  ungroup() |>
+  attach_corpus_freq()
+```
+
+------------------------------------------------------------------------
+
+# §1 — ΔLL vs. Perplexity
+
+ΔLL = logLik(resp_alpha ~ freq + model_pref) − logLik(resp_alpha ~ freq), computed
+per checkpoint from individual human binary choices. Perplexity = exp(training loss)
+from `tokens` column (approx) or matched from available loss curves.
+
+For Pythia/OLMo the training loss is not separately stored, so we approximate
+perplexity from the model's checkpoint step and token count where available.
+
+```{r delta-ll-pythia}
+# ── Pythia ΔLL trajectory ─────────────────────────────────────────────────────
+# Sample checkpoints
+pythia_ck <- pythia_raw |>
+  group_by(model, model_size) |>
+  group_modify(function(d, k) {
+    kept <- sample_steps_log(d$step, N_TRAJ_CHECKPOINTS)
+    filter(d, step %in% kept)
+  }) |>
+  ungroup() |>
+  attach_corpus_freq() |>
+  filter(binom %in% attested_binoms)
+
+# Join human trial outcomes
+pythia_trials_ck <- human_attested |>
+  select(binom, resp_alpha) |>
+  inner_join(pythia_ck |> select(model, model_size, step, binom, preference, freq_use, tokens),
+             by = "binom")
+
+# ΔLL per checkpoint
+pythia_delta_ll <- pythia_trials_ck |>
+  group_by(model, model_size, step, tokens) |>
+  group_modify(function(d, k) {
+    d <- filter(d, !is.na(freq_use), !is.na(preference))
+    if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
+    baseline <- glm(resp_alpha ~ freq_use,              family = binomial, data = d)
+    full     <- glm(resp_alpha ~ freq_use + preference, family = binomial, data = d)
+    tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+           n_trials = nrow(d), n_items = n_distinct(d$binom))
+  }) |>
+  ungroup() |>
+  mutate(
+    # Approximate perplexity from token count: each step ≈ 2M tokens for Pythia
+    # More precisely: Pythia reports training loss but we use tokens as a proxy
+    # for training progress on the x-axis
+    corpus = "The Pile"
+  )
+
+message(sprintf("Pythia ΔLL computed: %d checkpoint rows", nrow(pythia_delta_ll)))
+```
+
+```{r delta-ll-olmo}
+# ── OLMo ΔLL trajectory ───────────────────────────────────────────────────────
+olmo_ck <- olmo_raw |>
+  filter(binom %in% attested_binoms) |>
+  attach_corpus_freq()
+
+olmo_trials_ck <- human_attested |>
+  select(binom, resp_alpha) |>
+  inner_join(olmo_ck |> select(model, model_size, step, binom, preference, freq_use, tokens),
+             by = "binom")
+
+olmo_delta_ll <- olmo_trials_ck |>
+  group_by(model, model_size, step, tokens) |>
+  group_modify(function(d, k) {
+    d <- filter(d, !is.na(freq_use), !is.na(preference))
+    if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
+    baseline <- glm(resp_alpha ~ freq_use,              family = binomial, data = d)
+    full     <- glm(resp_alpha ~ freq_use + preference, family = binomial, data = d)
+    tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+           n_trials = nrow(d), n_items = n_distinct(d$binom))
+  }) |>
+  ungroup() |>
+  mutate(corpus = "Dolma")
+
+message(sprintf("OLMo ΔLL computed: %d checkpoint rows", nrow(olmo_delta_ll)))
+```
+
+```{r delta-ll-slope-tests}
+# Slope tests: does ΔLL increase as training progresses (more tokens)?
+# Matches abspref_casestudy slope test logic but uses log10(tokens) as x-axis
+# instead of log2(perplexity) since per-checkpoint loss is unavailable.
+delta_ll_all <- bind_rows(
+  pythia_delta_ll |> mutate(model_family = "Pythia",
+                              model_size   = factor(model_size, levels = PYTHIA_SIZES)),
+  olmo_delta_ll   |> mutate(model_family = "OLMo-3",
+                              model_size   = factor(model_size, levels = OLMO_SIZES))
+) |> filter(!is.na(delta_ll), tokens > 0)
+
+slope_tests <- delta_ll_all |>
+  group_by(model_family, model_size) |>
+  group_modify(function(d, k) {
+    if (nrow(d) < 3) return(tibble(slope = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d)))
+    fit <- lm(delta_ll ~ log10(tokens), data = d)
+    cf  <- summary(fit)$coefficients
+    tibble(slope = cf["log10(tokens)", "Estimate"],
+           se    = cf["log10(tokens)", "Std. Error"],
+           t     = cf["log10(tokens)", "t value"],
+           p     = cf["log10(tokens)", "Pr(>|t|)"],
+           n     = nrow(d))
+  }) |>
+  ungroup() |>
+  mutate(
+    sig   = case_when(p < .001 ~ "***", p < .01 ~ "**", p < .05 ~ "*", p < .10 ~ ".", TRUE ~ "ns"),
+    label = sprintf("β = %.3f, t(%d) = %.2f, p %s %s",
+                    slope, n - 2L, t,
+                    ifelse(p < .001, "<", "="),
+                    ifelse(p < .001, ".001", sprintf("%.3f", p)), sig)
+  )
+
+cat("\nSlope tests: log10(tokens) → ΔLL\n")
+print(slope_tests |> select(model_family, model_size, slope, se, t, p, sig, n), n = Inf)
+```
+
+```{r delta-ll-plot}
+# Use tokens as x-axis (training progress) since per-checkpoint loss not available.
+# Tokens are a monotone proxy for training progress and allow cross-model comparison.
+
+delta_ll_all |>
+  ggplot(aes(x = tokens, y = delta_ll, colour = model_size)) +
+  facet_grid(model_family ~ corpus, scales = "free") +
+  geom_point(size = 1.8, alpha = 0.5) +
+  geom_smooth(method = "loess", formula = y ~ x, se = TRUE,
+              linetype = "dashed", linewidth = 0.9, alpha = 0.12) +
+  scale_x_continuous("Training tokens (log scale)", trans = "log10",
+                     labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous("ΔLL") +
+  scale_colour_manual(
+    values = c(PYTHIA_COLOURS, OLMO_COLOURS),
+    name   = "Model size"
+  ) +
+  labs(
+    title    = "ΔLL vs. training tokens — Pythia & OLMo-3",
+    subtitle = paste0(
+      "ΔLL = logLik(resp_alpha ~ ",
+      ifelse(use_pile_freq, "Pile freq", "Google Books RelFreq"),
+      " + model pref) − logLik(baseline). Dashed = loess smoother with 95% CI."
+    )
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    panel.grid.major = element_line(colour = "grey92", linewidth = 0.4),
+    strip.background = element_rect(fill = "grey95"),
+    legend.position  = "right"
+  )
+```
+
+------------------------------------------------------------------------
+
+# §2 — Model vs. Human α-Ordering Proportions
+
+For each binomial, the **model proportion** is the fraction of the 51 sentence-frame
+prompts where the model prefers the α ordering (preference > 0). The **human proportion**
+is the fraction of human participants who chose the α ordering.
+
+```{r alpha-prop-compute}
+# Human proportion per binomial
+human_prop <- human_attested |>
+  group_by(binom) |>
+  summarise(human_prop_alpha = mean(resp_alpha), .groups = "drop")
+
+# Model proportion at final checkpoint per (model, binom)
+compute_model_prop <- function(df) {
+  df |>
+    filter(binom %in% attested_binoms) |>
+    group_by(model, model_size, corpus, binom) |>
+    summarise(model_prop_alpha = mean(preference > 0), .groups = "drop") |>
+    left_join(human_prop, by = "binom")
+}
+
+pythia_prop <- compute_model_prop(
+  pythia_final |> mutate(corpus = "The Pile")
+)
+olmo_prop   <- compute_model_prop(
+  olmo_final |> mutate(corpus = "Dolma")
+)
+
+all_prop <- bind_rows(
+  pythia_prop |> mutate(model_family = "Pythia",
+                         model_size   = factor(model_size, levels = PYTHIA_SIZES)),
+  olmo_prop   |> mutate(model_family = "OLMo-3",
+                         model_size   = factor(model_size, levels = OLMO_SIZES))
+)
+```
+
+## Plot 1 — Final checkpoint scatter
+
+```{r alpha-prop-final-plot}
+r_labels <- all_prop |>
+  group_by(model_family, model_size) |>
+  summarise(
+    r   = cor(human_prop_alpha, model_prop_alpha, use = "complete.obs"),
+    .groups = "drop"
+  ) |>
+  mutate(lbl = sprintf("r = %.2f", r))
+
+ggplot(all_prop, aes(x = human_prop_alpha, y = model_prop_alpha)) +
+  facet_grid(model_family ~ model_size) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dotted", colour = "grey60") +
+  geom_point(size = 1.8, alpha = 0.5,
+             aes(colour = model_family)) +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
+              colour = "black", linewidth = 0.7, alpha = 0.15) +
+  geom_text(data = r_labels,
+            aes(label = lbl, x = 0.15, y = 0.9),
+            hjust = 0, size = 3.5, fontface = "bold") +
+  scale_x_continuous("Proportion of humans choosing α", limits = c(0, 1)) +
+  scale_y_continuous("Proportion of prompts where model prefers α", limits = c(0, 1)) +
+  scale_colour_manual(values = c("Pythia" = "#2171b5", "OLMo-3" = "#bd0026"),
+                      guide = "none") +
+  labs(
+    title    = "Model vs. human α-proportion — final checkpoint",
+    subtitle = "Each point = one attested binomial. Diagonal = perfect agreement."
+  ) +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.3))
+```
+
+## Plot 2 — Pearson r over training (tokens)
+
+```{r alpha-prop-traj}
+# Compute per-checkpoint model α-proportion, then correlate with human
+compute_r_traj <- function(ck_df, corpus_label, model_size_levels) {
+  ck_df |>
+    filter(binom %in% attested_binoms) |>
+    group_by(model, model_size, step, tokens) |>
+    summarise(model_prop_alpha = mean(preference > 0), .groups = "drop") |>
+    left_join(human_prop, by = "binom") |>
+    group_by(model_size, step, tokens) |>
+    summarise(
+      r = cor(human_prop_alpha, model_prop_alpha, use = "complete.obs"),
+      .groups = "drop"
+    ) |>
+    mutate(
+      model_size = factor(model_size, levels = model_size_levels),
+      corpus     = corpus_label
+    )
+}
+
+r_traj_pythia <- compute_r_traj(
+  pythia_ck |> filter(binom %in% attested_binoms) |>
+    group_by(model, model_size, step, tokens, binom) |>
+    summarise(preference = mean(preference), .groups = "drop"),
+  "The Pile", PYTHIA_SIZES
+)
+
+r_traj_olmo <- compute_r_traj(
+  olmo_ck |> filter(binom %in% attested_binoms) |>
+    group_by(model, model_size, step, tokens, binom) |>
+    summarise(preference = mean(preference), .groups = "drop"),
+  "Dolma", OLMO_SIZES
+)
+
+bind_rows(
+  r_traj_pythia |> mutate(model_family = "Pythia"),
+  r_traj_olmo   |> mutate(model_family = "OLMo-3")
+) |>
+  filter(tokens > 0) |>
+  ggplot(aes(x = tokens, y = r, colour = model_size)) +
+  facet_grid(model_family ~ ., scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_x_continuous("Training tokens (log scale)", trans = "log10",
+                     labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous("Pearson r (model vs. human α-proportion)") +
+  scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
+  labs(
+    title    = "Model–human agreement over training — Pythia & OLMo-3",
+    subtitle = "Pearson r between per-binomial model α-proportion and human α-proportion."
+  ) +
+  theme_classic(base_size = 13) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.3),
+        legend.position  = "right")
+```
+
+------------------------------------------------------------------------
+
+# §3 — Disagreement Items
+
+Binomials where corpus RelFreq predicts the *wrong* direction (sign(model_pref) ≠ sign(freq_prob_c))
+at the final checkpoint of the smallest model in each family (160M for Pythia, 7B for OLMo).
+
+```{r disagreement}
+# Per-binom GenPref (constant across participants): join once from human data
+binom_genpref <- human_trials |>
+  select(binom, GenPref) |>
+  distinct()
+
+find_disagreement <- function(final_df, discovery_size, size_levels, family_label) {
+  # Discovery set: smallest model, items where RelFreq predicts wrong direction
+  disc <- final_df |>
+    filter(model_size == discovery_size, !is.na(freq_use), !is.na(preference)) |>
+    left_join(binom_genpref, by = "binom") |>
+    mutate(
+      freq_dir  = sign(freq_use),
+      pref_dir  = sign(preference),
+      genpref_dir = sign(GenPref)
+    ) |>
+    # Consistent with abspref_casestudy: RelFreq wrong AND GenPref/model in same direction
+    filter(freq_dir != 0, pref_dir != 0, freq_dir != pref_dir,
+           !is.na(genpref_dir), genpref_dir != 0, genpref_dir == pref_dir) |>
+    select(binom, freq_dir, pref_dir) |>
+    distinct()
+
+  final_df |>
+    filter(binom %in% disc$binom, !is.na(freq_use), !is.na(preference)) |>
+    left_join(binom_genpref, by = "binom") |>
+    left_join(disc, by = "binom") |>
+    mutate(
+      model_family = family_label,
+      model_size   = factor(model_size, levels = size_levels),
+      pref_prob    = plogis(preference) - 0.5
+    )
+}
+
+pythia_disagree <- find_disagreement(
+  pythia_final |> mutate(corpus = "The Pile"),
+  "160M", PYTHIA_SIZES, "Pythia"
+)
+olmo_disagree   <- find_disagreement(
+  olmo_final |> mutate(corpus = "Dolma"),
+  "7B", OLMO_SIZES, "OLMo-3"
+)
+
+cat(sprintf("Pythia disagreement items (160M): %d binomials\n",
+            n_distinct(pythia_disagree$binom)))
+cat(sprintf("OLMo-3 disagreement items (7B):   %d binomials\n",
+            n_distinct(olmo_disagree$binom)))
+```
+
+```{r disagreement-plot}
+bind_rows(pythia_disagree, olmo_disagree) |>
+  filter(!is.na(GenPref)) |>
+  ggplot(aes(x = GenPref, y = pref_prob, colour = model_size)) +
+  facet_grid(model_family ~ .) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_vline(xintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_point(size = 2.5, alpha = 0.7) +
+  geom_smooth(method = "lm", formula = y ~ x, se = TRUE, alpha = 0.12,
+              linewidth = 0.8) +
+  scale_x_continuous("GenPref (human absolute preference; centred at 0)") +
+  scale_y_continuous("Model preference P(α) − 0.5") +
+  scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
+  labs(
+    title    = "Disagreement items: model pref vs. GenPref",
+    subtitle = "Items where corpus RelFreq predicts the wrong direction in the smallest model."
+  ) +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.3))
+```
+
+```{r disagreement-table}
+bind_rows(
+  pythia_disagree |> select(model_family, model_size, binom, GenPref, pref_prob) |>
+    group_by(model_family, binom, GenPref) |>
+    summarise(pref_prob = mean(pref_prob), .groups = "drop"),
+  olmo_disagree |> select(model_family, model_size, binom, GenPref, pref_prob) |>
+    group_by(model_family, binom, GenPref) |>
+    summarise(pref_prob = mean(pref_prob), .groups = "drop")
+) |>
+  arrange(model_family, desc(abs(GenPref))) |>
+  mutate(across(where(is.numeric), round, 3)) |>
+  kable(caption = "Disagreement items (mean across model sizes)", booktabs = TRUE) |>
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"))
+```
+
+------------------------------------------------------------------------
+
+# §4 — Training Trajectories (Case Studies)
+
+The 6 strongest disagreement binomials (by |GenPref|) from the 160M Pythia model,
+traced across all Pythia sizes over training.
+
+```{r case-binoms}
+PYTHIA_CASE_BINOMS <- pythia_disagree |>
+  filter(model_size == "160M") |>
+  group_by(binom) |>
+  summarise(absGP = abs(first(GenPref)), .groups = "drop") |>
+  slice_max(absGP, n = 6) |>
+  pull(binom)
+
+OLMO_CASE_BINOMS <- olmo_disagree |>
+  filter(model_size == "7B") |>
+  group_by(binom) |>
+  summarise(absGP = abs(first(GenPref)), .groups = "drop") |>
+  slice_max(absGP, n = 6) |>
+  pull(binom)
+
+cat("Pythia case binomials:", paste(PYTHIA_CASE_BINOMS, collapse = "; "), "\n")
+cat("OLMo-3 case binomials:", paste(OLMO_CASE_BINOMS,  collapse = "; "), "\n")
+```
+
+## Pythia trajectories
+
+```{r pythia-traj-plot}
+pythia_traj <- pythia_ck |>
+  filter(binom %in% PYTHIA_CASE_BINOMS) |>
+  mutate(pref_prob  = plogis(preference) - 0.5,
+         model_size = factor(parse_pythia_size(model), levels = PYTHIA_SIZES))
+
+ggplot(pythia_traj |> filter(!is.na(pref_prob)),
+       aes(x = tokens, y = pref_prob, colour = model_size)) +
+  facet_wrap(~ binom, scales = "free_y", ncol = 3) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5, alpha = 0.7) +
+  scale_x_continuous("Training tokens (log)", trans = "log10",
+                     labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous("P(α) − 0.5") +
+  scale_colour_manual(values = PYTHIA_COLOURS, name = "Model size") +
+  labs(title    = "Pythia — training trajectories for disagreement binomials",
+       subtitle = "Items where 160M corpus RelFreq predicts wrong direction.") +
+  theme_classic(base_size = 11) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.3),
+        legend.position  = "bottom")
+```
+
+## OLMo-3 trajectories
+
+```{r olmo-traj-plot}
+olmo_traj <- olmo_ck |>
+  filter(binom %in% OLMO_CASE_BINOMS) |>
+  mutate(pref_prob  = plogis(preference) - 0.5,
+         model_size = factor(parse_olmo_size(model), levels = OLMO_SIZES))
+
+ggplot(olmo_traj |> filter(!is.na(pref_prob)),
+       aes(x = tokens, y = pref_prob, colour = model_size)) +
+  facet_wrap(~ binom, scales = "free_y", ncol = 3) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5, alpha = 0.7) +
+  scale_x_continuous("Training tokens (log)", trans = "log10",
+                     labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous("P(α) − 0.5") +
+  scale_colour_manual(values = OLMO_COLOURS, name = "Model size") +
+  labs(title    = "OLMo-3 — training trajectories for disagreement binomials",
+       subtitle = "Items where 7B corpus RelFreq predicts wrong direction.") +
+  theme_classic(base_size = 11) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.3),
+        legend.position  = "bottom")
+```
+
+------------------------------------------------------------------------
+
+# §5 — AbsPref Coefficient (Mixed Model)
+
+Per model, fit `lmer(preference ~ AbsPref_c + RelFreq_c + OverallFreq_c + AbsPref_c:OverallFreq_c + RelFreq_c:OverallFreq_c + (1|binom) + (1|prompt))` using per-prompt data and plot the AbsPref coefficient against training tokens.
+
+```{r abspref-coef}
+binom_meta_for_reg <- human_trials |>
+  group_by(binom) |>
+  summarise(
+    AbsPref      = first(GenPref),
+    RelFreq_g    = first(RelFreq),
+    OverallFreq_g = log(pmax(first(OverallFreq), 1)),
+    .groups = "drop"
+  )
+if (use_pile_freq) {
+  binom_meta_for_reg <- binom_meta_for_reg |>
+    left_join(pile_freq |> rename(RelFreq_p = pile_freq_prob_c,
+                                   OverallFreq_p = pile_log_total), by = "binom")
+}
+
+fit_abspref_coef <- function(ck_df, model_size_levels, use_pile) {
+  ck_df |>
+    filter(binom %in% attested_binoms, !is.na(preference)) |>
+    left_join(binom_meta_for_reg, by = "binom") |>
+    group_by(model, model_size, step, tokens) |>
+    group_modify(function(d, k) {
+      d$rf  <- if (use_pile && "RelFreq_p"     %in% names(d)) coalesce(d$RelFreq_p,     d$RelFreq_g)  else d$RelFreq_g
+      d$ovf <- if (use_pile && "OverallFreq_p" %in% names(d)) coalesce(d$OverallFreq_p, d$OverallFreq_g) else d$OverallFreq_g
+      d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf))
+      if (nrow(d) < 10) return(tibble(estimate = NA_real_, se = NA_real_, n = nrow(d)))
+      d <- d |> mutate(
+        AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
+        rf_c      = as.numeric(scale(rf,      scale = FALSE)),
+        ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+      )
+      has_prompt <- "prompt" %in% names(d)
+      fit <- tryCatch(
+        if (has_prompt)
+          lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+                 AbsPref_c:ovf_c + rf_c:ovf_c +
+                 (1 | binom) + (1 | prompt), data = d, REML = TRUE)
+        else
+          lm(preference ~ AbsPref_c + rf_c + ovf_c +
+               AbsPref_c:ovf_c + rf_c:ovf_c, data = d),
+        error = function(e) NULL
+      )
+      if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, n = nrow(d)))
+      cf <- summary(fit)$coefficients
+      if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_, n = nrow(d)))
+      tibble(estimate = cf["AbsPref_c", "Estimate"],
+             se       = cf["AbsPref_c", "Std. Error"],
+             n        = nrow(d))
+    }) |>
+    ungroup() |>
+    mutate(model_size = factor(model_size, levels = model_size_levels))
+}
+
+pythia_abspref <- fit_abspref_coef(pythia_ck, PYTHIA_SIZES, use_pile_freq) |>
+  mutate(model_family = "Pythia")
+olmo_abspref   <- fit_abspref_coef(olmo_ck,   OLMO_SIZES,   use_pile_freq) |>
+  mutate(model_family = "OLMo-3")
+
+bind_rows(pythia_abspref, olmo_abspref) |>
+  filter(!is.na(estimate), tokens > 0) |>
+  ggplot(aes(x = tokens, y = estimate, colour = model_size,
+             ymin = estimate - 1.96 * se, ymax = estimate + 1.96 * se)) +
+  facet_grid(model_family ~ ., scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_ribbon(aes(fill = model_size), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_x_continuous("Training tokens (log scale)", trans = "log10",
+                     labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous("AbsPref coefficient β") +
+  scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
+  scale_fill_manual(values   = c(PYTHIA_COLOURS, OLMO_COLOURS), guide = "none") +
+  labs(
+    title    = "AbsPref coefficient over training — Pythia & OLMo-3",
+    subtitle = "From lmer(preference ~ AbsPref_c + RelFreq_c + OverallFreq_c + interactions + (1|binom) + (1|prompt)). Ribbon = 95% CI."
+  ) +
+  theme_classic(base_size = 13) +
+  theme(strip.background = element_rect(fill = "grey95"),
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.3),
+        legend.position  = "right")
+```
