@@ -514,7 +514,6 @@ shared_layers <- list(
     labels = scales::trans_format("log2", scales::math_format(2^.x))
   ),
   scale_colour_manual(values = family_colours, name = "Model family"),
-  scale_fill_manual(values = family_colours, name = "Model family"),
   guides(colour = guide_legend(override.aes = list(size = 3))),
   theme_classic(base_size = 13),
   theme(
@@ -594,11 +593,6 @@ smooth_right <- poly_smooth_ci(right_data, "estimate", poly_fams_right)
 # ── Left panel: ΔLL ──────────────────────────────────────────────────────────
 p_left <- ggplot(left_data,
                  aes(x = perplexity, y = delta_ll, colour = model_family)) +
-  geom_ribbon(
-    data = smooth_left,
-    aes(x = perplexity, ymin = lwr, ymax = upr, fill = model_family),
-    alpha = 0.15, colour = NA, inherit.aes = FALSE
-  ) +
   geom_line(
     data = smooth_left,
     aes(x = perplexity, y = fit, colour = model_family, group = model_family),
@@ -638,11 +632,6 @@ smooth_middle <- poly_smooth_ci(middle_data, "pref_coef", poly_fams_mid)
 p_middle <- ggplot(middle_data,
                    aes(x = perplexity, y = pref_coef, colour = model_family)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_ribbon(
-    data = smooth_middle,
-    aes(x = perplexity, ymin = lwr, ymax = upr, fill = model_family),
-    alpha = 0.15, colour = NA, inherit.aes = FALSE
-  ) +
   geom_line(
     data = smooth_middle,
     aes(x = perplexity, y = fit, colour = model_family, group = model_family),
@@ -673,11 +662,6 @@ p_middle <- ggplot(middle_data,
 p_right <- ggplot(right_data,
                   aes(x = perplexity, y = estimate, colour = model_family)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_ribbon(
-    data = smooth_right,
-    aes(x = perplexity, ymin = lwr, ymax = upr, fill = model_family),
-    alpha = 0.15, colour = NA, inherit.aes = FALSE
-  ) +
   geom_line(
     data = smooth_right,
     aes(x = perplexity, y = fit, colour = model_family, group = model_family),

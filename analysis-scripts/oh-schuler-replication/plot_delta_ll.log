@@ -92,3 +92,23 @@ Final: 22895 human trials, 594 unique attested binomials, 28 models
 Pile corpus frequencies loaded: 594 binomials with valid freq_prob_c 
 Left panel  — poly smooth: [GPT-2, GPT-Neo, OPT, OLMo-1, OLMo-2, Pythia] | plain line: [OLMo-3, NA] 
 Right panel — poly smooth: [GPT-2, GPT-Neo, OPT, OLMo-1, OLMo-2, Pythia] | plain line: [OLMo-3, NA] 
+
+============================================================
+Run: 2026-03-31 16:46:03
+All models in oh_schuler_prefs.csv have a recognised model_family. 
+Per-prompt prefs: 21 models with by-prompt data; 13 models in averaged prefs only 
+Human trials:  726 → 594 unique binomials retained  (132 dropped as non-attested) 
+Model prefs:   725 → 594 unique binomials retained  (131 dropped as non-attested) 
+Final: 22895 human trials, 594 unique attested binomials, 34 models 
+Pile corpus frequencies loaded: 594 binomials with valid freq_prob_c 
+
+============================================================
+Run: 2026-03-31 16:59:30
+All models in oh_schuler_prefs.csv have a recognised model_family. 
+Per-prompt prefs: 21 models with by-prompt data; 13 models in averaged prefs only 
+Human trials:  726 → 594 unique binomials retained  (132 dropped as non-attested) 
+Model prefs:   725 → 594 unique binomials retained  (131 dropped as non-attested) 
+Final: 22895 human trials, 594 unique attested binomials, 34 models 
+Pile corpus frequencies loaded: 594 binomials with valid freq_prob_c 
+Left panel  — poly smooth: [GPT-2, GPT-Neo, OPT, OLMo-1, OLMo-2, Pythia, BabyLM, C4] | plain line: [OLMo-3] 
+Right panel — poly smooth: [GPT-2, GPT-Neo, OPT, OLMo-1, OLMo-2, Pythia, BabyLM, C4] | plain line: [OLMo-3] 
