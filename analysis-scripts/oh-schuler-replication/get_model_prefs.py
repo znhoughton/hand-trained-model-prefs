@@ -66,7 +66,7 @@ MODEL_CONFIGS = {
     "facebook/opt-13b":              {"params": "13000M",  "family": "OPT",     "label": "OPT-13B",       "skip": False},
     "facebook/opt-30b":              {"params": "30000M",  "family": "OPT",     "label": "OPT-30B",       "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
     "facebook/opt-66b":              {"params": "66000M",  "family": "OPT",     "label": "OPT-66B",       "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
-    "facebook/opt-175b":             {"params": "175000M", "family": "OPT",     "label": "OPT-175B",      "skip": False, "multi_gpu": True},
+    "facebook/opt-175b":             {"params": "175000M", "family": "OPT",     "label": "OPT-175B",      "skip": True,  "multi_gpu": True},  # not publicly available on HuggingFace
     # OLMo family (AllenAI) — trained on Dolma, a curated open web corpus
     "allenai/OLMo-1B":               {"params": "1000M",   "family": "OLMo",    "label": "OLMo-1B",       "skip": False},
     "allenai/OLMo-7B":               {"params": "7000M",   "family": "OLMo",    "label": "OLMo-7B",       "skip": False},
