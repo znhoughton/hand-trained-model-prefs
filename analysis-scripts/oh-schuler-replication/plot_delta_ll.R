@@ -344,6 +344,7 @@ abspref_coef <- model_prefs |>
     )
 
     if (use_lmer && "prompt" %in% names(d_fit)) {
+      # Per-prompt data: random intercepts for both binom and prompt
       fit <- tryCatch(
         lmer(preference ~ AbsPref_c + rf_c + ovf_c +
                AbsPref_c:ovf_c + rf_c:ovf_c +
@@ -351,16 +352,22 @@ abspref_coef <- model_prefs |>
              data = d_fit, REML = TRUE),
         error = function(e) NULL
       )
-      if (is.null(fit)) {
-        fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                    AbsPref_c:ovf_c + rf_c:ovf_c, data = d_fit)
-      }
-      cf <- summary(fit)$coefficients
     } else {
-      fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                  AbsPref_c:ovf_c + rf_c:ovf_c, data = d_fit)
-      cf  <- summary(fit)$coefficients
+      # Averaged data: random intercept for binom only
+      fit <- NULL
     }
+    if (is.null(fit)) {
+      # Fall back: try lmer with binom only, then lm if that also fails
+      fit <- tryCatch(
+        lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+               AbsPref_c:ovf_c + rf_c:ovf_c +
+               (1 | binom),
+             data = d_fit, REML = TRUE),
+        error = function(e) lm(preference ~ AbsPref_c + rf_c + ovf_c +
+                                 AbsPref_c:ovf_c + rf_c:ovf_c, data = d_fit)
+      )
+    }
+    cf <- summary(fit)$coefficients
 
     if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d_fit)))
     tibble(
@@ -460,8 +467,13 @@ if (file.exists(TRAIN_CSV)) {
         rf_c      = as.numeric(scale(rf,      scale = FALSE)),
         ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
       )
-      fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                  AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+      fit <- tryCatch(
+        lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+               AbsPref_c:ovf_c + rf_c:ovf_c + (1 | binom),
+             data = d, REML = TRUE),
+        error = function(e) lm(preference ~ AbsPref_c + rf_c + ovf_c +
+                                 AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+      )
       cf  <- summary(fit)$coefficients
       if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
                                                          t = NA_real_, p = NA_real_, n = nrow(d)))

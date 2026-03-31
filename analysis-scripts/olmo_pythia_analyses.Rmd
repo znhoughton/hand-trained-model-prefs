@@ -844,8 +844,13 @@ ggplot(acc_by_freq, aes(x = freq_quintile, y = accuracy,
 ```{r cor-humpref-quintile, fig.height=7}
 cor_by_freq <- all_agg |>
   group_by(model_family, model_size, corpus, tokens, freq_quintile) |>
-  summarise(r = cor(preference, hum_pref, use = "complete.obs"),
-            .groups = "drop")
+  summarise(
+    r = tryCatch(
+      cor(preference, hum_pref, use = "complete.obs"),
+      error = function(e) NA_real_
+    ),
+    .groups = "drop"
+  )
 
 ggplot(cor_by_freq, aes(x = freq_quintile, y = r,
                          colour = tokens / 1e6, group = tokens)) +
