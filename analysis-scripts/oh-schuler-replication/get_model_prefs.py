@@ -370,7 +370,7 @@ def main():
                 if multi_gpu:
                     model = AutoModelForCausalLM.from_pretrained(
                         model_id,
-                        dtype=torch.float16,
+                        torch_dtype=torch.float16,
                         device_map="auto",
                         low_cpu_mem_usage=True,
                         cache_dir=tmp_cache,
