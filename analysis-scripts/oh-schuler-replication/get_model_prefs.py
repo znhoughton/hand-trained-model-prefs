@@ -38,15 +38,13 @@ SCRIPT_DIR   = Path(__file__).parent
 BASE_DIR     = SCRIPT_DIR.parent.parent          # hand-trained-model-prefs/
 DATA_DIR     = BASE_DIR / "Data"
 HUMAN_CSV    = DATA_DIR / "all_human_data.csv"
-OUT_PREFS         = SCRIPT_DIR / "oh_schuler_prefs.csv"           # averaged across prompts
-OUT_PREFS_BY_PROMPT = SCRIPT_DIR / "oh_schuler_prefs_by_prompt.csv"  # per-prompt (for mixed models)
+OUT_PREFS         = SCRIPT_DIR / "oh_schuler_prefs.csv"
+OUT_PREFS_BY_PROMPT = SCRIPT_DIR / "oh_schuler_prefs_by_prompt.csv"
 OUT_PPL           = SCRIPT_DIR / "oh_schuler_perplexity.csv"
 STAGING_DIR  = SCRIPT_DIR / "staging"
 STAGING_DIR.mkdir(exist_ok=True)
 
-# ── Models (Oh & Schuler 2023: GPT-2, GPT-Neo, OPT) ─────────────────────────
-# 16 models total across three families.
-# OPT ≥ 13B require multi-GPU or significant VRAM; set skip=True to omit them.
+# ── Models ────────────────────────────────────────────────────────────────────
 MODEL_CONFIGS = {
     # GPT-2 family
     "gpt2":                          {"params": "124M",    "family": "GPT-2",   "label": "GPT-2",         "skip": False},
@@ -64,32 +62,39 @@ MODEL_CONFIGS = {
     "facebook/opt-2.7b":             {"params": "2700M",   "family": "OPT",     "label": "OPT-2.7B",      "skip": False},
     "facebook/opt-6.7b":             {"params": "6700M",   "family": "OPT",     "label": "OPT-6.7B",      "skip": False},
     "facebook/opt-13b":              {"params": "13000M",  "family": "OPT",     "label": "OPT-13B",       "skip": False},
-    "facebook/opt-30b":              {"params": "30000M",  "family": "OPT",     "label": "OPT-30B",       "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
-    "facebook/opt-66b":              {"params": "66000M",  "family": "OPT",     "label": "OPT-66B",       "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
-    "facebook/opt-175b":             {"params": "175000M", "family": "OPT",     "label": "OPT-175B",      "skip": True,  "multi_gpu": True},  # not publicly available on HuggingFace
+    "facebook/opt-30b":              {"params": "30000M",  "family": "OPT",     "label": "OPT-30B",       "skip": False, "multi_gpu": False},
+    "facebook/opt-66b":              {"params": "66000M",  "family": "OPT",     "label": "OPT-66B",       "skip": False, "multi_gpu": True},
+    "facebook/opt-175b":             {"params": "175000M", "family": "OPT",     "label": "OPT-175B",      "skip": True,  "multi_gpu": True},
     # Pythia family (EleutherAI) — trained on The Pile
-    # Binomial prefs already in training_attested.csv; added here for WikiText-2 perplexity only.
-    "EleutherAI/pythia-160m":        {"params": "160M",    "family": "Pythia",  "label": "Pythia-160M",      "skip": False, "ppl_only": True},
-    "EleutherAI/pythia-410m":        {"params": "410M",    "family": "Pythia",  "label": "Pythia-410M",      "skip": False, "ppl_only": True},
-    "EleutherAI/pythia-1.4b":        {"params": "1400M",   "family": "Pythia",  "label": "Pythia-1.4B",      "skip": False, "ppl_only": True},
-    "EleutherAI/pythia-2.8b":        {"params": "2800M",   "family": "Pythia",  "label": "Pythia-2.8B",      "skip": False, "ppl_only": True},
-    # OLMo Gen 1 (AllenAI, Feb 2024) — trained on Dolma
-    "allenai/OLMo-1B-hf":            {"params": "1000M",   "family": "OLMo-1",  "label": "OLMo-1B",          "skip": False},
-    "allenai/OLMo-7B-hf":            {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B",          "skip": False},
-    "allenai/OLMo-1B-0724-hf":       {"params": "1000M",   "family": "OLMo-1",  "label": "OLMo-1B-0724",     "skip": False},
-    "allenai/OLMo-7B-0424-hf":       {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B-0424",     "skip": False},
-    "allenai/OLMo-7B-0724-hf":       {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B-0724",     "skip": False},
+    "EleutherAI/pythia-160m":        {"params": "160M",    "family": "Pythia",  "label": "Pythia-160M",   "skip": False, "ppl_only": True},
+    "EleutherAI/pythia-410m":        {"params": "410M",    "family": "Pythia",  "label": "Pythia-410M",   "skip": False, "ppl_only": True},
+    "EleutherAI/pythia-1.4b":        {"params": "1400M",   "family": "Pythia",  "label": "Pythia-1.4B",   "skip": False, "ppl_only": True},
+    "EleutherAI/pythia-2.8b":        {"params": "2800M",   "family": "Pythia",  "label": "Pythia-2.8B",   "skip": False, "ppl_only": True},
+    # OLMo Gen 1 (AllenAI, Feb 2024)
+    "allenai/OLMo-1B-hf":            {"params": "1000M",   "family": "OLMo-1",  "label": "OLMo-1B",       "skip": False},
+    "allenai/OLMo-7B-hf":            {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B",       "skip": False},
+    "allenai/OLMo-1B-0724-hf":       {"params": "1000M",   "family": "OLMo-1",  "label": "OLMo-1B-0724",  "skip": False},
+    "allenai/OLMo-7B-0424-hf":       {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B-0424",  "skip": False},
+    "allenai/OLMo-7B-0724-hf":       {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B-0724",  "skip": False},
     # OLMo Gen 2 (Nov 2024 – Apr 2025)
-    "allenai/OLMo-2-0425-1B":        {"params": "1000M",   "family": "OLMo-2",  "label": "OLMo-2-1B",        "skip": False},
-    "allenai/OLMo-2-1124-7B":        {"params": "7000M",   "family": "OLMo-2",  "label": "OLMo-2-7B",        "skip": False},
-    "allenai/OLMo-2-1124-13B":       {"params": "13000M",  "family": "OLMo-2",  "label": "OLMo-2-13B",       "skip": False},
-    "allenai/OLMo-2-0325-32B":       {"params": "32000M",  "family": "OLMo-2",  "label": "OLMo-2-32B",       "skip": False, "multi_gpu": True},
+    "allenai/OLMo-2-0425-1B":        {"params": "1000M",   "family": "OLMo-2",  "label": "OLMo-2-1B",     "skip": False},
+    "allenai/OLMo-2-1124-7B":        {"params": "7000M",   "family": "OLMo-2",  "label": "OLMo-2-7B",     "skip": False},
+    "allenai/OLMo-2-1124-13B":       {"params": "13000M",  "family": "OLMo-2",  "label": "OLMo-2-13B",    "skip": False},
+    "allenai/OLMo-2-0325-32B":       {"params": "32000M",  "family": "OLMo-2",  "label": "OLMo-2-32B",    "skip": False, "multi_gpu": True},
     # OLMo Gen 3 (Oct–Nov 2025)
-    "allenai/Olmo-3-1025-7B":        {"params": "7000M",   "family": "OLMo-3",  "label": "OLMo-3-7B",        "skip": False},
-    "allenai/Olmo-3-1125-32B":       {"params": "32000M",  "family": "OLMo-3",  "label": "OLMo-3-32B",       "skip": False, "multi_gpu": True},
+    "allenai/Olmo-3-1025-7B":        {"params": "7000M",   "family": "OLMo-3",  "label": "OLMo-3-7B",     "skip": False},
+    "allenai/Olmo-3-1125-32B":       {"params": "32000M",  "family": "OLMo-3",  "label": "OLMo-3-32B",    "skip": False, "multi_gpu": True},
+    # BabyLM models (znhoughton) — OPT architecture, trained on BabyLM corpus
+    "znhoughton/opt-babylm-125m-64eps-seed964": {"params": "125M",   "family": "BabyLM", "label": "BabyLM-125M", "skip": False},
+    "znhoughton/opt-babylm-350m-64eps-seed964": {"params": "350M",   "family": "BabyLM", "label": "BabyLM-350M", "skip": False},
+    "znhoughton/opt-babylm-1.3b-64eps-seed964": {"params": "1300M",  "family": "BabyLM", "label": "BabyLM-1.3B", "skip": False},
+    # C4 models (znhoughton) — OPT architecture, trained on C4 subset
+    "znhoughton/opt-c4-125m-seed964":            {"params": "125M",   "family": "C4",     "label": "C4-125M",     "skip": False},
+    "znhoughton/opt-c4-350m-seed964":            {"params": "350M",   "family": "C4",     "label": "C4-350M",     "skip": False},
+    "znhoughton/opt-c4-1.3b-seed964":            {"params": "1300M",  "family": "C4",     "label": "C4-1.3B",     "skip": False},
 }
 
-# ── Sentence-frame prompts (same set as model-prefs-all-ckpts.py) ─────────────
+# ── Sentence-frame prompts ────────────────────────────────────────────────────
 LIST_OF_PROMPTS = [
     " ",
     "Well, ",
@@ -155,18 +160,12 @@ def get_device() -> str:
 
 
 def atomic_csv_write(df: pd.DataFrame, path: Path) -> None:
-    """Write CSV atomically: write to .tmp then rename, so crashes can't corrupt."""
     tmp = str(path) + ".tmp"
     df.to_csv(tmp, index=False)
     os.replace(tmp, path)
 
 
 def get_completed_prompts(staging_path: Path, expected_binoms: set) -> set:
-    """
-    Return the set of prompts that are fully complete — i.e., every expected
-    binomial has a scored row. Prompts where the script crashed mid-batch and
-    only some binomials were written are treated as incomplete.
-    """
     if not staging_path.exists():
         return set()
     try:
@@ -181,14 +180,12 @@ def get_completed_prompts(staging_path: Path, expected_binoms: set) -> set:
 
 
 def _first_device(model) -> torch.device:
-    """Return the device of the model's first parameter (works with device_map='auto')."""
     return next(model.parameters()).device
 
 
 @torch.inference_mode()
 def batch_logprobs(model, tokenizer, texts: list[str],
                    batch_size: int = 64) -> list[float]:
-    """Total sequence log-probability for each text string."""
     first_dev = _first_device(model)
     all_lp = []
     for i in range(0, len(texts), batch_size):
@@ -211,13 +208,6 @@ def batch_logprobs(model, tokenizer, texts: list[str],
 
 def score_binomials(model, tokenizer, binoms_df: pd.DataFrame,
                     model_id: str, staging_path: Path) -> pd.DataFrame:
-    """
-    Score every (prompt, binomial) pair. Results are saved prompt-by-prompt to
-    staging_path so a crash only loses at most one prompt's work. Already-complete
-    prompts (all binomials present) are skipped without reloading the model.
-
-    Returns averaged preferences (one row per binomial).
-    """
     expected_binoms  = set(binoms_df["Alpha"])
     completed        = get_completed_prompts(staging_path, expected_binoms)
     missing_prompts  = [p for p in LIST_OF_PROMPTS if p not in completed]
@@ -237,29 +227,22 @@ def score_binomials(model, tokenizer, binoms_df: pd.DataFrame,
         ]
         prompt_df = pd.DataFrame(prompt_rows)
 
-        # Atomic append to staging: read → concat → atomic write
         if staging_path.exists():
             try:
                 existing = pd.read_csv(staging_path)
                 combined = pd.concat([existing, prompt_df], ignore_index=True)
             except Exception:
-                combined = prompt_df   # staging corrupted — restart from this prompt
+                combined = prompt_df
         else:
             combined = prompt_df
         atomic_csv_write(combined, staging_path)
 
-    # Aggregate across all prompts from staging
     full = pd.read_csv(staging_path)
     return full.groupby(["model", "binom"], as_index=False)["preference"].mean()
 
 
 @torch.inference_mode()
 def compute_validation_perplexity(model, tokenizer, max_tokens: int = 4096) -> float:
-    """
-    Validation perplexity on the WikiText-2 test set.
-    Strides through a concatenated test text with the model's context window.
-    Works with both single-GPU and device_map='auto' multi-GPU models.
-    """
     first_dev = _first_device(model)
 
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1",
@@ -298,13 +281,12 @@ def compute_validation_perplexity(model, tokenizer, max_tokens: int = 4096) -> f
     return math.exp(nll_sum / n_tokens)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     device = get_device()
     print(f"Using device: {device}\n")
 
-    # Load binomials that appear in the human experiment
     print("Loading human experiment binomials ...")
     human = pd.read_csv(HUMAN_CSV)
     all_unique  = human[["Alpha", "Nonalpha"]].drop_duplicates(subset="Alpha")
@@ -333,7 +315,6 @@ def main():
 
     expected_binoms = set(binoms_df["Alpha"])
 
-    # Load existing outputs for resume detection
     done_prefs         = pd.read_csv(OUT_PREFS)           if OUT_PREFS.exists()           else pd.DataFrame()
     done_prefs_by_prompt = pd.read_csv(OUT_PREFS_BY_PROMPT) if OUT_PREFS_BY_PROMPT.exists() else pd.DataFrame()
     done_ppl   = pd.read_csv(OUT_PPL)   if OUT_PPL.exists()   else pd.DataFrame()
@@ -353,7 +334,6 @@ def main():
 
         ppl_only = cfg.get("ppl_only", False)
 
-        # ── Check if this model is already fully done in both output files ────
         completed_prompts = get_completed_prompts(staging_path, expected_binoms)
         prefs_done = ppl_only or (
             not done_prefs.empty and
@@ -372,8 +352,7 @@ def main():
 
         all_prompts_staged = ppl_only or len(completed_prompts) == len(LIST_OF_PROMPTS)
 
-        # ── Track success flags for cache cleanup ─────────────────────────────
-        prefs_done_now = prefs_done  # already done before this run
+        prefs_done_now = prefs_done
         ppl_done_now   = ppl_done
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -386,7 +365,6 @@ def main():
         Path(tmp_cache).mkdir(parents=True, exist_ok=True)
         try:
             if not all_prompts_staged:
-                # Need model to score missing prompts
                 multi_gpu = cfg.get("multi_gpu", False)
                 dtype     = torch.float16 if device == "cuda" else torch.float32
                 print("  Loading model ...")
@@ -408,7 +386,6 @@ def main():
             else:
                 print("  All prompts already in staging — skipping model load.")
 
-            # ── Binomial preferences ──────────────────────────────────────────
             if not prefs_done:
                 print("  Scoring binomial preferences ...")
                 prefs_df = score_binomials(
@@ -418,7 +395,6 @@ def main():
                 prefs_df["model_params"] = cfg["params"]
                 prefs_df["model_label"]  = cfg["label"]
 
-                # Atomic incremental save: append this model's rows (averaged)
                 combined_prefs = (
                     pd.concat([done_prefs, prefs_df], ignore_index=True)
                     if not done_prefs.empty else prefs_df
@@ -427,7 +403,6 @@ def main():
                 done_prefs = combined_prefs
                 print(f"  ✅ Preferences saved → {OUT_PREFS}")
 
-                # Also save per-prompt preferences for mixed-model analysis
                 raw_staging = pd.read_csv(staging_path)
                 raw_staging["model_family"] = cfg["family"]
                 raw_staging["model_params"] = cfg["params"]
@@ -439,12 +414,10 @@ def main():
                 atomic_csv_write(combined_by_prompt, OUT_PREFS_BY_PROMPT)
                 done_prefs_by_prompt = combined_by_prompt
                 print(f"  ✅ Per-prompt preferences saved → {OUT_PREFS_BY_PROMPT}")
-                prefs_done_now = True  # ← mark prefs as successfully completed
+                prefs_done_now = True
 
-            # ── Validation perplexity ─────────────────────────────────────────
             if not ppl_done:
                 if model is None:
-                    # Rare case: prefs already done but ppl missing — need model
                     multi_gpu = cfg.get("multi_gpu", False)
                     dtype     = torch.float16 if device == "cuda" else torch.float32
                     print("  Loading model for perplexity ...")
@@ -479,7 +452,7 @@ def main():
                 done_ppl = combined_ppl
                 done_ppl_models.add(model_id)
                 print(f"  ✅ Perplexity saved → {OUT_PPL}")
-                ppl_done_now = True  # ← mark perplexity as successfully completed
+                ppl_done_now = True
 
         finally:
             if model is not None:
@@ -487,9 +460,6 @@ def main():
             if device == "cuda":
                 torch.cuda.empty_cache()
 
-        # Only delete the cache if both tasks completed successfully this run.
-        # If either failed (e.g. OOM), the cache is preserved so we don't
-        # re-download on the next attempt.
         if prefs_done_now and ppl_done_now:
             shutil.rmtree(tmp_cache, ignore_errors=True)
             print(f"  🗑️  Model cache deleted.")
