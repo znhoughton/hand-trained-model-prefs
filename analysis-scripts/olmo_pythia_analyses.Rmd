@@ -261,7 +261,13 @@ if (use_pile_freq) {
 }
 
 attach_corpus_freq <- function(df) {
-  df <- df |> left_join(static_binom_freq, by = "binom")
+  # Only join columns from static_binom_freq that aren't already in df,
+  # to avoid RelFreq.x / RelFreq.y collisions when training_attested.csv
+  # already carries a RelFreq column (e.g. for Pythia data).
+  new_cols <- setdiff(names(static_binom_freq), c("binom", names(df)))
+  if (length(new_cols) > 0) {
+    df <- df |> left_join(static_binom_freq |> select(binom, all_of(new_cols)), by = "binom")
+  }
   if (use_pile_freq) {
     # Use Pile freq_prob_c; fall back to centred Google Books RelFreq if NA
     df <- df |> mutate(freq_use = coalesce(pile_freq_prob_c, RelFreq - 0.5))

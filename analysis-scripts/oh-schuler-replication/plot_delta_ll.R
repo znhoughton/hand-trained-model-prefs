@@ -70,12 +70,67 @@ human_trials_all <- read_csv(HUMAN_CSV, show_col_types = FALSE) |>
 human_trials <- human_trials_all |> filter(binom %in% attested_binoms)
 
 model_prefs_all <- read_csv(PREFS_CSV, show_col_types = FALSE)
+
+# ── Fill model metadata if missing from CSV (older exports may lack these columns)
+# The Python script adds model_family / model_params / model_label for newly scored
+# models, but rows from earlier runs may have NAs or the columns may be absent.
+parse_family <- function(m) {
+  case_when(
+    grepl("gpt-neo",            m, TRUE) ~ "GPT-Neo",
+    grepl("gpt2",               m, TRUE) ~ "GPT-2",
+    grepl("olmo-2|olmo_2",      m, TRUE) ~ "OLMo-2",
+    grepl("olmo-3|olmo_3|olmo3",m, TRUE) ~ "OLMo-3",
+    grepl("olmo",               m, TRUE) ~ "OLMo-1",
+    grepl("opt-|/opt",          m, TRUE) ~ "OPT",
+    grepl("pythia",             m, TRUE) ~ "Pythia",
+    TRUE ~ NA_character_
+  )
+}
+parse_params <- function(m) {
+  case_when(
+    grepl("^gpt2$",             m, TRUE) ~ "124M",
+    grepl("gpt2-medium",        m, TRUE) ~ "355M",
+    grepl("gpt2-large",         m, TRUE) ~ "774M",
+    grepl("gpt2-xl",            m, TRUE) ~ "1542M",
+    grepl("160m",               m, TRUE) ~ "160M",
+    grepl("125m",               m, TRUE) ~ "125M",
+    grepl("350m",               m, TRUE) ~ "350M",
+    grepl("410m",               m, TRUE) ~ "410M",
+    grepl("1[._-]3b|1300m",     m, TRUE) ~ "1300M",
+    grepl("1[._-]4b|1400m",     m, TRUE) ~ "1400M",
+    grepl("2[._-]7b|2700m",     m, TRUE) ~ "2700M",
+    grepl("2[._-]8b|2800m",     m, TRUE) ~ "2800M",
+    grepl("6[._-]7b|6700m",     m, TRUE) ~ "6700M",
+    grepl("\\b13b\\b|13000m",   m, TRUE) ~ "13000M",
+    grepl("\\b30b\\b|30000m",   m, TRUE) ~ "30000M",
+    grepl("\\b66b\\b|66000m",   m, TRUE) ~ "66000M",
+    grepl("\\b1b\\b|1000m",     m, TRUE) ~ "1000M",
+    grepl("\\b7b\\b|7000m",     m, TRUE) ~ "7000M",
+    grepl("\\b32b\\b|32000m",   m, TRUE) ~ "32000M",
+    TRUE ~ NA_character_
+  )
+}
+fill_model_meta <- function(df) {
+  if (!"model_family" %in% names(df)) df$model_family <- NA_character_
+  if (!"model_params" %in% names(df)) df$model_params <- NA_character_
+  if (!"model_label"  %in% names(df)) df$model_label  <- NA_character_
+  df |> mutate(
+    model_family = coalesce(model_family, parse_family(model)),
+    model_params = coalesce(model_params, parse_params(model)),
+    model_label  = coalesce(model_label,
+                            paste0(coalesce(model_family, parse_family(model)), "-",
+                                   coalesce(model_params, parse_params(model))))
+  )
+}
+
+model_prefs_all <- fill_model_meta(model_prefs_all)
 model_prefs     <- model_prefs_all |> filter(binom %in% attested_binoms)
 
 # Per-prompt preferences for mixed model (if available)
 has_by_prompt <- file.exists(PREFS_BY_PROMPT_CSV)
 if (has_by_prompt) {
   model_prefs_by_prompt <- read_csv(PREFS_BY_PROMPT_CSV, show_col_types = FALSE) |>
+    fill_model_meta() |>
     filter(binom %in% attested_binoms)
 } else {
   message("⚠  Per-prompt preferences not found — right panel will use averaged data with lm().")
@@ -308,14 +363,48 @@ if (file.exists(TRAIN_CSV)) {
     }) |>
     ungroup()
 
+  # Pythia AbsPref coefficient — same formula as the main abspref_coef block
+  pythia_abspref_coef <- pythia_final |>
+    left_join(binom_items, by = "binom") |>
+    group_by(model, model_family, model_params, model_label) |>
+    group_modify(function(d, k) {
+      if (use_pile_freq && "RelFreq_pile" %in% names(d) && "OverallFreq_pile" %in% names(d)) {
+        d$rf  <- coalesce(d$RelFreq_pile,     d$RelFreq_google)
+        d$ovf <- coalesce(d$OverallFreq_pile, d$OverallFreq_google)
+      } else {
+        d$rf  <- d$RelFreq_google
+        d$ovf <- d$OverallFreq_google
+      }
+      d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+      if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
+                                     t = NA_real_, p = NA_real_, n = nrow(d)))
+      d <- d |> mutate(
+        AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
+        rf_c      = as.numeric(scale(rf,      scale = FALSE)),
+        ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+      )
+      fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
+                  AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+      cf  <- summary(fit)$coefficients
+      if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
+                                                         t = NA_real_, p = NA_real_, n = nrow(d)))
+      tibble(estimate = cf["AbsPref_c", "Estimate"],
+             se       = cf["AbsPref_c", "Std. Error"],
+             t        = cf["AbsPref_c", "t value"],
+             p        = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+             n        = nrow(d))
+    }) |>
+    ungroup()
+
   # Pythia perplexity — from oh_schuler_perplexity.csv (WikiText-2, same benchmark
   # as all other models in this plot). Computed by get_model_prefs.py with ppl_only=True.
   pythia_results <- pythia_delta_ll |>
+    left_join(pythia_abspref_coef |> select(model, estimate, se, t, p), by = "model") |>
     left_join(ppl |> select(model, perplexity), by = "model") |>
-    mutate(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_,
-           params_M = as.numeric(sub("M$", "", model_params)))
+    mutate(params_M = as.numeric(sub("M$", "", model_params)))
 
-  message(sprintf("  Pythia: %d models", nrow(pythia_results)))
+  message(sprintf("  Pythia: %d models (%d with AbsPref estimate)",
+                  nrow(pythia_results), sum(!is.na(pythia_results$estimate))))
 } else {
   message("training_attested.csv not found — Pythia points omitted.")
 }
@@ -393,9 +482,9 @@ print(slope_tests)
 # ── Left panel: ΔLL ──────────────────────────────────────────────────────────
 p_left <- ggplot(filter(results, !is.na(delta_ll)),
                  aes(x = perplexity, y = delta_ll, colour = model_family)) +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = FALSE,
-              linetype = "dashed", linewidth = 0.9,
-              aes(group = model_family)) +
+  geom_line(data = ~ arrange(.x, model_family, perplexity),
+            aes(group = model_family),
+            linetype = "dashed", linewidth = 0.9) +
   geom_point(size = 3, alpha = 0.9) +
   geom_text(aes(label = model_params),
             hjust = -0.12, vjust = 0.4,
@@ -416,9 +505,9 @@ p_right <- ggplot(filter(results, !is.na(estimate)),
                   aes(x = perplexity, y = estimate, colour = model_family,
                       fill = model_family)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = TRUE,
-              linetype = "dashed", linewidth = 0.9, alpha = 0.15,
-              aes(group = model_family)) +
+  geom_line(data = ~ arrange(.x, model_family, perplexity),
+            aes(group = model_family),
+            linetype = "dashed", linewidth = 0.9) +
   geom_point(size = 3, alpha = 0.9) +
   geom_text(aes(label = model_params),
             hjust = -0.12, vjust = 0.4,
