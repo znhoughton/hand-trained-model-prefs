@@ -9,7 +9,7 @@
 # Output: delta_ll_plot.pdf / .png
 
 library(tidyverse)
-library(patchwork)
+library(ggrepel)
 library(lme4)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -542,159 +542,116 @@ slope_tests <- results |>
 message("\nSlope tests (log2 perplexity × ΔLL) by family:")
 print(slope_tests)
 
-# ── Per-family model counts ───────────────────────────────────────────────────
-left_data  <- filter(results, !is.na(delta_ll))
-right_data <- filter(results, !is.na(estimate))
+# ── Long-format results for faceting ─────────────────────────────────────────
+results_long <- results |>
+  pivot_longer(
+    cols      = c(delta_ll, pref_coef, estimate),
+    names_to  = "metric",
+    values_to = "value"
+  ) |>
+  filter(!is.na(value)) |>
+  mutate(
+    metric = factor(metric,
+                    levels = c("delta_ll", "pref_coef", "estimate"),
+                    labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2"))
+  )
 
-fam_n_left  <- left_data  |> count(model_family)
-fam_n_right <- right_data |> count(model_family)
-
-poly_fams_left  <- fam_n_left  |> filter(n >= 3) |> pull(model_family)
-line_fams_left  <- fam_n_left  |> filter(n == 2) |> pull(model_family)
-poly_fams_right <- fam_n_right |> filter(n >= 3) |> pull(model_family)
-line_fams_right <- fam_n_right |> filter(n == 2) |> pull(model_family)
-
-log_line(sprintf(
-  "Left panel  — poly smooth: [%s] | plain line: [%s]",
-  paste(poly_fams_left,  collapse = ", "),
-  paste(line_fams_left,  collapse = ", ")
-))
-log_line(sprintf(
-  "Right panel — poly smooth: [%s] | plain line: [%s]",
-  paste(poly_fams_right, collapse = ", "),
-  paste(line_fams_right, collapse = ", ")
-))
-
-# ── Polynomial CIs in log2 space ──────────────────────────────────────────────
-poly_smooth_ci <- function(data, y_col, families, n_points = 200) {
-  data |>
-    filter(model_family %in% families) |>
-    group_by(model_family) |>
+# ── Polynomial CIs for all families × metrics ────────────────────────────────
+poly_smooth_all <- function(data_long, n_points = 200) {
+  data_long |>
+    group_by(metric, model_family) |>
     group_modify(function(d, k) {
       x_raw <- d$perplexity
-      y_raw <- d[[y_col]]
+      y_raw <- d$value
       ok    <- !is.na(x_raw) & !is.na(y_raw)
-      if (sum(ok) < 3) return(tibble())
+      n_ok  <- sum(ok)
+      if (n_ok < 2) return(tibble())
       x_log <- log2(x_raw[ok])
       x_seq <- seq(min(x_log), max(x_log), length.out = n_points)
-      fit   <- lm(y ~ poly(x, 2), data = data.frame(x = x_log, y = y_raw[ok]))
-      pred  <- predict(fit, newdata = data.frame(x = x_seq), interval = "confidence")
+      if (n_ok == 2) {
+        # straight line only, no ribbon
+        fit_obj <- lm(y ~ x, data = data.frame(x = x_log, y = y_raw[ok]))
+        pred    <- predict(fit_obj, newdata = data.frame(x = x_seq))
+        return(tibble(perplexity = 2^x_seq, fit = pred,
+                      lwr = NA_real_, upr = NA_real_, has_ribbon = FALSE))
+      }
+      deg     <- max(1L, min(2L, n_ok - 2L))
+      fit_obj <- lm(y ~ poly(x, deg), data = data.frame(x = x_log, y = y_raw[ok]))
+      pred    <- predict(fit_obj, newdata = data.frame(x = x_seq),
+                         interval = "confidence")
       tibble(perplexity = 2^x_seq,
-             fit = pred[, "fit"],
-             lwr = pred[, "lwr"],
-             upr = pred[, "upr"])
+             fit        = pred[, "fit"],
+             lwr        = pred[, "lwr"],
+             upr        = pred[, "upr"],
+             has_ribbon = TRUE)
     }) |>
     ungroup()
 }
 
-smooth_left  <- poly_smooth_ci(left_data,  "delta_ll", poly_fams_left)
-smooth_right <- poly_smooth_ci(right_data, "estimate", poly_fams_right)
+smooth_long <- poly_smooth_all(results_long)
 
-# ── Left panel: ΔLL ──────────────────────────────────────────────────────────
-p_left <- ggplot(left_data,
-                 aes(x = perplexity, y = delta_ll, colour = model_family)) +
+# ── Reference lines (y = 0) only for pref / estimate rows ────────────────────
+hline_df <- tibble(
+  metric = factor(c("Model Pref \u03b2", "AbsPref \u03b2"),
+                  levels = levels(results_long$metric))
+)
+
+# ── Faceted plot ──────────────────────────────────────────────────────────────
+p_combined <- ggplot(results_long,
+                     aes(x = perplexity, y = value, colour = model_family)) +
+  # y = 0 reference
+  geom_hline(data = hline_df, aes(yintercept = 0),
+             linetype = "dotted", colour = "grey50", inherit.aes = FALSE) +
+  # CI ribbons (families with ≥3 points)
+  geom_ribbon(
+    data = filter(smooth_long, has_ribbon),
+    aes(x = perplexity, ymin = lwr, ymax = upr,
+        fill = model_family, group = model_family),
+    alpha = 0.15, colour = NA, inherit.aes = FALSE
+  ) +
+  # smooth lines (all families)
   geom_line(
-    data = smooth_left,
+    data = smooth_long,
     aes(x = perplexity, y = fit, colour = model_family, group = model_family),
     linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE
   ) +
-  geom_line(
-    data     = ~ arrange(filter(.x, model_family %in% line_fams_left),
-                         model_family, perplexity),
-    aes(group = model_family),
-    linetype = "dashed", linewidth = 0.9
+  # data points
+  geom_point(size = 2.5, alpha = 0.9) +
+  # non-overlapping size labels
+  ggrepel::geom_text_repel(
+    aes(label = model_params),
+    size = 2.8, fontface = "bold",
+    show.legend = FALSE,
+    min.segment.length = 0.2,
+    box.padding = 0.3,
+    point.padding = 0.2,
+    max.overlaps = 20
   ) +
-  geom_point(size = 3, alpha = 0.9) +
-  geom_text(aes(label = model_params),
-            hjust = -0.12, vjust = 0.4,
-            size = 3, fontface = "bold", show.legend = FALSE) +
-  scale_y_continuous("\u0394LL") +
-  labs(
-    title    = "\u0394LL vs. validation perplexity",
-    subtitle = paste0(
-      "\u0394LL = logLik(full) \u2212 logLik(baseline). Baseline: ",
-      ifelse(use_pile_freq, "Pile freq [OPT/OLMo/BabyLM/C4] / Google freq [GPT]",
-             "Google Books RelFreq"),
-      " + OverallFreq + interaction + (1|binom). Full adds model pref."
-    )
+  scale_x_continuous(
+    "Validation perplexity (log\u2082 scale)",
+    trans  = "log2",
+    labels = scales::trans_format("log2", scales::math_format(2^.x))
   ) +
-  shared_layers
-
-# ── Middle panel: preference log-odds coefficient ─────────────────────────────
-middle_data <- filter(results, !is.na(pref_coef))
-
-fam_n_middle  <- middle_data |> count(model_family)
-poly_fams_mid <- fam_n_middle |> filter(n >= 3) |> pull(model_family)
-line_fams_mid <- fam_n_middle |> filter(n == 2) |> pull(model_family)
-
-smooth_middle <- poly_smooth_ci(middle_data, "pref_coef", poly_fams_mid)
-
-p_middle <- ggplot(middle_data,
-                   aes(x = perplexity, y = pref_coef, colour = model_family)) +
-  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_line(
-    data = smooth_middle,
-    aes(x = perplexity, y = fit, colour = model_family, group = model_family),
-    linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE
-  ) +
-  geom_line(
-    data     = ~ arrange(filter(.x, model_family %in% line_fams_mid),
-                         model_family, perplexity),
-    aes(group = model_family),
-    linetype = "dashed", linewidth = 0.9
-  ) +
-  geom_point(size = 3, alpha = 0.9) +
-  geom_text(aes(label = model_params),
-            hjust = -0.12, vjust = 0.4,
-            size = 3, fontface = "bold", show.legend = FALSE) +
-  scale_y_continuous("Model pref \u03b2 (log-odds)") +
-  labs(
-    title    = "Model pref \u03b2 vs. validation perplexity",
-    subtitle = paste0(
-      "Log-odds coefficient of model preference in ",
-      "glmer(resp_alpha \u223c RelFreq + OverallFreq + RelFreq\u00d7OverallFreq + pref + (1|binom) + (1|participant)). ",
-      "Dashed = quadratic fit per family."
-    )
-  ) +
-  shared_layers
-
-# ── Right panel: AbsPref coefficient ─────────────────────────────────────────
-p_right <- ggplot(right_data,
-                  aes(x = perplexity, y = estimate, colour = model_family)) +
-  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_line(
-    data = smooth_right,
-    aes(x = perplexity, y = fit, colour = model_family, group = model_family),
-    linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE
-  ) +
-  geom_line(
-    data     = ~ arrange(filter(.x, model_family %in% line_fams_right),
-                         model_family, perplexity),
-    aes(group = model_family),
-    linetype = "dashed", linewidth = 0.9
-  ) +
-  geom_point(size = 3, alpha = 0.9) +
-  geom_text(aes(label = model_params),
-            hjust = -0.12, vjust = 0.4,
-            size = 3, fontface = "bold", show.legend = FALSE) +
-  scale_y_continuous("AbsPref coefficient") +
-  labs(
-    title    = "AbsPref \u03b2 vs. validation perplexity",
-    subtitle = paste0(
-      "From lm(model pref \u223c AbsPref + RelFreq + OverallFreq + ",
-      "AbsPref\u00d7OverallFreq + RelFreq\u00d7OverallFreq). ",
-      "Dashed = quadratic fit per family."
-    )
-  ) +
-  shared_layers
-
-# ── Combine and save ──────────────────────────────────────────────────────────
-p_combined <- p_left + p_middle + p_right +
-  plot_layout(guides = "collect") &
-  theme(legend.position = "bottom")
+  scale_y_continuous(NULL) +
+  scale_colour_manual(values = family_colours, name = "Model family") +
+  scale_fill_manual(values = family_colours, guide = "none") +
+  guides(colour = guide_legend(override.aes = list(size = 3))) +
+  facet_grid(metric ~ model_family, scales = "free_y") +
+  theme_classic(base_size = 12) +
+  theme(
+    panel.grid.major  = element_line(colour = "grey92", linewidth = 0.4),
+    axis.line         = element_line(colour = "grey40"),
+    axis.ticks        = element_line(colour = "grey40"),
+    strip.background  = element_rect(fill = "grey95", colour = "grey70"),
+    strip.text        = element_text(face = "bold", size = 11),
+    strip.text.y      = element_text(angle = 0),
+    legend.position   = "bottom",
+    panel.spacing.x   = unit(0.6, "lines"),
+    panel.spacing.y   = unit(0.5, "lines")
+  )
 
 print(p_combined)
 
-ggsave(OUT_PDF, p_combined, width = 20, height = 5.5)
-ggsave(OUT_PNG, p_combined, width = 20, height = 5.5, dpi = 150)
+ggsave(OUT_PDF, p_combined, width = 22, height = 8)
+ggsave(OUT_PNG, p_combined, width = 22, height = 8, dpi = 150)
 message(sprintf("\nSaved:\n  %s\n  %s", OUT_PDF, OUT_PNG))
