@@ -4,8 +4,8 @@
 #
 # Left panel  — ΔLL × Perplexity:
 #   outcome  = resp_alpha (binary: 1 = human chose α ordering)
-#   baseline = glmer(resp_alpha ~ RelFreq + OverallFreq + RelFreq:OverallFreq + (1|binom))
-#   full     = glmer(resp_alpha ~ RelFreq + OverallFreq + RelFreq:OverallFreq + preference + (1|binom))
+#   baseline = glmer(resp_alpha ~ RelFreq + OverallFreq + RelFreq:OverallFreq + (1|binom) + (1|participant))
+#   full     = glmer(... + preference + (1|binom) + (1|participant))
 #   ΔLL      = logLik(full) − logLik(baseline)
 #
 # Middle panel — model preference log-odds coefficient × Perplexity:
@@ -68,7 +68,7 @@ attested_binoms <- all_binoms_df |> filter(Attested == 1) |> pull(Alpha)
 
 human_trials_all <- read_csv(HUMAN_CSV, show_col_types = FALSE) |>
   mutate(binom = Alpha, resp_alpha = as.integer(resp == "alpha")) |>
-  select(binom, resp_alpha, RelFreq, GenPref, OverallFreq)
+  select(binom, participant, resp_alpha, RelFreq, GenPref, OverallFreq)
 
 human_trials <- human_trials_all |> filter(binom %in% attested_binoms)
 
@@ -255,9 +255,8 @@ choose_freq <- function(d, family) {
 }
 
 # ── Fit logistic regressions for ΔLL ─────────────────────────────────────────
-# Baseline and full models include a random intercept for binomial to account
-# for item-level variation in human response rate.  glmer() is attempted first;
-# if it fails to converge, falls back to glm().
+# Baseline and full models include crossed random intercepts for binomial and
+# participant.  glmer() is used directly — no fallback.
 message("Fitting ΔLL logistic regressions ...")
 delta_ll <- dat |>
   group_by(model, model_family, model_params, model_label) |>
@@ -270,25 +269,19 @@ delta_ll <- dat |>
     # Log-transform OverallFreq for the baseline (same as binom_items treatment)
     d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
 
-    # Try mixed models with binom random intercept; fall back to glm on failure
-    baseline_mod <- tryCatch(
-      glmer(resp_alpha ~ freq_use + ovf + freq_use:ovf + (1 | binom),
-            family = binomial, data = d,
-            control = glmerControl(optimizer = "bobyqa")),
-      error = function(e) glm(resp_alpha ~ freq_use + ovf + freq_use:ovf,
-                              family = binomial, data = d)
+    baseline_mod <- glmer(
+      resp_alpha ~ freq_use + ovf + freq_use:ovf + (1 | binom) + (1 | participant),
+      family = binomial, data = d,
+      control = glmerControl(optimizer = "bobyqa")
     )
-    full_mod <- tryCatch(
-      glmer(resp_alpha ~ freq_use + ovf + freq_use:ovf + preference + (1 | binom),
-            family = binomial, data = d,
-            control = glmerControl(optimizer = "bobyqa")),
-      error = function(e) glm(resp_alpha ~ freq_use + ovf + freq_use:ovf + preference,
-                              family = binomial, data = d)
+    full_mod <- glmer(
+      resp_alpha ~ freq_use + ovf + freq_use:ovf + preference +
+        (1 | binom) + (1 | participant),
+      family = binomial, data = d,
+      control = glmerControl(optimizer = "bobyqa")
     )
 
-    # Extract the preference coefficient from the full model
-    cf <- if (inherits(full_mod, "merMod")) fixef(full_mod) else coef(full_mod)
-    pref_coef <- if ("preference" %in% names(cf)) cf[["preference"]] else NA_real_
+    pref_coef <- fixef(full_mod)[["preference"]]
 
     tibble(
       delta_ll  = as.numeric(logLik(full_mod)) - as.numeric(logLik(baseline_mod)),
@@ -411,9 +404,9 @@ if (file.exists(TRAIN_CSV)) {
     ) |>
     filter(!is.na(model_params))
 
-  # Join static RelFreq and OverallFreq from human trials
+  # Join static RelFreq, OverallFreq, and participant from human trials
   pythia_dat <- human_trials |>
-    select(binom, resp_alpha, RelFreq, OverallFreq) |>
+    select(binom, participant, resp_alpha, RelFreq, OverallFreq) |>
     inner_join(pythia_final |> select(model, model_family, model_params, model_label,
                                       binom, preference),
                by = "binom")
@@ -425,22 +418,18 @@ if (file.exists(TRAIN_CSV)) {
       d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
       if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, pref_coef = NA_real_,
                                      n_trials = nrow(d), n_items = 0L))
-      baseline <- tryCatch(
-        glmer(resp_alpha ~ RelFreq + ovf + RelFreq:ovf + (1 | binom),
-              family = binomial, data = d,
-              control = glmerControl(optimizer = "bobyqa")),
-        error = function(e) glm(resp_alpha ~ RelFreq + ovf + RelFreq:ovf,
-                                family = binomial, data = d)
+      baseline <- glmer(
+        resp_alpha ~ RelFreq + ovf + RelFreq:ovf + (1 | binom) + (1 | participant),
+        family = binomial, data = d,
+        control = glmerControl(optimizer = "bobyqa")
       )
-      full <- tryCatch(
-        glmer(resp_alpha ~ RelFreq + ovf + RelFreq:ovf + preference + (1 | binom),
-              family = binomial, data = d,
-              control = glmerControl(optimizer = "bobyqa")),
-        error = function(e) glm(resp_alpha ~ RelFreq + ovf + RelFreq:ovf + preference,
-                                family = binomial, data = d)
+      full <- glmer(
+        resp_alpha ~ RelFreq + ovf + RelFreq:ovf + preference +
+          (1 | binom) + (1 | participant),
+        family = binomial, data = d,
+        control = glmerControl(optimizer = "bobyqa")
       )
-      cf        <- if (inherits(full, "merMod")) fixef(full) else coef(full)
-      pref_coef <- if ("preference" %in% names(cf)) cf[["preference"]] else NA_real_
+      pref_coef <- fixef(full)[["preference"]]
       tibble(delta_ll  = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
              pref_coef = pref_coef,
              n_trials  = nrow(d), n_items = n_distinct(d$binom))
@@ -740,7 +729,7 @@ p_middle <- ggplot(middle_data,
     title    = "Model pref \u03b2 vs. validation perplexity",
     subtitle = paste0(
       "Log-odds coefficient of model preference in ",
-      "glmer(resp_alpha \u223c RelFreq + OverallFreq + RelFreq\u00d7OverallFreq + pref + (1|binom)). ",
+      "glmer(resp_alpha \u223c RelFreq + OverallFreq + RelFreq\u00d7OverallFreq + pref + (1|binom) + (1|participant)). ",
       "Dashed = quadratic fit per family."
     )
   ) +
