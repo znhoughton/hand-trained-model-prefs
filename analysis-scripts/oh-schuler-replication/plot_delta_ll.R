@@ -126,14 +126,31 @@ fill_model_meta <- function(df) {
 model_prefs_all <- fill_model_meta(model_prefs_all)
 model_prefs     <- model_prefs_all |> filter(binom %in% attested_binoms)
 
+# Diagnostic: log any models whose family could not be parsed
+na_family_models <- model_prefs_all |> filter(is.na(model_family)) |> pull(model) |> unique()
+if (length(na_family_models) > 0) {
+  log_line("WARNING: models with NA model_family (not plotted): ",
+           paste(na_family_models, collapse = ", "))
+} else {
+  log_line("All models in oh_schuler_prefs.csv have a recognised model_family.")
+}
+
 # Per-prompt preferences for mixed model (if available)
 has_by_prompt <- file.exists(PREFS_BY_PROMPT_CSV)
 if (has_by_prompt) {
   model_prefs_by_prompt <- read_csv(PREFS_BY_PROMPT_CSV, show_col_types = FALSE) |>
     fill_model_meta() |>
     filter(binom %in% attested_binoms)
+  # Index of models that have per-prompt data — used in abspref_coef below
+  models_with_prompt <- unique(model_prefs_by_prompt$model)
+  log_line(sprintf(
+    "Per-prompt prefs: %d models with by-prompt data; %d models in averaged prefs only",
+    length(models_with_prompt),
+    n_distinct(model_prefs$model) - length(intersect(unique(model_prefs$model), models_with_prompt))
+  ))
 } else {
-  message("⚠  Per-prompt preferences not found — right panel will use averaged data with lm().")
+  models_with_prompt <- character(0)
+  message("WARNING: Per-prompt preferences not found — right panel will use averaged data with lm().")
 }
 
 ppl <- read_csv(PPL_CSV, show_col_types = FALSE)
@@ -178,8 +195,8 @@ if (use_pile_freq) {
   ))
 } else {
   message(sprintf(
-    "⚠  Pile corpus freq not found (%s) — falling back to Google Books RelFreq.\n",
-    "   Run compute_pile_freq.py to generate it.", PILE_FREQ_CSV
+    "WARNING: Pile corpus freq not found (%s) — falling back to Google Books RelFreq.\n   Run compute_pile_freq.py to generate it.",
+    PILE_FREQ_CSV
   ))
 }
 
@@ -252,63 +269,71 @@ delta_ll <- dat |>
 # binom and prompt. Falls back to lm() on averaged data if by-prompt CSV absent.
 message("Fitting AbsPref mixed models ...")
 
-# Source data for the right-panel regression
-rp_source <- if (has_by_prompt) model_prefs_by_prompt else model_prefs
-
-abspref_coef <- rp_source |>
+# Iterate over ALL models in model_prefs (so we never drop a model that predates
+# oh_schuler_prefs_by_prompt.csv).  If a model also has per-prompt data, we use
+# lmer with random intercepts for binom and prompt; otherwise we fall back to lm.
+abspref_coef <- model_prefs |>
   group_by(model, model_family, model_params, model_label) |>
   group_modify(function(d, k) {
-    d <- d |> left_join(binom_items, by = "binom")
+    this_model <- k$model
+
+    # Use per-prompt data when available for this specific model
+    if (has_by_prompt && this_model %in% models_with_prompt) {
+      d_fit <- model_prefs_by_prompt |>
+        filter(model == this_model) |>
+        left_join(binom_items, by = "binom")
+      use_lmer <- TRUE
+    } else {
+      d_fit <- d |> left_join(binom_items, by = "binom")
+      use_lmer <- FALSE
+    }
 
     # Choose RelFreq and OverallFreq based on model family & availability
     if (use_pile_freq && k$model_family %in% PILE_FREQ_FAMILIES &&
-        "RelFreq_pile" %in% names(d) && "OverallFreq_pile" %in% names(d)) {
-      d$rf  <- d$RelFreq_pile
-      d$ovf <- d$OverallFreq_pile
+        "RelFreq_pile" %in% names(d_fit) && "OverallFreq_pile" %in% names(d_fit)) {
+      d_fit$rf  <- d_fit$RelFreq_pile
+      d_fit$ovf <- d_fit$OverallFreq_pile
     } else {
-      d$rf  <- d$RelFreq_google
-      d$ovf <- d$OverallFreq_google
+      d_fit$rf  <- d_fit$RelFreq_google
+      d_fit$ovf <- d_fit$OverallFreq_google
     }
 
-    d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
-    if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d)))
+    d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+    if (nrow(d_fit) < 5) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d_fit)))
 
     # Center all predictors
-    d <- d |> mutate(
+    d_fit <- d_fit |> mutate(
       AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
       rf_c      = as.numeric(scale(rf,      scale = FALSE)),
       ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
     )
 
-    if (has_by_prompt && "prompt" %in% names(d)) {
+    if (use_lmer && "prompt" %in% names(d_fit)) {
       fit <- tryCatch(
         lmer(preference ~ AbsPref_c + rf_c + ovf_c +
                AbsPref_c:ovf_c + rf_c:ovf_c +
                (1 | binom) + (1 | prompt),
-             data = d, REML = TRUE),
+             data = d_fit, REML = TRUE),
         error = function(e) NULL
       )
       if (is.null(fit)) {
-        # Fall back to lm if lmer fails (e.g., singular fit)
         fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                    AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
-        cf  <- summary(fit)$coefficients
-      } else {
-        cf <- summary(fit)$coefficients
+                    AbsPref_c:ovf_c + rf_c:ovf_c, data = d_fit)
       }
+      cf <- summary(fit)$coefficients
     } else {
       fit <- lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                  AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+                  AbsPref_c:ovf_c + rf_c:ovf_c, data = d_fit)
       cf  <- summary(fit)$coefficients
     }
 
-    if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d)))
+    if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_, p = NA_real_, n = nrow(d_fit)))
     tibble(
       estimate = cf["AbsPref_c", "Estimate"],
       se       = cf["AbsPref_c", "Std. Error"],
       t        = cf["AbsPref_c", "t value"],
       p        = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
-      n        = nrow(d)
+      n        = nrow(d_fit)
     )
   }) |>
   ungroup()
@@ -479,12 +504,50 @@ slope_tests <- results |>
 message("\nSlope tests (log2 perplexity × ΔLL) by family:")
 print(slope_tests)
 
+# ── Pre-compute per-family model counts for smooth vs. line decision ──────────
+# Families with ≥ 3 models get a polynomial smooth (+ CI ribbon).
+# Families with exactly 2 models get a plain dashed line (poly() needs ≥ 3 pts).
+left_data  <- filter(results, !is.na(delta_ll))
+right_data <- filter(results, !is.na(estimate))
+
+fam_n_left  <- left_data  |> count(model_family)
+fam_n_right <- right_data |> count(model_family)
+
+poly_fams_left  <- fam_n_left  |> filter(n >= 3) |> pull(model_family)
+line_fams_left  <- fam_n_left  |> filter(n == 2) |> pull(model_family)
+poly_fams_right <- fam_n_right |> filter(n >= 3) |> pull(model_family)
+line_fams_right <- fam_n_right |> filter(n == 2) |> pull(model_family)
+
+log_line(sprintf(
+  "Left panel  — poly smooth: [%s] | plain line: [%s]",
+  paste(poly_fams_left,  collapse = ", "),
+  paste(line_fams_left,  collapse = ", ")
+))
+log_line(sprintf(
+  "Right panel — poly smooth: [%s] | plain line: [%s]",
+  paste(poly_fams_right, collapse = ", "),
+  paste(line_fams_right, collapse = ", ")
+))
+
 # ── Left panel: ΔLL ──────────────────────────────────────────────────────────
-p_left <- ggplot(filter(results, !is.na(delta_ll)),
-                 aes(x = perplexity, y = delta_ll, colour = model_family)) +
-  geom_line(data = ~ arrange(.x, model_family, perplexity),
-            aes(group = model_family),
-            linetype = "dashed", linewidth = 0.9) +
+p_left <- ggplot(left_data,
+                 aes(x = perplexity, y = delta_ll,
+                     colour = model_family, fill = model_family)) +
+  # Polynomial smooth + CI ribbon for families with ≥ 3 models
+  geom_smooth(
+    data     = ~ filter(.x, model_family %in% poly_fams_left),
+    aes(group = model_family),
+    method   = "lm", formula = y ~ poly(x, 2),
+    se       = TRUE, alpha = 0.15,
+    linetype = "dashed", linewidth = 0.9, show.legend = FALSE
+  ) +
+  # Plain dashed line for families with exactly 2 models
+  geom_line(
+    data     = ~ arrange(filter(.x, model_family %in% line_fams_left),
+                         model_family, perplexity),
+    aes(group = model_family),
+    linetype = "dashed", linewidth = 0.9
+  ) +
   geom_point(size = 3, alpha = 0.9) +
   geom_text(aes(label = model_params),
             hjust = -0.12, vjust = 0.4,
@@ -501,13 +564,25 @@ p_left <- ggplot(filter(results, !is.na(delta_ll)),
   shared_layers
 
 # ── Right panel: AbsPref coefficient ─────────────────────────────────────────
-p_right <- ggplot(filter(results, !is.na(estimate)),
-                  aes(x = perplexity, y = estimate, colour = model_family,
-                      fill = model_family)) +
+p_right <- ggplot(right_data,
+                  aes(x = perplexity, y = estimate,
+                      colour = model_family, fill = model_family)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_line(data = ~ arrange(.x, model_family, perplexity),
-            aes(group = model_family),
-            linetype = "dashed", linewidth = 0.9) +
+  # Polynomial smooth + CI ribbon for families with ≥ 3 models
+  geom_smooth(
+    data     = ~ filter(.x, model_family %in% poly_fams_right),
+    aes(group = model_family),
+    method   = "lm", formula = y ~ poly(x, 2),
+    se       = TRUE, alpha = 0.15,
+    linetype = "dashed", linewidth = 0.9, show.legend = FALSE
+  ) +
+  # Plain dashed line for families with exactly 2 models
+  geom_line(
+    data     = ~ arrange(filter(.x, model_family %in% line_fams_right),
+                         model_family, perplexity),
+    aes(group = model_family),
+    linetype = "dashed", linewidth = 0.9
+  ) +
   geom_point(size = 3, alpha = 0.9) +
   geom_text(aes(label = model_params),
             hjust = -0.12, vjust = 0.4,

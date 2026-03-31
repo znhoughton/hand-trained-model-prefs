@@ -523,7 +523,10 @@ compute_r_traj <- function(ck_df, corpus_label, model_size_levels) {
     left_join(human_prop, by = "binom") |>
     group_by(model_size, step, tokens) |>
     summarise(
-      r = cor(human_prop_alpha, model_prop_alpha, use = "complete.obs"),
+      r = tryCatch(
+        cor(human_prop_alpha, model_prop_alpha, use = "complete.obs"),
+        error = function(e) NA_real_
+      ),
       .groups = "drop"
     ) |>
     mutate(
