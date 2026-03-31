@@ -587,10 +587,13 @@ binom_genpref <- human_trials |>
   distinct()
 
 find_disagreement <- function(final_df, discovery_size, size_levels, family_label) {
+  # Add GenPref only if not already present (training_attested.csv carries it)
+  if (!"GenPref" %in% names(final_df)) {
+    final_df <- final_df |> left_join(binom_genpref, by = "binom")
+  }
   # Discovery set: smallest model, items where RelFreq predicts wrong direction
   disc <- final_df |>
     filter(model_size == discovery_size, !is.na(freq_use), !is.na(preference)) |>
-    left_join(binom_genpref, by = "binom") |>
     mutate(
       freq_dir  = sign(freq_use),
       pref_dir  = sign(preference),
@@ -604,7 +607,6 @@ find_disagreement <- function(final_df, discovery_size, size_levels, family_labe
 
   final_df |>
     filter(binom %in% disc$binom, !is.na(freq_use), !is.na(preference)) |>
-    left_join(binom_genpref, by = "binom") |>
     left_join(disc, by = "binom") |>
     mutate(
       model_family = family_label,

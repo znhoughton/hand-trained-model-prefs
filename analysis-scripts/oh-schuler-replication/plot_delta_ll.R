@@ -4,9 +4,12 @@
 #
 # Left panel  — ΔLL × Perplexity:
 #   outcome  = resp_alpha (binary: 1 = human chose α ordering)
-#   baseline = glm(resp_alpha ~ RelFreq,              family = binomial)
-#   full     = glm(resp_alpha ~ RelFreq + preference, family = binomial)
+#   baseline = glmer(resp_alpha ~ RelFreq + OverallFreq + RelFreq:OverallFreq + (1|binom))
+#   full     = glmer(resp_alpha ~ RelFreq + OverallFreq + RelFreq:OverallFreq + preference + (1|binom))
 #   ΔLL      = logLik(full) − logLik(baseline)
+#
+# Middle panel — model preference log-odds coefficient × Perplexity:
+#   Coefficient of preference from the full model above.
 #
 # Right panel — AbsPref coefficient × Perplexity:
 #   Fits lm(preference ~ AbsPref + RelFreq + OverallFreq +
@@ -76,13 +79,15 @@ model_prefs_all <- read_csv(PREFS_CSV, show_col_types = FALSE)
 # models, but rows from earlier runs may have NAs or the columns may be absent.
 parse_family <- function(m) {
   case_when(
-    grepl("gpt-neo",            m, TRUE) ~ "GPT-Neo",
-    grepl("gpt2",               m, TRUE) ~ "GPT-2",
-    grepl("olmo-2|olmo_2",      m, TRUE) ~ "OLMo-2",
-    grepl("olmo-3|olmo_3|olmo3",m, TRUE) ~ "OLMo-3",
-    grepl("olmo",               m, TRUE) ~ "OLMo-1",
-    grepl("opt-|/opt",          m, TRUE) ~ "OPT",
-    grepl("pythia",             m, TRUE) ~ "Pythia",
+    grepl("gpt-neo",              m, TRUE) ~ "GPT-Neo",
+    grepl("gpt2",                 m, TRUE) ~ "GPT-2",
+    grepl("olmo-2|olmo_2",        m, TRUE) ~ "OLMo-2",
+    grepl("olmo-3|olmo_3|olmo3",  m, TRUE) ~ "OLMo-3",
+    grepl("olmo",                 m, TRUE) ~ "OLMo-1",
+    grepl("opt-|/opt",            m, TRUE) ~ "OPT",
+    grepl("pythia",               m, TRUE) ~ "Pythia",
+    grepl("babylm|baby.lm",       m, TRUE) ~ "BabyLM",
+    grepl("znhoughton.*c4|c4.*znhoughton|-c4$|/c4$|_c4$", m, TRUE) ~ "C4",
     TRUE ~ NA_character_
   )
 }
@@ -115,11 +120,16 @@ fill_model_meta <- function(df) {
   if (!"model_params" %in% names(df)) df$model_params <- NA_character_
   if (!"model_label"  %in% names(df)) df$model_label  <- NA_character_
   df |> mutate(
+    # First pass: parse from model name
     model_family = coalesce(model_family, parse_family(model)),
     model_params = coalesce(model_params, parse_params(model)),
-    model_label  = coalesce(model_label,
-                            paste0(coalesce(model_family, parse_family(model)), "-",
-                                   coalesce(model_params, parse_params(model))))
+    # Second pass: if still NA, fall back to parsing the existing model_label
+    # (handles rows where the model identifier doesn't match any regex but the
+    # label like "OLMo-1B" was already stored in the CSV by the Python script)
+    model_family = coalesce(model_family, parse_family(model_label)),
+    model_params = coalesce(model_params, parse_params(model_label)),
+    # Construct label only when not already present
+    model_label  = coalesce(model_label, paste0(model_family, "-", model_params))
   )
 }
 
@@ -245,21 +255,46 @@ choose_freq <- function(d, family) {
 }
 
 # ── Fit logistic regressions for ΔLL ─────────────────────────────────────────
+# Baseline and full models include a random intercept for binomial to account
+# for item-level variation in human response rate.  glmer() is attempted first;
+# if it fails to converge, falls back to glm().
 message("Fitting ΔLL logistic regressions ...")
 delta_ll <- dat |>
   group_by(model, model_family, model_params, model_label) |>
   group_modify(function(d, k) {
     d <- choose_freq(d, k$model_family)
-    if (any(is.na(d$freq_use))) {
-      d <- filter(d, !is.na(freq_use))
-    }
-    if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = NA_integer_))
-    baseline_mod <- glm(resp_alpha ~ freq_use,              family = binomial, data = d)
-    full_mod     <- glm(resp_alpha ~ freq_use + preference, family = binomial, data = d)
+    if (any(is.na(d$freq_use))) d <- filter(d, !is.na(freq_use))
+    if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, pref_coef = NA_real_,
+                                   n_trials = nrow(d), n_items = NA_integer_))
+
+    # Log-transform OverallFreq for the baseline (same as binom_items treatment)
+    d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
+
+    # Try mixed models with binom random intercept; fall back to glm on failure
+    baseline_mod <- tryCatch(
+      glmer(resp_alpha ~ freq_use + ovf + freq_use:ovf + (1 | binom),
+            family = binomial, data = d,
+            control = glmerControl(optimizer = "bobyqa")),
+      error = function(e) glm(resp_alpha ~ freq_use + ovf + freq_use:ovf,
+                              family = binomial, data = d)
+    )
+    full_mod <- tryCatch(
+      glmer(resp_alpha ~ freq_use + ovf + freq_use:ovf + preference + (1 | binom),
+            family = binomial, data = d,
+            control = glmerControl(optimizer = "bobyqa")),
+      error = function(e) glm(resp_alpha ~ freq_use + ovf + freq_use:ovf + preference,
+                              family = binomial, data = d)
+    )
+
+    # Extract the preference coefficient from the full model
+    cf <- if (inherits(full_mod, "merMod")) fixef(full_mod) else coef(full_mod)
+    pref_coef <- if ("preference" %in% names(cf)) cf[["preference"]] else NA_real_
+
     tibble(
-      delta_ll = as.numeric(logLik(full_mod)) - as.numeric(logLik(baseline_mod)),
-      n_trials = nrow(d),
-      n_items  = n_distinct(d$binom)
+      delta_ll  = as.numeric(logLik(full_mod)) - as.numeric(logLik(baseline_mod)),
+      pref_coef = pref_coef,
+      n_trials  = nrow(d),
+      n_items   = n_distinct(d$binom)
     )
   }) |>
   ungroup()
@@ -369,9 +404,9 @@ if (file.exists(TRAIN_CSV)) {
     ) |>
     filter(!is.na(model_params))
 
-  # Join static RelFreq from human trials
+  # Join static RelFreq and OverallFreq from human trials
   pythia_dat <- human_trials |>
-    select(binom, resp_alpha, RelFreq) |>
+    select(binom, resp_alpha, RelFreq, OverallFreq) |>
     inner_join(pythia_final |> select(model, model_family, model_params, model_label,
                                       binom, preference),
                by = "binom")
@@ -379,12 +414,29 @@ if (file.exists(TRAIN_CSV)) {
   pythia_delta_ll <- pythia_dat |>
     group_by(model, model_family, model_params, model_label) |>
     group_modify(function(d, k) {
-      d <- filter(d, !is.na(RelFreq), !is.na(preference))
-      if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
-      baseline <- glm(resp_alpha ~ RelFreq,              family = binomial, data = d)
-      full     <- glm(resp_alpha ~ RelFreq + preference, family = binomial, data = d)
-      tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
-             n_trials = nrow(d), n_items = n_distinct(d$binom))
+      d <- filter(d, !is.na(RelFreq), !is.na(OverallFreq), !is.na(preference))
+      d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
+      if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, pref_coef = NA_real_,
+                                     n_trials = nrow(d), n_items = 0L))
+      baseline <- tryCatch(
+        glmer(resp_alpha ~ RelFreq + ovf + RelFreq:ovf + (1 | binom),
+              family = binomial, data = d,
+              control = glmerControl(optimizer = "bobyqa")),
+        error = function(e) glm(resp_alpha ~ RelFreq + ovf + RelFreq:ovf,
+                                family = binomial, data = d)
+      )
+      full <- tryCatch(
+        glmer(resp_alpha ~ RelFreq + ovf + RelFreq:ovf + preference + (1 | binom),
+              family = binomial, data = d,
+              control = glmerControl(optimizer = "bobyqa")),
+        error = function(e) glm(resp_alpha ~ RelFreq + ovf + RelFreq:ovf + preference,
+                                family = binomial, data = d)
+      )
+      cf        <- if (inherits(full, "merMod")) fixef(full) else coef(full)
+      pref_coef <- if ("preference" %in% names(cf)) cf[["preference"]] else NA_real_
+      tibble(delta_ll  = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+             pref_coef = pref_coef,
+             n_trials  = nrow(d), n_items = n_distinct(d$binom))
     }) |>
     ungroup()
 
@@ -449,12 +501,14 @@ results <- results |>
   mutate(
     model_family = factor(model_family,
                           levels = c("GPT-2", "GPT-Neo", "OPT",
-                                     "OLMo-1", "OLMo-2", "OLMo-3", "Pythia"))
+                                     "OLMo-1", "OLMo-2", "OLMo-3",
+                                     "Pythia", "BabyLM", "C4"))
   ) |>
   arrange(model_family, params_M)
 
 message("\nResults:")
-print(results |> select(model_family, model_label, model_params, perplexity, delta_ll, estimate),
+print(results |> select(model_family, model_label, model_params, perplexity,
+                        delta_ll, pref_coef, estimate),
       n = Inf)
 
 # ── Plot aesthetics ───────────────────────────────────────────────────────────
@@ -465,7 +519,9 @@ family_colours <- c(
   "OLMo-1" = "#d6604d",
   "OLMo-2" = "#f4a582",
   "OLMo-3" = "#92c5de",
-  "Pythia" = "#762a83"
+  "Pythia" = "#762a83",
+  "BabyLM" = "#e08214",
+  "C4"     = "#35978f"
 )
 
 shared_layers <- list(
@@ -529,17 +585,49 @@ log_line(sprintf(
   paste(line_fams_right, collapse = ", ")
 ))
 
+# ── Pre-compute polynomial CIs in log2-perplexity space ──────────────────────
+# geom_smooth with scale_x_continuous(trans="log2") can fit on the raw scale
+# rather than the transformed scale in some ggplot2 versions, misplacing the CI
+# ribbon.  We fit explicitly in log2 space and plot with geom_ribbon + geom_line
+# to guarantee the ribbon appears at the correct y positions.
+poly_smooth_ci <- function(data, y_col, families, n_points = 200) {
+  data |>
+    filter(model_family %in% families) |>
+    group_by(model_family) |>
+    group_modify(function(d, k) {
+      x_raw <- d$perplexity
+      y_raw <- d[[y_col]]
+      ok    <- !is.na(x_raw) & !is.na(y_raw)
+      if (sum(ok) < 3) return(tibble())
+      x_log <- log2(x_raw[ok])
+      x_seq <- seq(min(x_log), max(x_log), length.out = n_points)
+      fit   <- lm(y ~ poly(x, 2), data = data.frame(x = x_log, y = y_raw[ok]))
+      pred  <- predict(fit, newdata = data.frame(x = x_seq), interval = "confidence")
+      tibble(perplexity = 2^x_seq,
+             fit = pred[, "fit"],
+             lwr = pred[, "lwr"],
+             upr = pred[, "upr"])
+    }) |>
+    ungroup()
+}
+
+smooth_left  <- poly_smooth_ci(left_data,  "delta_ll", poly_fams_left)
+smooth_right <- poly_smooth_ci(right_data, "estimate", poly_fams_right)
+
 # ── Left panel: ΔLL ──────────────────────────────────────────────────────────
 p_left <- ggplot(left_data,
-                 aes(x = perplexity, y = delta_ll,
-                     colour = model_family, fill = model_family)) +
-  # Polynomial smooth + CI ribbon for families with ≥ 3 models
-  geom_smooth(
-    data     = ~ filter(.x, model_family %in% poly_fams_left),
-    aes(group = model_family),
-    method   = "lm", formula = y ~ poly(x, 2),
-    se       = TRUE, alpha = 0.15,
-    linetype = "dashed", linewidth = 0.9, show.legend = FALSE
+                 aes(x = perplexity, y = delta_ll, colour = model_family)) +
+  # CI ribbon — drawn first so points appear on top
+  geom_ribbon(
+    data = smooth_left,
+    aes(x = perplexity, ymin = lwr, ymax = upr, fill = model_family),
+    alpha = 0.15, colour = NA, inherit.aes = FALSE
+  ) +
+  # Polynomial trend line for families with ≥ 3 models
+  geom_line(
+    data = smooth_left,
+    aes(x = perplexity, y = fit, colour = model_family, group = model_family),
+    linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE
   ) +
   # Plain dashed line for families with exactly 2 models
   geom_line(
@@ -556,25 +644,28 @@ p_left <- ggplot(left_data,
   labs(
     title    = "\u0394LL vs. validation perplexity",
     subtitle = paste0(
-      "\u0394LL = logLik(resp_alpha \u223c ",
-      ifelse(use_pile_freq, "Pile freq [OPT] / Google freq [GPT]", "Google Books RelFreq"),
-      " + model pref) \u2212 logLik(baseline). Dashed = quadratic fit per family."
+      "\u0394LL = logLik(full) \u2212 logLik(baseline). Baseline: ",
+      ifelse(use_pile_freq, "Pile freq [OPT/OLMo] / Google freq [GPT]", "Google Books RelFreq"),
+      " + OverallFreq + interaction + (1|binom). Full adds model pref."
     )
   ) +
   shared_layers
 
 # ── Right panel: AbsPref coefficient ─────────────────────────────────────────
 p_right <- ggplot(right_data,
-                  aes(x = perplexity, y = estimate,
-                      colour = model_family, fill = model_family)) +
+                  aes(x = perplexity, y = estimate, colour = model_family)) +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  # Polynomial smooth + CI ribbon for families with ≥ 3 models
-  geom_smooth(
-    data     = ~ filter(.x, model_family %in% poly_fams_right),
-    aes(group = model_family),
-    method   = "lm", formula = y ~ poly(x, 2),
-    se       = TRUE, alpha = 0.15,
-    linetype = "dashed", linewidth = 0.9, show.legend = FALSE
+  # CI ribbon — drawn first so points appear on top
+  geom_ribbon(
+    data = smooth_right,
+    aes(x = perplexity, ymin = lwr, ymax = upr, fill = model_family),
+    alpha = 0.15, colour = NA, inherit.aes = FALSE
+  ) +
+  # Polynomial trend line for families with ≥ 3 models
+  geom_line(
+    data = smooth_right,
+    aes(x = perplexity, y = fit, colour = model_family, group = model_family),
+    linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE
   ) +
   # Plain dashed line for families with exactly 2 models
   geom_line(
@@ -598,13 +689,58 @@ p_right <- ggplot(right_data,
   ) +
   shared_layers
 
+# ── Middle panel: logistic preference coefficient (resp_alpha ~ model pref) ───
+# Shows the raw log-odds coefficient of model preference predicting human resp_alpha
+# (from the full mixed logistic regression above), plotted vs. perplexity.
+middle_data <- filter(results, !is.na(pref_coef))
+
+fam_n_middle  <- middle_data |> count(model_family)
+poly_fams_mid <- fam_n_middle |> filter(n >= 3) |> pull(model_family)
+line_fams_mid <- fam_n_middle |> filter(n == 2) |> pull(model_family)
+
+smooth_middle <- poly_smooth_ci(middle_data, "pref_coef", poly_fams_mid)
+
+p_middle <- ggplot(middle_data,
+                   aes(x = perplexity, y = pref_coef, colour = model_family)) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_ribbon(
+    data = smooth_middle,
+    aes(x = perplexity, ymin = lwr, ymax = upr, fill = model_family),
+    alpha = 0.15, colour = NA, inherit.aes = FALSE
+  ) +
+  geom_line(
+    data = smooth_middle,
+    aes(x = perplexity, y = fit, colour = model_family, group = model_family),
+    linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE
+  ) +
+  geom_line(
+    data     = ~ arrange(filter(.x, model_family %in% line_fams_mid),
+                         model_family, perplexity),
+    aes(group = model_family),
+    linetype = "dashed", linewidth = 0.9
+  ) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text(aes(label = model_params),
+            hjust = -0.12, vjust = 0.4,
+            size = 3, fontface = "bold", show.legend = FALSE) +
+  scale_y_continuous("Model pref \u03b2 (log-odds)") +
+  labs(
+    title    = "Model pref \u03b2 vs. validation perplexity",
+    subtitle = paste0(
+      "Log-odds coefficient of model preference in ",
+      "glmer(resp_alpha \u223c RelFreq + OverallFreq + RelFreq\u00d7OverallFreq + pref + (1|binom)). ",
+      "Dashed = quadratic fit per family."
+    )
+  ) +
+  shared_layers
+
 # ── Combine and save ──────────────────────────────────────────────────────────
-p_combined <- p_left + p_right +
+p_combined <- p_left + p_middle + p_right +
   plot_layout(guides = "collect") &
   theme(legend.position = "bottom")
 
 print(p_combined)
 
-ggsave(OUT_PDF, p_combined, width = 14, height = 5.5)
-ggsave(OUT_PNG, p_combined, width = 14, height = 5.5, dpi = 150)
+ggsave(OUT_PDF, p_combined, width = 20, height = 5.5)
+ggsave(OUT_PNG, p_combined, width = 20, height = 5.5, dpi = 150)
 message(sprintf("\nSaved:\n  %s\n  %s", OUT_PDF, OUT_PNG))
