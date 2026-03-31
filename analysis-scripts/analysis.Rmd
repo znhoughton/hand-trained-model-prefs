@@ -61,10 +61,10 @@ MODELS_DIR <- "models"
 dir.create(MODELS_DIR, showWarnings = FALSE, recursive = TRUE)
 
 N_CORES           <- parallel::detectCores(logical = FALSE)
-USABLE_CORES      <- floor(N_CORES * 3 / 4)
-N_PARALLEL_MODELS <- 6   # models fitted simultaneously via furrr
+USABLE_CORES      <- 28L   # cap at 28 of 32 cores (7 models × 4 chains each)
+N_PARALLEL_MODELS <- 7     # models fitted simultaneously via furrr
 
-BRMS_CHAINS    <- min(floor(USABLE_CORES / N_PARALLEL_MODELS), 8)
+BRMS_CHAINS    <- 4L
 BRMS_CORES     <- BRMS_CHAINS
 BRMS_ITER      <- 6000
 BRMS_WARMUP    <- 3000

@@ -32,16 +32,23 @@ Analyses:
 2. **Model vs. human α-proportion** scatter (final checkpoint & over training)
 3. **Disagreement items** — where RelFreq predicts the wrong direction
 4. **Training trajectories** — case-study binomials over training
+5. **Accuracy by frequency quintile** — mirrors Analysis 2c from `analysis2.Rmd`
+6. **Correlation trajectories** — model pref ~ RelFreq, human pref, and each individual
+   constraint over training; preference deviation ~ each constraint (mirrors Analysis
+   2a/2b raw from `analysis2.Rmd`)
+7. **AbsPref coefficient** — mixed-model trajectory of abstract preference effect
 
 ------------------------------------------------------------------------
 
 ```{r libraries}
 library(tidyverse)
+library(brms)
 library(patchwork)
 library(ggrepel)
 library(scales)
 library(kableExtra)
-library(lme4)
+library(future)
+library(furrr)
 ```
 
 ```{r config}
@@ -78,10 +85,36 @@ PYTHIA_COLOURS <- c("160M" = "#c6dbef", "410M" = "#6baed6",
 OLMO_SIZES   <- c("7B", "32B")
 OLMO_COLOURS <- c("7B" = "#fd8d3c", "32B" = "#bd0026")
 
+MODELS_DIR <- file.path(SCRIPT_DIR, "models")
+dir.create(MODELS_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# ── Parallelisation (mirrors analysis2.Rmd) ───────────────────────────────────
+N_CORES           <- parallel::detectCores(logical = FALSE)
+USABLE_CORES      <- 28L    # cap at 28 of 32 cores (7 models × 4 chains each)
+N_PARALLEL_MODELS <- 7
+CHAINS            <- 4L
+CORES             <- CHAINS
+ITER              <- 6000
+WARMUP            <- 3000
+
+PRIORS_GAUSSIAN <- c(
+  prior(normal(0, 1), class = b),
+  prior(normal(0, 1), class = Intercept),
+  prior(exponential(1), class = sd),
+  prior(exponential(1), class = sigma)
+)
+
+message(sprintf(
+  "Cores: %d total | %d usable | %d parallel models | %d chains/cores per model",
+  N_CORES, USABLE_CORES, N_PARALLEL_MODELS, CHAINS
+))
+
 stopifnot(file.exists(TRAIN_CSV), file.exists(HUMAN_CSV), dir.exists(CK_RESULTS_DIR))
 ```
 
 ```{r helpers}
+make_slug <- function(x) tolower(gsub("[^a-z0-9]", "_", x))
+
 # ── Model name parsers ────────────────────────────────────────────────────────
 parse_pythia_size <- function(x) case_when(
   grepl("160m",  x, TRUE) ~ "160M",
@@ -119,6 +152,11 @@ if (use_pile_freq) {
 } else {
   message("Pile corpus frequencies not found — using Google Books RelFreq as fallback.")
 }
+```
+
+```{r setup-parallel}
+plan(multicore, workers = N_PARALLEL_MODELS)
+message(sprintf("furrr plan: %s with %d workers", class(plan())[1], N_PARALLEL_MODELS))
 ```
 
 ------------------------------------------------------------------------
@@ -698,84 +736,469 @@ ggplot(olmo_traj |> filter(!is.na(pref_prob)),
 
 ------------------------------------------------------------------------
 
-# §5 — AbsPref Coefficient (Mixed Model)
+# §5 — Prediction Accuracy by Frequency Quintile
 
-Per model, fit `lmer(preference ~ AbsPref_c + RelFreq_c + OverallFreq_c + AbsPref_c:OverallFreq_c + RelFreq_c:OverallFreq_c + (1|binom) + (1|prompt))` using per-prompt data and plot the AbsPref coefficient against training tokens.
+Mirrors Analysis 2c in `analysis2.Rmd`. Builds a per-binomial aggregated dataset
+from raw checkpoint data (equivalent to `attested_agg.csv`) and computes accuracy
+by overall-frequency quintile across training.
 
-```{r abspref-coef}
+```{r constraint-meta}
+CONSTRAINT_COLS <- c("Form", "Percept", "Culture", "Power", "Intense",
+                     "Icon", "Freq", "Len", "Lapse", "BStress")
+CONSTRAINT_COLS_REDUCED <- setdiff(CONSTRAINT_COLS, c("Lapse", "Percept"))
+
+# Load individual constraint scores per binomial from the metadata CSV.
+# Falls back gracefully if the columns are absent.
+binoms_constraints <- read_csv(BINOMS_CSV, show_col_types = FALSE) |>
+  filter(Attested == 1) |>
+  select(binom = Alpha, any_of(CONSTRAINT_COLS))
+
+# Human aggregated stats — majority-pref, RelFreq, OverallFreq, per-binom constraints
+human_agg_full <- human_attested |>
+  group_by(binom) |>
+  summarise(
+    hum_pref    = mean(resp_alpha),
+    RelFreq     = first(RelFreq),
+    OverallFreq = first(OverallFreq),
+    GenPref     = first(GenPref),
+    .groups     = "drop"
+  ) |>
+  left_join(binoms_constraints, by = "binom")
+```
+
+```{r build-model-agg}
+# Build per-binom, per-checkpoint aggregated data (mean preference across prompts)
+build_model_agg <- function(ck_df, model_size_levels, corpus_label) {
+  ck_df |>
+    filter(binom %in% attested_binoms) |>
+    group_by(model, model_size, step, tokens, binom) |>
+    summarise(preference = mean(preference, na.rm = TRUE), .groups = "drop") |>
+    left_join(human_agg_full, by = "binom") |>
+    mutate(
+      model_size    = factor(model_size, levels = model_size_levels),
+      corpus        = corpus_label,
+      freq_quintile = cut(log(pmax(OverallFreq, 1e-9)), breaks = 5,
+                          labels = c("Q1 (lowest)", "Q2", "Q3", "Q4", "Q5 (highest)"))
+    ) |>
+    filter(!is.na(freq_quintile))
+}
+
+pythia_agg <- build_model_agg(pythia_ck, PYTHIA_SIZES, "The Pile")
+olmo_agg   <- build_model_agg(olmo_ck,   OLMO_SIZES,   "Dolma")
+
+# Subsample to 20 checkpoint steps per model (mirrors 2c sampling logic)
+all_agg <- bind_rows(
+  pythia_agg |> mutate(model_family = "Pythia"),
+  olmo_agg   |> mutate(model_family = "OLMo-3")
+) |>
+  group_by(model) |>
+  mutate(step_rank = dense_rank(tokens)) |>
+  filter(step_rank %in% unique(round(seq(1, max(step_rank), length.out = N_TRAJ_CHECKPOINTS)))) |>
+  ungroup()
+```
+
+## Accuracy by frequency quintile
+
+```{r acc-by-freq-quintile, fig.height=7}
+acc_by_freq <- all_agg |>
+  mutate(correct = (preference > 0) == (hum_pref > 0.5)) |>
+  group_by(model_family, model_size, corpus, tokens, freq_quintile) |>
+  summarise(accuracy = mean(correct, na.rm = TRUE), .groups = "drop")
+
+ggplot(acc_by_freq, aes(x = freq_quintile, y = accuracy,
+                         colour = tokens / 1e6, group = tokens)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey60") +
+  geom_line(linewidth = 0.6, alpha = 0.8) +
+  geom_point(size = 1.8) +
+  scale_colour_gradient(low = "#c7e9b4", high = "#154733",
+                        name = "Training tokens\n(millions)") +
+  scale_y_continuous("Accuracy", limits = c(0.3, 1),
+                     labels = scales::percent_format()) +
+  scale_x_discrete("Overall frequency quintile") +
+  facet_grid(model_family ~ model_size) +
+  labs(title = "Prediction accuracy by overall frequency quintile — Pythia & OLMo-3") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title   = element_text(face = "bold", size = 14),
+        strip.text   = element_text(face = "bold", size = 13),
+        axis.text.x  = element_text(size = 10, angle = 20, hjust = 1),
+        axis.text.y  = element_text(colour = "black", size = 11),
+        axis.title   = element_text(colour = "black", size = 13),
+        legend.text  = element_text(size = 11),
+        legend.title = element_text(size = 12))
+```
+
+## Correlation with human preference by frequency quintile
+
+```{r cor-humpref-quintile, fig.height=7}
+cor_by_freq <- all_agg |>
+  group_by(model_family, model_size, corpus, tokens, freq_quintile) |>
+  summarise(r = cor(preference, hum_pref, use = "complete.obs"),
+            .groups = "drop")
+
+ggplot(cor_by_freq, aes(x = freq_quintile, y = r,
+                         colour = tokens / 1e6, group = tokens)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_line(linewidth = 0.6, alpha = 0.8) +
+  geom_point(size = 1.8) +
+  scale_colour_gradient(low = "#c7e9b4", high = "#154733",
+                        name = "Training tokens\n(millions)") +
+  scale_y_continuous("Pearson r (model pref ~ human pref)", limits = c(-0.5, 1)) +
+  scale_x_discrete("Overall frequency quintile") +
+  facet_grid(model_family ~ model_size) +
+  labs(title = "Correlation with human preference by frequency quintile — Pythia & OLMo-3") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title   = element_text(face = "bold", size = 14),
+        strip.text   = element_text(face = "bold", size = 13),
+        axis.text.x  = element_text(size = 10, angle = 20, hjust = 1),
+        axis.text.y  = element_text(colour = "black", size = 11),
+        axis.title   = element_text(colour = "black", size = 13),
+        legend.text  = element_text(size = 11),
+        legend.title = element_text(size = 12))
+```
+
+------------------------------------------------------------------------
+
+# §6 — Correlation Trajectories
+
+Mirrors the raw correlation trajectory plots in `analysis2.Rmd` (sections 2a raw,
+2b raw, and the RelFreq–preference correlation trajectory).
+
+## Model preference ~ RelFreq over training
+
+```{r cor-relfreq-traj, fig.height=5}
+cor_traj_relfreq <- all_agg |>
+  group_by(model_family, model_size, corpus, tokens) |>
+  summarise(r = cor(preference, RelFreq, use = "complete.obs"),
+            .groups = "drop")
+
+ggplot(cor_traj_relfreq, aes(x = tokens, y = r, colour = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_x_continuous("Training tokens (log scale)", trans = "log10",
+                     labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous("Pearson r (model pref ~ relative freq)", limits = c(-1, 1)) +
+  scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
+  facet_wrap(~ model_family, scales = "free_x") +
+  labs(title = "Correlation of model preference with relative frequency over training") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title      = element_text(face = "bold", size = 14),
+        strip.text      = element_text(face = "bold", size = 13),
+        axis.text       = element_text(colour = "black", size = 11),
+        axis.title      = element_text(colour = "black", size = 13),
+        legend.position = "bottom")
+```
+
+## Model preference ~ human preference over training
+
+```{r cor-humpref-traj, fig.height=5}
+cor_traj_hum <- all_agg |>
+  group_by(model_family, model_size, corpus, tokens) |>
+  summarise(r = cor(preference, hum_pref, use = "complete.obs"),
+            .groups = "drop")
+
+ggplot(cor_traj_hum, aes(x = tokens, y = r, colour = model_size)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_x_continuous("Training tokens (log scale)", trans = "log10",
+                     labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous("Pearson r (model pref ~ human pref)", limits = c(-0.1, 1)) +
+  scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
+  facet_wrap(~ model_family, scales = "free_x") +
+  labs(title = "Raw trajectory: correlation of model preference with human preference") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank(),
+        plot.title      = element_text(face = "bold", size = 14),
+        strip.text      = element_text(face = "bold", size = 13),
+        axis.text       = element_text(colour = "black", size = 11),
+        axis.title      = element_text(colour = "black", size = 13),
+        legend.position = "bottom")
+```
+
+## Model preference ~ each individual constraint over training
+
+```{r cor-constraints-traj, fig.height=10}
+have_constraints <- all(CONSTRAINT_COLS_REDUCED %in% names(all_agg))
+
+if (have_constraints) {
+  cor_traj_constr <- all_agg |>
+    group_by(model_family, model_size, corpus, tokens) |>
+    summarise(across(all_of(c(CONSTRAINT_COLS_REDUCED, "RelFreq")),
+                     ~ cor(preference, .x, use = "complete.obs")),
+              .groups = "drop") |>
+    pivot_longer(cols = all_of(c(CONSTRAINT_COLS_REDUCED, "RelFreq")),
+                 names_to = "constraint", values_to = "r") |>
+    mutate(constraint = factor(constraint, levels = c(CONSTRAINT_COLS_REDUCED, "RelFreq")))
+
+  print(
+    ggplot(cor_traj_constr, aes(x = tokens, y = r, colour = model_size)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+      geom_line(linewidth = 0.7) +
+      geom_point(size = 1.5) +
+      scale_x_continuous("Training tokens (log scale)", trans = "log10",
+                         labels = label_number(scale_cut = cut_short_scale())) +
+      scale_y_continuous("Pearson r (model pref ~ constraint)", limits = c(-1, 1)) +
+      scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
+      facet_grid(constraint ~ model_family) +
+      labs(title = "Raw trajectories: correlation of model preference with each constraint") +
+      theme_bw(base_size = 11) +
+      theme(panel.grid.minor = element_blank(),
+            plot.title      = element_text(face = "bold", size = 12),
+            strip.text.x    = element_text(face = "bold", size = 11),
+            strip.text.y    = element_text(size = 9),
+            axis.text       = element_text(colour = "black", size = 9),
+            axis.title      = element_text(colour = "black", size = 11),
+            legend.position = "bottom")
+  )
+} else {
+  message("Individual constraint columns not available in aggregated data — skipping. ",
+          "Check that BINOMS_CSV contains columns: ",
+          paste(CONSTRAINT_COLS_REDUCED, collapse = ", "))
+}
+```
+
+## Preference deviation ~ each individual constraint over training
+
+Preference deviation = model preference − RelFreq (both on probability scale).
+
+```{r cor-prefdev-constraints, fig.height=10}
+if (have_constraints) {
+  cor_traj_prefdev <- all_agg |>
+    mutate(pref_dev = preference - RelFreq) |>
+    group_by(model_family, model_size, corpus, tokens) |>
+    summarise(across(all_of(CONSTRAINT_COLS_REDUCED),
+                     ~ cor(pref_dev, .x, use = "complete.obs")),
+              .groups = "drop") |>
+    pivot_longer(cols = all_of(CONSTRAINT_COLS_REDUCED),
+                 names_to = "constraint", values_to = "r") |>
+    mutate(constraint = factor(constraint, levels = CONSTRAINT_COLS_REDUCED))
+
+  print(
+    ggplot(cor_traj_prefdev, aes(x = tokens, y = r, colour = model_size)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+      geom_line(linewidth = 0.7) +
+      geom_point(size = 1.5) +
+      scale_x_continuous("Training tokens (log scale)", trans = "log10",
+                         labels = label_number(scale_cut = cut_short_scale())) +
+      scale_y_continuous("Pearson r (pref deviation ~ constraint)", limits = c(-1, 1)) +
+      scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
+      facet_grid(constraint ~ model_family) +
+      labs(title = "Raw trajectories: correlation of preference deviation with each constraint",
+           subtitle = "Preference deviation = model preference \u2212 RelFreq") +
+      theme_bw(base_size = 11) +
+      theme(panel.grid.minor = element_blank(),
+            plot.title      = element_text(face = "bold", size = 12),
+            plot.subtitle   = element_text(size = 10, colour = "grey40"),
+            strip.text.x    = element_text(face = "bold", size = 11),
+            strip.text.y    = element_text(size = 9),
+            axis.text       = element_text(colour = "black", size = 9),
+            axis.title      = element_text(colour = "black", size = 11),
+            legend.position = "bottom")
+  )
+} else {
+  message("Individual constraint columns not available — skipping preference deviation plot.")
+}
+```
+
+------------------------------------------------------------------------
+
+# §7 — AbsPref Coefficient Trajectory (Bayesian Mixed Model)
+
+Per checkpoint, fit:
+
+$$\text{preference} \sim \text{AbsPref\_c} + \text{rf\_c} + \text{ovf\_c} + \text{AbsPref\_c} \times \text{ovf\_c} + \text{rf\_c} \times \text{ovf\_c} + (1 \mid \text{binom}) + (1 \mid \text{prompt})$$
+
+using brms (Gaussian), matching the prior and sampling settings in `analysis2.Rmd`.
+Fits are saved to `models/abspref_traj_<slug>_ck<nn>.rds` and skipped on re-run.
+
+------------------------------------------------------------------------
+
+## Fitting
+
+```{r abspref-meta}
+# Per-binomial predictor metadata (AbsPref = GenPref, rf = RelFreq, ovf = log(OverallFreq))
 binom_meta_for_reg <- human_trials |>
   group_by(binom) |>
   summarise(
-    AbsPref      = first(GenPref),
-    RelFreq_g    = first(RelFreq),
+    AbsPref       = first(GenPref),
+    RelFreq_g     = first(RelFreq),
     OverallFreq_g = log(pmax(first(OverallFreq), 1)),
-    .groups = "drop"
+    .groups       = "drop"
   )
 if (use_pile_freq) {
   binom_meta_for_reg <- binom_meta_for_reg |>
-    left_join(pile_freq |> rename(RelFreq_p = pile_freq_prob_c,
+    left_join(pile_freq |> rename(RelFreq_p     = pile_freq_prob_c,
                                    OverallFreq_p = pile_log_total), by = "binom")
 }
 
-fit_abspref_coef <- function(ck_df, model_size_levels, use_pile) {
+# Build traj_meta for abspref: slug × ck_idx → step + tokens
+# (needed to recover x-axis token counts when loading saved .rds files)
+build_abspref_traj_meta <- function(ck_df, model_family_label) {
   ck_df |>
-    filter(binom %in% attested_binoms, !is.na(preference)) |>
-    left_join(binom_meta_for_reg, by = "binom") |>
-    group_by(model, model_size, step, tokens) |>
+    filter(binom %in% attested_binoms) |>
+    group_by(model) |>
     group_modify(function(d, k) {
-      d$rf  <- if (use_pile && "RelFreq_p"     %in% names(d)) coalesce(d$RelFreq_p,     d$RelFreq_g)  else d$RelFreq_g
-      d$ovf <- if (use_pile && "OverallFreq_p" %in% names(d)) coalesce(d$OverallFreq_p, d$OverallFreq_g) else d$OverallFreq_g
-      d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf))
-      if (nrow(d) < 10) return(tibble(estimate = NA_real_, se = NA_real_, n = nrow(d)))
-      d <- d |> mutate(
-        AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
-        rf_c      = as.numeric(scale(rf,      scale = FALSE)),
-        ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+      steps_sel  <- sample_steps_log(d$step, N_TRAJ_CHECKPOINTS)
+      tokens_sel <- map_dbl(steps_sel, ~ d$tokens[d$step == .x][1])
+      tibble(
+        slug     = make_slug(k$model[1]),
+        ck_idx   = seq_along(steps_sel),
+        step     = steps_sel,
+        tokens   = tokens_sel
       )
-      has_prompt <- "prompt" %in% names(d)
-      fit <- tryCatch(
-        if (has_prompt)
-          lmer(preference ~ AbsPref_c + rf_c + ovf_c +
-                 AbsPref_c:ovf_c + rf_c:ovf_c +
-                 (1 | binom) + (1 | prompt), data = d, REML = TRUE)
-        else
-          lm(preference ~ AbsPref_c + rf_c + ovf_c +
-               AbsPref_c:ovf_c + rf_c:ovf_c, data = d),
-        error = function(e) NULL
-      )
-      if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, n = nrow(d)))
-      cf <- summary(fit)$coefficients
-      if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_, n = nrow(d)))
-      tibble(estimate = cf["AbsPref_c", "Estimate"],
-             se       = cf["AbsPref_c", "Std. Error"],
-             n        = nrow(d))
     }) |>
     ungroup() |>
-    mutate(model_size = factor(model_size, levels = model_size_levels))
+    mutate(model_family = model_family_label)
 }
 
-pythia_abspref <- fit_abspref_coef(pythia_ck, PYTHIA_SIZES, use_pile_freq) |>
-  mutate(model_family = "Pythia")
-olmo_abspref   <- fit_abspref_coef(olmo_ck,   OLMO_SIZES,   use_pile_freq) |>
-  mutate(model_family = "OLMo-3")
+abspref_traj_meta <- bind_rows(
+  build_abspref_traj_meta(pythia_ck, "Pythia"),
+  build_abspref_traj_meta(olmo_ck,   "OLMo-3")
+)
+message(sprintf("abspref_traj_meta: %d rows (%d models × up to %d checkpoints)",
+                nrow(abspref_traj_meta), n_distinct(abspref_traj_meta$slug),
+                N_TRAJ_CHECKPOINTS))
+```
 
-bind_rows(pythia_abspref, olmo_abspref) |>
-  filter(!is.na(estimate), tokens > 0) |>
+```{r fit-abspref-traj}
+fit_abspref_traj <- function(ck_df, model_family_label) {
+  models <- sort(unique(ck_df$model))
+  message(sprintf("\n=== [abspref traj] %s — %d models ===", model_family_label, length(models)))
+
+  future_map(models, function(model_name) {
+    slug      <- make_slug(model_name)
+    meta_rows <- filter(abspref_traj_meta,
+                        .data$slug == slug, model_family == model_family_label)
+    mdata <- filter(ck_df, model == model_name) |>
+      filter(binom %in% attested_binoms) |>
+      left_join(binom_meta_for_reg, by = "binom") |>
+      mutate(
+        rf  = if (use_pile_freq && "RelFreq_p"     %in% names(binom_meta_for_reg))
+                coalesce(RelFreq_p,     RelFreq_g)
+              else RelFreq_g,
+        ovf = if (use_pile_freq && "OverallFreq_p" %in% names(binom_meta_for_reg))
+                coalesce(OverallFreq_p, OverallFreq_g)
+              else OverallFreq_g
+      )
+
+    for (i in seq_len(nrow(meta_rows))) {
+      s      <- meta_rows$step[i]
+      ck_idx <- meta_rows$ck_idx[i]
+      ck     <- sprintf("ck%02d", ck_idx)
+      fpath  <- file.path(MODELS_DIR,
+                          sprintf("abspref_traj_%s_%s.rds", slug, ck))
+
+      if (file.exists(fpath)) {
+        message(sprintf("  %s %s — exists, skipping", slug, ck)); next
+      }
+
+      cdat <- filter(mdata, step == s) |>
+        filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf)) |>
+        mutate(
+          AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
+          rf_c      = as.numeric(scale(rf,      scale = FALSE)),
+          ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+        )
+
+      if (nrow(cdat) < 20) {
+        warning(sprintf("Skipping %s %s — only %d rows", slug, ck, nrow(cdat))); next
+      }
+
+      has_prompt <- "prompt" %in% names(cdat)
+      fml <- if (has_prompt)
+        preference ~ AbsPref_c + rf_c + ovf_c +
+          AbsPref_c:ovf_c + rf_c:ovf_c + (1 | binom) + (1 | prompt)
+      else
+        preference ~ AbsPref_c + rf_c + ovf_c +
+          AbsPref_c:ovf_c + rf_c:ovf_c + (1 | binom)
+
+      message(sprintf("  Fitting %s %s  step=%d  n=%d  has_prompt=%s",
+                      slug, ck, s, nrow(cdat), has_prompt))
+      fit <- brm(
+        formula = fml,
+        data    = cdat,
+        family  = gaussian(),
+        prior   = PRIORS_GAUSSIAN,
+        iter    = ITER, warmup = WARMUP, chains = CHAINS, cores = CORES,
+        backend = "cmdstanr", silent = 2, refresh = 0
+      )
+      saveRDS(fit, fpath); rm(fit); gc()
+      message(sprintf("    Saved: %s", basename(fpath)))
+    }
+  }, .options = furrr_options(seed = TRUE))
+  invisible(NULL)
+}
+
+fit_abspref_traj(pythia_ck, "Pythia")
+fit_abspref_traj(olmo_ck,   "OLMo-3")
+message("\nabspref_traj fitting done.")
+```
+
+------------------------------------------------------------------------
+
+## Results
+
+```{r plot-abspref-traj, fig.height=6}
+load_abspref_traj_coefs <- function(model_family_label, size_levels) {
+  meta_rows <- filter(abspref_traj_meta, model_family == model_family_label)
+
+  map_dfr(unique(meta_rows$slug), function(slug) {
+    slug_meta <- filter(meta_rows, .data$slug == slug)
+    map_dfr(seq_len(nrow(slug_meta)), function(i) {
+      ck_idx <- slug_meta$ck_idx[i]
+      tokens <- slug_meta$tokens[i]
+      ck     <- sprintf("ck%02d", ck_idx)
+      fpath  <- file.path(MODELS_DIR,
+                          sprintf("abspref_traj_%s_%s.rds", slug, ck))
+      if (!file.exists(fpath)) return(tibble())
+      fit <- readRDS(fpath)
+      fe  <- as.data.frame(fixef(fit)); rm(fit); gc()
+      if (!"AbsPref_c" %in% rownames(fe)) return(tibble())
+      msize <- if (model_family_label == "Pythia")
+                 parse_pythia_size(slug)
+               else
+                 parse_olmo_size(slug)
+      tibble(
+        slug         = slug,
+        ck_idx       = ck_idx,
+        tokens       = tokens,
+        estimate     = fe["AbsPref_c", "Estimate"],
+        lo           = fe["AbsPref_c", "Q2.5"],
+        hi           = fe["AbsPref_c", "Q97.5"],
+        model_size   = factor(msize, levels = size_levels),
+        model_family = model_family_label
+      )
+    })
+  })
+}
+
+pythia_abspref_coefs <- load_abspref_traj_coefs("Pythia",  PYTHIA_SIZES)
+olmo_abspref_coefs   <- load_abspref_traj_coefs("OLMo-3",  OLMO_SIZES)
+
+bind_rows(pythia_abspref_coefs, olmo_abspref_coefs) |>
+  filter(tokens > 0) |>
   ggplot(aes(x = tokens, y = estimate, colour = model_size,
-             ymin = estimate - 1.96 * se, ymax = estimate + 1.96 * se)) +
+             fill = model_size, ymin = lo, ymax = hi)) +
   facet_grid(model_family ~ ., scales = "free_x") +
   geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
-  geom_ribbon(aes(fill = model_size), alpha = 0.12, colour = NA) +
+  geom_ribbon(alpha = 0.12, colour = NA) +
   geom_line(linewidth = 0.9) +
   geom_point(size = 2) +
   scale_x_continuous("Training tokens (log scale)", trans = "log10",
                      labels = label_number(scale_cut = cut_short_scale())) +
-  scale_y_continuous("AbsPref coefficient β") +
+  scale_y_continuous("AbsPref coefficient  (95% credible interval)") +
   scale_colour_manual(values = c(PYTHIA_COLOURS, OLMO_COLOURS), name = "Model size") +
   scale_fill_manual(values   = c(PYTHIA_COLOURS, OLMO_COLOURS), guide = "none") +
   labs(
     title    = "AbsPref coefficient over training — Pythia & OLMo-3",
-    subtitle = "From lmer(preference ~ AbsPref_c + RelFreq_c + OverallFreq_c + interactions + (1|binom) + (1|prompt)). Ribbon = 95% CI."
+    subtitle = paste0(
+      "brm(preference ~ AbsPref_c + rf_c + ovf_c + AbsPref_c:ovf_c + rf_c:ovf_c + ",
+      "(1|binom) + (1|prompt)). Ribbon = 95% credible interval."
+    )
   ) +
   theme_classic(base_size = 13) +
   theme(strip.background = element_rect(fill = "grey95"),

@@ -53,7 +53,8 @@ dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 N_TRAJ_CHECKPOINTS <- 20
-SIZE_LEVELS <- c("125M", "350M", "1.3B")
+# BabyLM/C4 OPT sizes; Pythia and OLMo sizes appended for constraint_cor_traj
+SIZE_LEVELS <- c("125M", "350M", "1.3B", "160M", "410M", "1.4B", "2.8B", "7B", "32B")
 
 TERM_LEVELS <- c("freq_prob_c", "genpref_c", "log_total_c",
                  "freq_prob_c:log_total_c", "genpref_c:log_total_c")
@@ -82,16 +83,26 @@ TERM_LABELS_ABSGAP <- c(
 # ── Helper functions ──────────────────────────────────────────────────────────
 parse_corpus <- function(x) {
   case_when(
-    grepl("babylm", x, ignore.case = TRUE) ~ "BabyLM",
-    grepl("opt.c4", x, ignore.case = TRUE) ~ "C4",
+    grepl("babylm",  x, ignore.case = TRUE) ~ "BabyLM",
+    grepl("opt.c4",  x, ignore.case = TRUE) ~ "C4",
+    grepl("pythia",  x, ignore.case = TRUE) ~ "The Pile",
+    grepl("olmo",    x, ignore.case = TRUE) ~ "Dolma",
     TRUE ~ NA_character_
   )
 }
 parse_size <- function(x) {
   case_when(
-    grepl("125m",    x, ignore.case = TRUE) ~ "125M",
-    grepl("350m",    x, ignore.case = TRUE) ~ "350M",
-    grepl("1[._]3b", x, ignore.case = TRUE) ~ "1.3B",
+    grepl("125m",      x, ignore.case = TRUE) ~ "125M",
+    grepl("350m",      x, ignore.case = TRUE) ~ "350M",
+    grepl("1[._]3b",   x, ignore.case = TRUE) ~ "1.3B",
+    # Pythia sizes
+    grepl("160m",      x, ignore.case = TRUE) ~ "160M",
+    grepl("410m",      x, ignore.case = TRUE) ~ "410M",
+    grepl("1[._]4b",   x, ignore.case = TRUE) ~ "1.4B",
+    grepl("2[._]8b",   x, ignore.case = TRUE) ~ "2.8B",
+    # OLMo sizes
+    grepl("\\b7b\\b",  x, ignore.case = TRUE) ~ "7B",
+    grepl("\\b32b\\b", x, ignore.case = TRUE) ~ "32B",
     TRUE ~ NA_character_
   )
 }
