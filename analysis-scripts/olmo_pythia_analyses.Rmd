@@ -483,7 +483,8 @@ all_prop <- bind_rows(
 r_labels <- all_prop |>
   group_by(model_family, model_size) |>
   summarise(
-    r   = cor(human_prop_alpha, model_prop_alpha, use = "complete.obs"),
+    r   = tryCatch(cor(human_prop_alpha, model_prop_alpha, use = "complete.obs"),
+                   error = function(e) NA_real_),
     .groups = "drop"
   ) |>
   mutate(lbl = sprintf("r = %.2f", r))
@@ -886,7 +887,8 @@ Mirrors the raw correlation trajectory plots in `analysis2.Rmd` (sections 2a raw
 ```{r cor-relfreq-traj, fig.height=5}
 cor_traj_relfreq <- all_agg |>
   group_by(model_family, model_size, corpus, tokens) |>
-  summarise(r = cor(preference, RelFreq, use = "complete.obs"),
+  summarise(r = tryCatch(cor(preference, RelFreq, use = "complete.obs"),
+                         error = function(e) NA_real_),
             .groups = "drop")
 
 ggplot(cor_traj_relfreq, aes(x = tokens, y = r, colour = model_size)) +
@@ -913,7 +915,8 @@ ggplot(cor_traj_relfreq, aes(x = tokens, y = r, colour = model_size)) +
 ```{r cor-humpref-traj, fig.height=5}
 cor_traj_hum <- all_agg |>
   group_by(model_family, model_size, corpus, tokens) |>
-  summarise(r = cor(preference, hum_pref, use = "complete.obs"),
+  summarise(r = tryCatch(cor(preference, hum_pref, use = "complete.obs"),
+                         error = function(e) NA_real_),
             .groups = "drop")
 
 ggplot(cor_traj_hum, aes(x = tokens, y = r, colour = model_size)) +
@@ -944,7 +947,8 @@ if (have_constraints) {
   cor_traj_constr <- all_agg |>
     group_by(model_family, model_size, corpus, tokens) |>
     summarise(across(all_of(c(CONSTRAINT_COLS_REDUCED, "RelFreq")),
-                     ~ cor(preference, .x, use = "complete.obs")),
+                     ~ tryCatch(cor(preference, .x, use = "complete.obs"),
+                                error = function(e) NA_real_)),
               .groups = "drop") |>
     pivot_longer(cols = all_of(c(CONSTRAINT_COLS_REDUCED, "RelFreq")),
                  names_to = "constraint", values_to = "r") |>
@@ -987,7 +991,8 @@ if (have_constraints) {
     mutate(pref_dev = preference - RelFreq) |>
     group_by(model_family, model_size, corpus, tokens) |>
     summarise(across(all_of(CONSTRAINT_COLS_REDUCED),
-                     ~ cor(pref_dev, .x, use = "complete.obs")),
+                     ~ tryCatch(cor(pref_dev, .x, use = "complete.obs"),
+                                error = function(e) NA_real_)),
               .groups = "drop") |>
     pivot_longer(cols = all_of(CONSTRAINT_COLS_REDUCED),
                  names_to = "constraint", values_to = "r") |>
