@@ -67,10 +67,20 @@ MODEL_CONFIGS = {
     "facebook/opt-30b":              {"params": "30000M",  "family": "OPT",     "label": "OPT-30B",       "skip": False, "multi_gpu": False},  # ~60 GB — fits on one H100
     "facebook/opt-66b":              {"params": "66000M",  "family": "OPT",     "label": "OPT-66B",       "skip": False, "multi_gpu": True},   # ~132 GB — needs both H100s
     "facebook/opt-175b":             {"params": "175000M", "family": "OPT",     "label": "OPT-175B",      "skip": True,  "multi_gpu": True},  # not publicly available on HuggingFace
-    # OLMo family (AllenAI) — trained on Dolma, a curated open web corpus
-    "allenai/OLMo-1B":               {"params": "1000M",   "family": "OLMo",    "label": "OLMo-1B",       "skip": False},
-    "allenai/OLMo-7B":               {"params": "7000M",   "family": "OLMo",    "label": "OLMo-7B",       "skip": False},
-    "allenai/OLMo-2-1124-13B":       {"params": "13000M",  "family": "OLMo",    "label": "OLMo-2-13B",    "skip": False, "multi_gpu": True},
+    # OLMo Gen 1 (AllenAI, Feb 2024) — trained on Dolma
+    "allenai/OLMo-1B-hf":            {"params": "1000M",   "family": "OLMo-1",  "label": "OLMo-1B",          "skip": False},
+    "allenai/OLMo-7B-hf":            {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B",          "skip": False},
+    "allenai/OLMo-1B-0724-hf":       {"params": "1000M",   "family": "OLMo-1",  "label": "OLMo-1B-0724",     "skip": False},
+    "allenai/OLMo-7B-0424-hf":       {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B-0424",     "skip": False},
+    "allenai/OLMo-7B-0724-hf":       {"params": "7000M",   "family": "OLMo-1",  "label": "OLMo-7B-0724",     "skip": False},
+    # OLMo Gen 2 (Nov 2024 – Apr 2025)
+    "allenai/OLMo-2-0425-1B":        {"params": "1000M",   "family": "OLMo-2",  "label": "OLMo-2-1B",        "skip": False},
+    "allenai/OLMo-2-1124-7B":        {"params": "7000M",   "family": "OLMo-2",  "label": "OLMo-2-7B",        "skip": False},
+    "allenai/OLMo-2-1124-13B":       {"params": "13000M",  "family": "OLMo-2",  "label": "OLMo-2-13B",       "skip": False},
+    "allenai/OLMo-2-0325-32B":       {"params": "32000M",  "family": "OLMo-2",  "label": "OLMo-2-32B",       "skip": False, "multi_gpu": True},
+    # OLMo Gen 3 (Oct–Nov 2025)
+    "allenai/Olmo-3-1025-7B":        {"params": "7000M",   "family": "OLMo-3",  "label": "OLMo-3-7B",        "skip": False},
+    "allenai/Olmo-3-1125-32B":       {"params": "32000M",  "family": "OLMo-3",  "label": "OLMo-3-32B",       "skip": False, "multi_gpu": True},
 }
 
 # ── Sentence-frame prompts (same set as model-prefs-all-ckpts.py) ─────────────

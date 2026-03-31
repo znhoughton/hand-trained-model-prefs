@@ -159,7 +159,7 @@ if (use_pile_freq) {
 # GPT-2 / GPT-Neo → Google Books RelFreq (no comparable training-data proxy)
 # OPT and OLMo were both trained on large web corpora → use Pile freq when available.
 # GPT-2 / GPT-Neo → fall back to Google Books RelFreq.
-PILE_FREQ_FAMILIES <- c("OPT", "OLMo")
+PILE_FREQ_FAMILIES <- c("OPT", "OLMo-1", "OLMo-2", "OLMo-3")
 
 choose_freq <- function(d, family) {
   if (use_pile_freq && family %in% PILE_FREQ_FAMILIES && "freq_prob_c_pile" %in% names(d)) {
@@ -263,7 +263,7 @@ results <- delta_ll |>
   filter(!is.na(perplexity)) |>
   mutate(
     params_M     = as.numeric(sub("M$", "", model_params)),
-    model_family = factor(model_family, levels = c("GPT-2", "GPT-Neo", "OPT", "OLMo"))
+    model_family = factor(model_family, levels = c("GPT-2", "GPT-Neo", "OPT", "OLMo-1", "OLMo-2", "OLMo-3"))
   ) |>
   arrange(model_family, params_M)
 
@@ -272,7 +272,14 @@ print(results |> select(model_family, model_label, model_params, perplexity, del
       n = Inf)
 
 # ── Plot aesthetics ───────────────────────────────────────────────────────────
-family_colours <- c("GPT-2" = "#2166ac", "GPT-Neo" = "#4dac26", "OPT" = "#b2182b", "OLMo" = "#d6604d")
+family_colours <- c(
+  "GPT-2"  = "#2166ac",
+  "GPT-Neo"= "#4dac26",
+  "OPT"    = "#b2182b",
+  "OLMo-1" = "#d6604d",
+  "OLMo-2" = "#f4a582",
+  "OLMo-3" = "#92c5de"
+)
 
 shared_layers <- list(
   scale_x_continuous(
