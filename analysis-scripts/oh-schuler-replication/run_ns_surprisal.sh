@@ -52,20 +52,6 @@ fi
 # Format: "model_id|family|params"           (final checkpoint, no revision)
 #         "model_id|family|params|revision"  (specific training checkpoint)
 MODELS=(
-    "gpt2|GPT-2|124M"
-    "gpt2-medium|GPT-2|355M"
-    "gpt2-large|GPT-2|774M"
-    "gpt2-xl|GPT-2|1542M"
-    "EleutherAI/gpt-neo-125m|GPT-Neo|125M"
-    "EleutherAI/gpt-neo-1.3B|GPT-Neo|1300M"
-    "EleutherAI/gpt-neo-2.7B|GPT-Neo|2700M"
-    "facebook/opt-125m|OPT|125M"
-    "facebook/opt-350m|OPT|350M"
-    "facebook/opt-1.3b|OPT|1300M"
-    "facebook/opt-2.7b|OPT|2700M"
-    "facebook/opt-6.7b|OPT|6700M"
-    "facebook/opt-13b|OPT|13000M"
-    "facebook/opt-30b|OPT|30000M"
     # BabyLM — final checkpoint
     "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM|125M"
     "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM|350M"
@@ -90,6 +76,23 @@ MODELS=(
     "znhoughton/opt-c4-125m-seed964|C4 (mid)|125M|step-480"
     "znhoughton/opt-c4-350m-seed964|C4 (mid)|350M|step-312"
     "znhoughton/opt-c4-1.3b-seed964|C4 (mid)|1300M|step-492"
+    # GPT-2
+    "gpt2|GPT-2|124M"
+    "gpt2-medium|GPT-2|355M"
+    "gpt2-large|GPT-2|774M"
+    "gpt2-xl|GPT-2|1542M"
+    # GPT-Neo
+    "EleutherAI/gpt-neo-125m|GPT-Neo|125M"
+    "EleutherAI/gpt-neo-1.3B|GPT-Neo|1300M"
+    "EleutherAI/gpt-neo-2.7B|GPT-Neo|2700M"
+    # OPT
+    "facebook/opt-125m|OPT|125M"
+    "facebook/opt-350m|OPT|350M"
+    "facebook/opt-1.3b|OPT|1300M"
+    "facebook/opt-2.7b|OPT|2700M"
+    "facebook/opt-6.7b|OPT|6700M"
+    "facebook/opt-13b|OPT|13000M"
+    "facebook/opt-30b|OPT|30000M"
 )
 
 # ── Run each model ────────────────────────────────────────────────────────────

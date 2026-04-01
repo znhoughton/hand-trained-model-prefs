@@ -742,6 +742,10 @@ message("\nSlope tests (log2 perplexity × ΔLL) by family:")
 print(slope_tests)
 
 # ── Long-format results for faceting ─────────────────────────────────────────
+FACET_LEVELS <- c("GPT-2", "GPT-Neo", "OPT",
+                  "OLMo-1", "OLMo-2", "OLMo-3",
+                  "Pythia", "BabyLM", "C4")
+
 results_long <- results |>
   pivot_longer(
     cols      = c(delta_ll, pref_coef, estimate),
@@ -752,13 +756,20 @@ results_long <- results |>
   mutate(
     metric = factor(metric,
                     levels = c("delta_ll", "pref_coef", "estimate"),
-                    labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2"))
+                    labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2")),
+    # Collapse early/mid into the parent family column for faceting
+    facet_family = case_when(
+      model_family %in% c("BabyLM (early)", "BabyLM (mid)") ~ "BabyLM",
+      model_family %in% c("C4 (early)",     "C4 (mid)")     ~ "C4",
+      TRUE ~ as.character(model_family)
+    ),
+    facet_family = factor(facet_family, levels = FACET_LEVELS)
   )
 
 # ── Polynomial smooth lines (no CI) for all families × metrics ───────────────
 poly_smooth_all <- function(data_long, n_points = 200) {
   data_long |>
-    group_by(metric, model_family) |>
+    group_by(metric, model_family, facet_family) |>
     group_modify(function(d, k) {
       x_raw <- d$perplexity
       y_raw <- d$value
@@ -792,9 +803,11 @@ y_limits <- results_long |>
   )
 
 # ── Reference lines (y = 0) only for pref / estimate rows ────────────────────
-hline_df <- tibble(
-  metric = factor(c("Model Pref \u03b2", "AbsPref \u03b2"),
-                  levels = levels(results_long$metric))
+hline_df <- expand.grid(
+  metric       = factor(c("Model Pref \u03b2", "AbsPref \u03b2"),
+                        levels = levels(results_long$metric)),
+  facet_family = factor(FACET_LEVELS, levels = FACET_LEVELS),
+  stringsAsFactors = FALSE
 )
 
 # ── Size labels for all rows ──────────────────────────────────────────────────
@@ -806,6 +819,7 @@ labels_df <- results_long |>
       TRUE               ~ paste0(params_num, "M")
     )
   )
+# facet_family already present via results_long
 
 # ── Faceted plot ──────────────────────────────────────────────────────────────
 p_combined <- ggplot(results_long,
@@ -844,7 +858,7 @@ p_combined <- ggplot(results_long,
   scale_y_continuous(NULL) +
   scale_colour_manual(values = family_colours, name = "Model family") +
   guides(colour = guide_legend(override.aes = list(size = 3))) +
-  facet_grid(metric ~ model_family, scales = "free_y") +
+  facet_grid(metric ~ facet_family, scales = "free_y") +
   theme_classic(base_size = 12) +
   theme(
     panel.grid.major  = element_line(colour = "grey92", linewidth = 0.4),
