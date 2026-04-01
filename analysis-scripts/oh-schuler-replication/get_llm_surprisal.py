@@ -60,9 +60,11 @@ def main():
         raise ValueError("Unsupported LLM variant")
 
     if "pythia" in model_variant:
-        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3])
+        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3],
+                    torch_dtype=torch.float16, device_map="auto")
     else:
-        model = AutoModelForCausalLM.from_pretrained(sys.argv[2])
+        model = AutoModelForCausalLM.from_pretrained(sys.argv[2],
+                    torch_dtype=torch.float16, device_map="auto")
 
     model.eval()
     softmax = torch.nn.Softmax(dim=-1)

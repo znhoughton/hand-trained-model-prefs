@@ -265,12 +265,12 @@ delta_ll <- dat |>
     d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
 
     baseline_mod <- glmer(
-      resp_alpha ~ freq_use + ovf + freq_use:ovf + (1 | binom) + (1 | participant),
+      resp_alpha ~ freq_use + (1 | binom) + (1 | participant),
       family = binomial, data = d,
       control = glmerControl(optimizer = "bobyqa")
     )
     full_mod <- glmer(
-      resp_alpha ~ freq_use + ovf + freq_use:ovf + preference +
+      resp_alpha ~ freq_use + preference +
         (1 | binom) + (1 | participant),
       family = binomial, data = d,
       control = glmerControl(optimizer = "bobyqa")
@@ -598,6 +598,16 @@ hline_df <- tibble(
                   levels = levels(results_long$metric))
 )
 
+# ── Size labels for all rows ──────────────────────────────────────────────────
+labels_df <- results_long |>
+  mutate(
+    params_num = as.numeric(gsub("M$", "", model_params)),
+    size_label = case_when(
+      params_num >= 1000 ~ paste0(round(params_num / 1000, 1), "B"),
+      TRUE               ~ paste0(params_num, "M")
+    )
+  )
+
 # ── Faceted plot ──────────────────────────────────────────────────────────────
 p_combined <- ggplot(results_long,
                      aes(x = perplexity, y = value, colour = model_family)) +
@@ -612,6 +622,14 @@ p_combined <- ggplot(results_long,
   ) +
   # data points
   geom_point(size = 2.5, alpha = 0.9) +
+  # size labels in ΔLL row only
+  geom_text(
+    data = labels_df,
+    aes(label = size_label, colour = model_family),
+    vjust = -0.7, hjust = 0.5,
+    size = 2.6, fontface = "bold",
+    show.legend = FALSE
+  ) +
   # per-panel y limits based on data range only
   ggh4x::facetted_pos_scales(
     y = map2(
