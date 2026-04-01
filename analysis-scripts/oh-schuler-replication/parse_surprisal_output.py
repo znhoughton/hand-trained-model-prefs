@@ -37,14 +37,17 @@ def safe_name(model_id):
     return model_id.replace("/", "_")
 
 def main():
-    if len(sys.argv) != 5:
-        print(f"Usage: {sys.argv[0]} <surprisal_file> <model_id> <family> <params>")
+    if len(sys.argv) not in (5, 6):
+        print(f"Usage: {sys.argv[0]} <surprisal_file> <model_id> <family> <params> [revision]")
         sys.exit(1)
 
     surp_file = Path(sys.argv[1])
     model_id  = sys.argv[2]
     family    = sys.argv[3]
     params    = sys.argv[4]
+    revision  = sys.argv[5] if len(sys.argv) == 6 else None
+    # Use model@revision as the key so checkpoints don't overwrite the final entry
+    ppl_key   = f"{model_id}@{revision}" if revision else model_id
 
     # Load corpus word list (ground truth item/zone)
     corpus = pd.read_csv(TOK_FILE, sep="\t",
@@ -101,9 +104,9 @@ def main():
     # Update perplexity CSV
     ppl_df = pd.read_csv(PPL_CSV) if PPL_CSV.exists() else \
              pd.DataFrame(columns=["model", "family", "params", "perplexity"])
-    ppl_df = ppl_df[ppl_df["model"] != model_id]
+    ppl_df = ppl_df[ppl_df["model"] != ppl_key]
     ppl_df = pd.concat([ppl_df, pd.DataFrame([{
-        "model":      model_id,
+        "model":      ppl_key,
         "family":     family,
         "params":     params,
         "perplexity": perplexity,

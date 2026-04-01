@@ -48,8 +48,9 @@ if [[ ! -f "${SENTITEMS}" ]]; then
     python "${PREPARE_SCRIPT}"
 fi
 
-# ── Model list: model_id | family | params ────────────────────────────────────
-# Format: "model_id|family|params"
+# ── Model list: model_id | family | params [| revision] ──────────────────────
+# Format: "model_id|family|params"           (final checkpoint, no revision)
+#         "model_id|family|params|revision"  (specific training checkpoint)
 MODELS=(
     "gpt2|GPT-2|124M"
     "gpt2-medium|GPT-2|355M"
@@ -65,12 +66,30 @@ MODELS=(
     "facebook/opt-6.7b|OPT|6700M"
     "facebook/opt-13b|OPT|13000M"
     "facebook/opt-30b|OPT|30000M"
+    # BabyLM — final checkpoint
     "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM|125M"
     "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM|350M"
     "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM|1300M"
+    # BabyLM — early checkpoint (~1/3 through training, step index 6/19)
+    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (early)|125M|step-144"
+    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (early)|350M|step-96"
+    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (early)|1300M|step-144"
+    # BabyLM — mid checkpoint (~1/2 through training, step index 9/19)
+    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (mid)|125M|step-432"
+    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (mid)|350M|step-288"
+    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (mid)|1300M|step-420"
+    # C4 — final checkpoint
     "znhoughton/opt-c4-125m-seed964|C4|125M"
     "znhoughton/opt-c4-350m-seed964|C4|350M"
     "znhoughton/opt-c4-1.3b-seed964|C4|1300M"
+    # C4 — early checkpoint (~1/3 through training, step index 6/19)
+    "znhoughton/opt-c4-125m-seed964|C4 (early)|125M|step-180"
+    "znhoughton/opt-c4-350m-seed964|C4 (early)|350M|step-112"
+    "znhoughton/opt-c4-1.3b-seed964|C4 (early)|1300M|step-204"
+    # C4 — mid checkpoint (~1/2 through training, step index 9/19)
+    "znhoughton/opt-c4-125m-seed964|C4 (mid)|125M|step-480"
+    "znhoughton/opt-c4-350m-seed964|C4 (mid)|350M|step-312"
+    "znhoughton/opt-c4-1.3b-seed964|C4 (mid)|1300M|step-492"
 )
 
 # ── Run each model ────────────────────────────────────────────────────────────
@@ -82,15 +101,32 @@ for entry in "${MODELS[@]}"; do
     MODEL_ID="${entry%%|*}"
     REST="${entry#*|}"
     FAMILY="${REST%%|*}"
-    PARAMS="${REST##*|}"
+    REST2="${REST#*|}"
+    # Split PARAMS and optional REVISION from the remaining fields
+    if [[ "$REST2" == *"|"* ]]; then
+        PARAMS="${REST2%%|*}"
+        REVISION="${REST2#*|}"
+    else
+        PARAMS="$REST2"
+        REVISION=""
+    fi
 
-    SAFE_NAME="${MODEL_ID//\//_}"
+    # Include revision in safe name so checkpoint CSVs don't collide with final
+    if [[ -n "$REVISION" ]]; then
+        SAFE_NAME="${MODEL_ID//\//_}_${REVISION}"
+    else
+        SAFE_NAME="${MODEL_ID//\//_}"
+    fi
     OUT_CSV="${SURP_DIR}/${SAFE_NAME}.csv"
     RAW_FILE="${RAW_DIR}/${SAFE_NAME}.surprisal"
 
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo "[${IDX}/${TOTAL}] ${MODEL_ID}  (${FAMILY}, ${PARAMS})"
+    if [[ -n "$REVISION" ]]; then
+        echo "[${IDX}/${TOTAL}] ${MODEL_ID}@${REVISION}  (${FAMILY}, ${PARAMS})"
+    else
+        echo "[${IDX}/${TOTAL}] ${MODEL_ID}  (${FAMILY}, ${PARAMS})"
+    fi
     echo "════════════════════════════════════════════════════════════"
 
     # Skip if already done (unless --recompute)
@@ -100,30 +136,40 @@ for entry in "${MODELS[@]}"; do
     fi
 
     # Pre-download model shards to HF cache before loading into GPU memory.
-    # huggingface-cli download streams to disk without loading into RAM,
-    # avoiding the OOM that occurs when download + model load happen together.
-    echo "  Downloading ${MODEL_ID}..."
-    if ! huggingface-cli download "${MODEL_ID}" --repo-type model --quiet; then
-        echo "  ERROR: download failed for ${MODEL_ID}" >&2
+    echo "  Downloading ${MODEL_ID}${REVISION:+@${REVISION}}..."
+    if [[ -n "$REVISION" ]]; then
+        DL_CMD=(huggingface-cli download "${MODEL_ID}" --revision "${REVISION}" --repo-type model --quiet)
+    else
+        DL_CMD=(huggingface-cli download "${MODEL_ID}" --repo-type model --quiet)
+    fi
+    if ! "${DL_CMD[@]}"; then
+        echo "  ERROR: download failed for ${MODEL_ID}${REVISION:+@${REVISION}}" >&2
         continue
     fi
 
     # Run Oh & Schuler's script — outputs to stdout
     echo "  Running get_llm_surprisal.py..."
-    if python "${LLM_SURP_SCRIPT}" "${SENTITEMS}" "${MODEL_ID}" word \
-            > "${RAW_FILE}" 2>"${RAW_DIR}/${SAFE_NAME}.log"; then
+    if [[ -n "$REVISION" ]]; then
+        SURP_CMD=(python "${LLM_SURP_SCRIPT}" "${SENTITEMS}" "${MODEL_ID}" "${REVISION}" word)
+    else
+        SURP_CMD=(python "${LLM_SURP_SCRIPT}" "${SENTITEMS}" "${MODEL_ID}" word)
+    fi
+    if "${SURP_CMD[@]}" > "${RAW_FILE}" 2>"${RAW_DIR}/${SAFE_NAME}.log"; then
         echo "  Surprisal written to ${RAW_FILE}"
     else
-        echo "  ERROR: get_llm_surprisal.py failed for ${MODEL_ID}" >&2
+        echo "  ERROR: get_llm_surprisal.py failed for ${MODEL_ID}${REVISION:+@${REVISION}}" >&2
         echo "  Check log: ${RAW_DIR}/${SAFE_NAME}.log" >&2
-        # Delete cache even on failure to free space for the next model
         huggingface-cli delete-cache --include "${MODEL_ID}" --yes 2>/dev/null || true
         continue
     fi
 
     # Parse raw output into item/zone CSV + update perplexity table
     echo "  Parsing output..."
-    python "${PARSE_SCRIPT}" "${RAW_FILE}" "${MODEL_ID}" "${FAMILY}" "${PARAMS}"
+    if [[ -n "$REVISION" ]]; then
+        python "${PARSE_SCRIPT}" "${RAW_FILE}" "${MODEL_ID}" "${FAMILY}" "${PARAMS}" "${REVISION}"
+    else
+        python "${PARSE_SCRIPT}" "${RAW_FILE}" "${MODEL_ID}" "${FAMILY}" "${PARAMS}"
+    fi
 
     # Delete HF cache to free disk space before the next model downloads
     echo "  Deleting cache for ${MODEL_ID}..."

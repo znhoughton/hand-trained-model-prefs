@@ -26,6 +26,7 @@ DATA_DIR   <- file.path(BASE_DIR, "Data")
 PREFS_CSV           <- file.path(SCRIPT_DIR, "oh_schuler_prefs.csv")
 PREFS_BY_PROMPT_CSV <- file.path(SCRIPT_DIR, "oh_schuler_prefs_by_prompt.csv")
 PPL_CSV             <- file.path(SCRIPT_DIR, "oh_schuler_perplexity.csv")
+NS_PPL_CSV          <- file.path(SCRIPT_DIR, "ns_surprisal", "ns_perplexity.csv")
 HUMAN_CSV           <- file.path(DATA_DIR, "all_human_data.csv")
 BINOMS_CSV          <- file.path(DATA_DIR, "nonce_and_attested_binoms.csv")
 PILE_FREQ_CSV       <- file.path(SCRIPT_DIR, "pile_corpus_freq.csv")
@@ -177,6 +178,16 @@ ppl <- read_csv(PPL_CSV, show_col_types = FALSE) |>
   # Drop stale duplicate OLMo rows (non-hf IDs) — keep -hf variants as canonical
   filter(!model %in% c("allenai/OLMo-1B", "allenai/OLMo-7B"))
 
+# Merge in checkpoint perplexities from ns_perplexity.csv (model@revision keys)
+if (file.exists(NS_PPL_CSV)) {
+  ns_ppl <- read_csv(NS_PPL_CSV, show_col_types = FALSE) |>
+    filter(grepl("@", model))   # only checkpoint entries have @revision
+  if (nrow(ns_ppl) > 0) {
+    ppl <- bind_rows(ppl, ns_ppl |> select(model, family, params, perplexity))
+    log_line(sprintf("Merged %d checkpoint perplexity rows from ns_perplexity.csv", nrow(ns_ppl)))
+  }
+}
+
 # ── Log drop counts ───────────────────────────────────────────────────────────
 n_human_before  <- n_distinct(human_trials_all$binom)
 n_human_after   <- n_distinct(human_trials$binom)
@@ -275,13 +286,31 @@ delta_ll <- dat |>
       family = binomial, data = d,
       control = glmerControl(optimizer = "bobyqa")
     )
-    pref_coef <- fixef(full_mod)[["preference"]]
     tibble(
-      delta_ll  = as.numeric(logLik(full_mod)) - as.numeric(logLik(baseline_mod)),
-      pref_coef = pref_coef,
-      n_trials  = nrow(d),
-      n_items   = n_distinct(d$binom)
+      delta_ll = as.numeric(logLik(full_mod)) - as.numeric(logLik(baseline_mod)),
+      n_trials = nrow(d),
+      n_items  = n_distinct(d$binom)
     )
+  }) |>
+  ungroup()
+
+# ── Fit separate GLM for model-preference coefficient ─────────────────────────
+message("Fitting model-preference GLMs ...")
+pref_coef_results <- dat |>
+  group_by(model, model_family, model_params, model_label) |>
+  group_modify(function(d, k) {
+    d <- filter(d, !is.na(preference))
+    if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+    fit <- tryCatch(
+      glmer(
+        resp_alpha ~ preference + (1 | binom) + (1 | participant),
+        family  = binomial, data = d,
+        control = glmerControl(optimizer = "bobyqa")
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) return(tibble(pref_coef = NA_real_))
+    tibble(pref_coef = fixef(fit)[["preference"]])
   }) |>
   ungroup()
 
@@ -407,10 +436,26 @@ if (file.exists(TRAIN_CSV)) {
         family = binomial, data = d,
         control = glmerControl(optimizer = "bobyqa")
       )
-      pref_coef <- fixef(full)[["preference"]]
-      tibble(delta_ll  = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
-             pref_coef = pref_coef,
-             n_trials  = nrow(d), n_items = n_distinct(d$binom))
+      tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+             n_trials = nrow(d), n_items = n_distinct(d$binom))
+    }) |>
+    ungroup()
+
+  pythia_pref_coef <- pythia_dat |>
+    group_by(model, model_family, model_params, model_label) |>
+    group_modify(function(d, k) {
+      d <- filter(d, !is.na(preference))
+      if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+      fit <- tryCatch(
+        glmer(
+          resp_alpha ~ preference + (1 | binom) + (1 | participant),
+          family  = binomial, data = d,
+          control = glmerControl(optimizer = "bobyqa")
+        ),
+        error = function(e) NULL
+      )
+      if (is.null(fit)) return(tibble(pref_coef = NA_real_))
+      tibble(pref_coef = fixef(fit)[["preference"]])
     }) |>
     ungroup()
 
@@ -452,6 +497,7 @@ if (file.exists(TRAIN_CSV)) {
     ungroup()
 
   pythia_results <- pythia_delta_ll |>
+    left_join(pythia_pref_coef |> select(model, pref_coef), by = "model") |>
     left_join(pythia_abspref_coef |> select(model, estimate, se, t, p), by = "model") |>
     left_join(ppl |> select(model, perplexity), by = "model") |>
     mutate(params_M = as.numeric(sub("M$", "", model_params)))
@@ -462,8 +508,152 @@ if (file.exists(TRAIN_CSV)) {
   message("training_attested.csv not found — Pythia points omitted.")
 }
 
+# ── BabyLM / C4 training-checkpoint families ─────────────────────────────────
+# For each model, pick the step at index floor(n/3) as "early" and floor(n/2)
+# as "mid" (skipping the first checkpoint in both cases).
+ck_results <- NULL
+if (file.exists(TRAIN_CSV)) {
+  message("Building BabyLM/C4 checkpoint families ...")
+
+  train_ck <- read_csv(TRAIN_CSV, show_col_types = FALSE) |>
+    filter(grepl("babylm|opt-c4", model, ignore.case = TRUE)) |>
+    filter(binom %in% attested_binoms)
+
+  # Per model, identify the early and mid step numbers
+  ck_map <- train_ck |>
+    distinct(model, step, checkpoint) |>
+    group_by(model) |>
+    arrange(step) |>
+    mutate(
+      n     = n(),
+      idx   = row_number() - 1L,        # 0-based index
+      phase = case_when(
+        idx == floor(n[1] / 3) ~ "early",
+        idx == floor(n[1] / 2) ~ "mid",
+        TRUE                   ~ NA_character_
+      )
+    ) |>
+    filter(!is.na(phase)) |>
+    select(model, step, checkpoint, phase) |>
+    ungroup()
+
+  # Base corpus tag (BabyLM / C4) and params for each model
+  ck_map <- ck_map |>
+    mutate(
+      base_family  = if_else(grepl("babylm", model, TRUE), "BabyLM", "C4"),
+      model_family = paste0(base_family, " (", phase, ")"),
+      model_params = parse_params(model),
+      model_label  = paste0(model_family, "-", model_params),
+      # Key used to look up perplexity: model@checkpoint
+      ppl_key      = paste0(model, "@", checkpoint)
+    )
+
+  ck_dat <- human_trials |>
+    select(binom, participant, resp_alpha, RelFreq, OverallFreq) |>
+    inner_join(
+      train_ck |>
+        inner_join(ck_map |> select(model, step, model_family, model_params,
+                                    model_label, ppl_key),
+                   by = c("model", "step")) |>
+        select(model, model_family, model_params, model_label, ppl_key,
+               binom, preference),
+      by = "binom"
+    )
+
+  if (use_pile_freq) {
+    ck_dat <- ck_dat |>
+      left_join(pile_freq |> rename(freq_prob_c_pile = freq_prob_c), by = "binom")
+  }
+
+  ck_delta_ll <- ck_dat |>
+    group_by(model, model_family, model_params, model_label, ppl_key) |>
+    group_modify(function(d, k) {
+      d <- choose_freq(d, k$model_family)
+      d <- filter(d, !is.na(freq_use), !is.na(preference))
+      if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
+      d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
+      baseline <- glmer(resp_alpha ~ freq_use + (1 | binom) + (1 | participant),
+                        family = binomial, data = d,
+                        control = glmerControl(optimizer = "bobyqa"))
+      full     <- glmer(resp_alpha ~ freq_use + preference + (1 | binom) + (1 | participant),
+                        family = binomial, data = d,
+                        control = glmerControl(optimizer = "bobyqa"))
+      tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+             n_trials = nrow(d), n_items = n_distinct(d$binom))
+    }) |>
+    ungroup()
+
+  ck_pref_coef <- ck_dat |>
+    group_by(model, model_family, model_params, model_label, ppl_key) |>
+    group_modify(function(d, k) {
+      d <- filter(d, !is.na(preference))
+      if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+      fit <- tryCatch(
+        glmer(resp_alpha ~ preference + (1 | binom) + (1 | participant),
+              family = binomial, data = d,
+              control = glmerControl(optimizer = "bobyqa")),
+        error = function(e) NULL
+      )
+      if (is.null(fit)) return(tibble(pref_coef = NA_real_))
+      tibble(pref_coef = fixef(fit)[["preference"]])
+    }) |>
+    ungroup()
+
+  ck_abspref <- train_ck |>
+    inner_join(ck_map |> select(model, step, model_family, model_params, model_label, ppl_key),
+               by = c("model", "step")) |>
+    left_join(binom_items, by = "binom") |>
+    group_by(model, model_family, model_params, model_label, ppl_key) |>
+    group_modify(function(d, k) {
+      if (use_pile_freq && "RelFreq_pile" %in% names(d)) {
+        d$rf  <- coalesce(d$RelFreq_pile,     d$RelFreq_google)
+        d$ovf <- coalesce(d$OverallFreq_pile, d$OverallFreq_google)
+      } else {
+        d$rf  <- d$RelFreq_google
+        d$ovf <- d$OverallFreq_google
+      }
+      d <- filter(d, !is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+      if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
+                                     t = NA_real_, p = NA_real_, n = nrow(d)))
+      d <- d |> mutate(
+        AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
+        rf_c      = as.numeric(scale(rf,      scale = FALSE)),
+        ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+      )
+      fit <- tryCatch(
+        lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+               AbsPref_c:ovf_c + rf_c:ovf_c + (1 | binom),
+             data = d, REML = TRUE),
+        error = function(e) lm(preference ~ AbsPref_c + rf_c + ovf_c +
+                                 AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+      )
+      cf <- summary(fit)$coefficients
+      if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
+                                                         t = NA_real_, p = NA_real_, n = nrow(d)))
+      tibble(estimate = cf["AbsPref_c", "Estimate"],
+             se       = cf["AbsPref_c", "Std. Error"],
+             t        = cf["AbsPref_c", "t value"],
+             p        = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+             n        = nrow(d))
+    }) |>
+    ungroup()
+
+  ck_results <- ck_delta_ll |>
+    left_join(ck_pref_coef  |> select(model, model_family, ppl_key, pref_coef),
+              by = c("model", "model_family", "ppl_key")) |>
+    left_join(ck_abspref    |> select(model, model_family, ppl_key, estimate, se, t, p),
+              by = c("model", "model_family", "ppl_key")) |>
+    left_join(ppl |> select(model, perplexity), by = c("ppl_key" = "model")) |>
+    filter(!is.na(perplexity)) |>
+    mutate(params_M = as.numeric(sub("M$", "", model_params)))
+
+  message(sprintf("  BabyLM/C4 checkpoints: %d rows retained with perplexity", nrow(ck_results)))
+}
+
 # ── Combine and join perplexity ───────────────────────────────────────────────
 results <- delta_ll |>
+  left_join(pref_coef_results |> select(model, pref_coef),
+            by = "model") |>
   left_join(abspref_coef, by = c("model", "model_family", "model_params", "model_label")) |>
   left_join(ppl |> select(model, perplexity), by = "model") |>
   filter(!is.na(perplexity)) |>
@@ -471,6 +661,9 @@ results <- delta_ll |>
 
 if (!is.null(pythia_results) && nrow(pythia_results) > 0) {
   results <- bind_rows(results, pythia_results |> filter(!is.na(perplexity)))
+}
+if (!is.null(ck_results) && nrow(ck_results) > 0) {
+  results <- bind_rows(results, ck_results |> filter(!is.na(perplexity)))
 }
 
 # Warn about any remaining NA labels (should be 0 after fixes above)
@@ -485,7 +678,9 @@ results <- results |>
     model_family = factor(model_family,
                           levels = c("GPT-2", "GPT-Neo", "OPT",
                                      "OLMo-1", "OLMo-2", "OLMo-3",
-                                     "Pythia", "BabyLM", "C4"))
+                                     "Pythia", "BabyLM", "C4",
+                                     "BabyLM (early)", "BabyLM (mid)",
+                                     "C4 (early)", "C4 (mid)"))
   ) |>
   arrange(model_family, params_M)
 
@@ -496,15 +691,19 @@ print(results |> select(model_family, model_label, model_params, perplexity,
 
 # ── Plot aesthetics ───────────────────────────────────────────────────────────
 family_colours <- c(
-  "GPT-2"   = "#2166ac",
-  "GPT-Neo" = "#4dac26",
-  "OPT"     = "#b2182b",
-  "OLMo-1"  = "#d6604d",
-  "OLMo-2"  = "#f4a582",
-  "OLMo-3"  = "#92c5de",
-  "Pythia"  = "#762a83",
-  "BabyLM"  = "#e08214",
-  "C4"      = "#35978f"
+  "GPT-2"          = "#2166ac",
+  "GPT-Neo"        = "#4dac26",
+  "OPT"            = "#b2182b",
+  "OLMo-1"         = "#d6604d",
+  "OLMo-2"         = "#f4a582",
+  "OLMo-3"         = "#92c5de",
+  "Pythia"         = "#762a83",
+  "BabyLM"         = "#e08214",
+  "BabyLM (early)" = "#fdbf6f",   # light orange
+  "BabyLM (mid)"   = "#c87a0d",   # darker orange
+  "C4"             = "#35978f",
+  "C4 (early)"     = "#80cdc1",   # light teal
+  "C4 (mid)"       = "#01665e"    # dark teal
 )
 
 shared_layers <- list(

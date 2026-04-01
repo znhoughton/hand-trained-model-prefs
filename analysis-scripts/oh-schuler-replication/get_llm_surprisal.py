@@ -48,23 +48,27 @@ def main():
     mode = sys.argv[-1]
     assert mode in {"token", "word"}, ValueError('Calculation mode must be "token" or "word"')
 
+    # Optional revision: present when 5 args are passed (sentitems model revision mode)
+    revision = sys.argv[3] if len(sys.argv) == 5 else None
+    rev_kwargs = {"revision": revision} if revision else {}
+
     if "gpt-neox" in model_variant:
-        tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2])
+        tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2], **rev_kwargs)
     elif "gpt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **rev_kwargs)
     elif "opt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **rev_kwargs)
     elif "pythia" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], revision=sys.argv[3])
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], **rev_kwargs)
     else:
         raise ValueError("Unsupported LLM variant")
 
     if "pythia" in model_variant:
-        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3],
-                    torch_dtype=torch.float16, device_map="auto")
+        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2],
+                    torch_dtype=torch.float16, device_map="auto", **rev_kwargs)
     else:
         model = AutoModelForCausalLM.from_pretrained(sys.argv[2],
-                    torch_dtype=torch.float16, device_map="auto")
+                    torch_dtype=torch.float16, device_map="auto", **rev_kwargs)
 
     model.eval()
     softmax = torch.nn.Softmax(dim=-1)
