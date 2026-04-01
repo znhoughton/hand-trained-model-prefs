@@ -9,7 +9,7 @@
 # Output: delta_ll_plot.pdf / .png
 
 library(tidyverse)
-library(ggrepel)
+library(ggh4x)
 library(lme4)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -556,7 +556,7 @@ results_long <- results |>
                     labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2"))
   )
 
-# ── Polynomial CIs for all families × metrics ────────────────────────────────
+# ── Polynomial smooth lines (no CI) for all families × metrics ───────────────
 poly_smooth_all <- function(data_long, n_points = 200) {
   data_long |>
     group_by(metric, model_family) |>
@@ -568,27 +568,29 @@ poly_smooth_all <- function(data_long, n_points = 200) {
       if (n_ok < 2) return(tibble())
       x_log <- log2(x_raw[ok])
       x_seq <- seq(min(x_log), max(x_log), length.out = n_points)
-      if (n_ok == 2) {
-        # straight line only, no ribbon
-        fit_obj <- lm(y ~ x, data = data.frame(x = x_log, y = y_raw[ok]))
-        pred    <- predict(fit_obj, newdata = data.frame(x = x_seq))
-        return(tibble(perplexity = 2^x_seq, fit = pred,
-                      lwr = NA_real_, upr = NA_real_, has_ribbon = FALSE))
-      }
       deg     <- max(1L, min(2L, n_ok - 2L))
       fit_obj <- lm(y ~ poly(x, deg), data = data.frame(x = x_log, y = y_raw[ok]))
-      pred    <- predict(fit_obj, newdata = data.frame(x = x_seq),
-                         interval = "confidence")
-      tibble(perplexity = 2^x_seq,
-             fit        = pred[, "fit"],
-             lwr        = pred[, "lwr"],
-             upr        = pred[, "upr"],
-             has_ribbon = TRUE)
+      pred    <- predict(fit_obj, newdata = data.frame(x = x_seq))
+      tibble(perplexity = 2^x_seq, fit = pred)
     }) |>
     ungroup()
 }
 
 smooth_long <- poly_smooth_all(results_long)
+
+# ── y-axis limits: data range only (no CI inflation) ─────────────────────────
+y_limits <- results_long |>
+  group_by(metric) |>
+  summarise(
+    ymin = min(value, na.rm = TRUE),
+    ymax = max(value, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    pad  = (ymax - ymin) * 0.1,
+    ymin = ymin - pad,
+    ymax = ymax + pad
+  )
 
 # ── Reference lines (y = 0) only for pref / estimate rows ────────────────────
 hline_df <- tibble(
@@ -602,14 +604,7 @@ p_combined <- ggplot(results_long,
   # y = 0 reference
   geom_hline(data = hline_df, aes(yintercept = 0),
              linetype = "dotted", colour = "grey50", inherit.aes = FALSE) +
-  # CI ribbons (families with ≥3 points)
-  geom_ribbon(
-    data = filter(smooth_long, has_ribbon),
-    aes(x = perplexity, ymin = lwr, ymax = upr,
-        fill = model_family, group = model_family),
-    alpha = 0.15, colour = NA, inherit.aes = FALSE
-  ) +
-  # smooth lines (all families)
+  # polynomial smooth lines (no CI ribbon)
   geom_line(
     data = smooth_long,
     aes(x = perplexity, y = fit, colour = model_family, group = model_family),
@@ -617,15 +612,12 @@ p_combined <- ggplot(results_long,
   ) +
   # data points
   geom_point(size = 2.5, alpha = 0.9) +
-  # non-overlapping size labels
-  ggrepel::geom_text_repel(
-    aes(label = model_params),
-    size = 2.8, fontface = "bold",
-    show.legend = FALSE,
-    min.segment.length = 0.2,
-    box.padding = 0.3,
-    point.padding = 0.2,
-    max.overlaps = 20
+  # per-panel y limits based on data range only
+  ggh4x::facetted_pos_scales(
+    y = map2(
+      y_limits$ymin, y_limits$ymax,
+      ~ scale_y_continuous(limits = c(.x, .y))
+    )
   ) +
   scale_x_continuous(
     "Validation perplexity (log\u2082 scale)",
@@ -634,7 +626,6 @@ p_combined <- ggplot(results_long,
   ) +
   scale_y_continuous(NULL) +
   scale_colour_manual(values = family_colours, name = "Model family") +
-  scale_fill_manual(values = family_colours, guide = "none") +
   guides(colour = guide_legend(override.aes = list(size = 3))) +
   facet_grid(metric ~ model_family, scales = "free_y") +
   theme_classic(base_size = 12) +
