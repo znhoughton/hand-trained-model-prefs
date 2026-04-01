@@ -377,11 +377,12 @@ abspref_coef <- model_prefs |>
                                                        t = NA_real_, p = NA_real_,
                                                        relfreq_coef = NA_real_, n = nrow(d_fit)))
     tibble(
-      estimate = cf["AbsPref_c", "Estimate"],
-      se       = cf["AbsPref_c", "Std. Error"],
-      t        = cf["AbsPref_c", "t value"],
-      p        = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
-      n        = nrow(d_fit)
+      estimate     = cf["AbsPref_c", "Estimate"],
+      se           = cf["AbsPref_c", "Std. Error"],
+      t            = cf["AbsPref_c", "t value"],
+      p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+      relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
+      n            = nrow(d_fit)
     )
   }) |>
   ungroup()

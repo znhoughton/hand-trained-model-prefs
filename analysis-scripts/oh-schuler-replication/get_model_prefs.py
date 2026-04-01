@@ -92,6 +92,22 @@ MODEL_CONFIGS = {
     "znhoughton/opt-c4-125m-seed964":            {"params": "125M",   "family": "C4",     "label": "C4-125M",     "skip": False},
     "znhoughton/opt-c4-350m-seed964":            {"params": "350M",   "family": "C4",     "label": "C4-350M",     "skip": False},
     "znhoughton/opt-c4-1.3b-seed964":            {"params": "1300M",  "family": "C4",     "label": "C4-1.3B",     "skip": False},
+    # BabyLM — early checkpoint (step index 6/19, ~1/3 through training)
+    "znhoughton/opt-babylm-125m-64eps-seed964@step-144": {"params": "125M",  "family": "BabyLM (early)", "label": "BabyLM (early)-125M",  "skip": False, "ppl_only": True, "revision": "step-144"},
+    "znhoughton/opt-babylm-350m-64eps-seed964@step-96":  {"params": "350M",  "family": "BabyLM (early)", "label": "BabyLM (early)-350M",  "skip": False, "ppl_only": True, "revision": "step-96"},
+    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-144": {"params": "1300M", "family": "BabyLM (early)", "label": "BabyLM (early)-1.3B",  "skip": False, "ppl_only": True, "revision": "step-144"},
+    # BabyLM — mid checkpoint (step index 9/19, ~1/2 through training)
+    "znhoughton/opt-babylm-125m-64eps-seed964@step-432": {"params": "125M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-125M",    "skip": False, "ppl_only": True, "revision": "step-432"},
+    "znhoughton/opt-babylm-350m-64eps-seed964@step-288": {"params": "350M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-350M",    "skip": False, "ppl_only": True, "revision": "step-288"},
+    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-420": {"params": "1300M", "family": "BabyLM (mid)",   "label": "BabyLM (mid)-1.3B",    "skip": False, "ppl_only": True, "revision": "step-420"},
+    # C4 — early checkpoint (step index 6/19, ~1/3 through training)
+    "znhoughton/opt-c4-125m-seed964@step-180":  {"params": "125M",  "family": "C4 (early)", "label": "C4 (early)-125M",  "skip": False, "ppl_only": True, "revision": "step-180"},
+    "znhoughton/opt-c4-350m-seed964@step-112":  {"params": "350M",  "family": "C4 (early)", "label": "C4 (early)-350M",  "skip": False, "ppl_only": True, "revision": "step-112"},
+    "znhoughton/opt-c4-1.3b-seed964@step-204":  {"params": "1300M", "family": "C4 (early)", "label": "C4 (early)-1.3B",  "skip": False, "ppl_only": True, "revision": "step-204"},
+    # C4 — mid checkpoint (step index 9/19, ~1/2 through training)
+    "znhoughton/opt-c4-125m-seed964@step-480":  {"params": "125M",  "family": "C4 (mid)",   "label": "C4 (mid)-125M",    "skip": False, "ppl_only": True, "revision": "step-480"},
+    "znhoughton/opt-c4-350m-seed964@step-312":  {"params": "350M",  "family": "C4 (mid)",   "label": "C4 (mid)-350M",    "skip": False, "ppl_only": True, "revision": "step-312"},
+    "znhoughton/opt-c4-1.3b-seed964@step-492":  {"params": "1300M", "family": "C4 (mid)",   "label": "C4 (mid)-1.3B",    "skip": False, "ppl_only": True, "revision": "step-492"},
 }
 
 # ── Sentence-frame prompts ────────────────────────────────────────────────────
@@ -325,7 +341,11 @@ def main():
             print(f"Skipping {model_id} (skip=True)")
             continue
 
-        model_safe   = model_id.replace("/", "_")
+        # model_id may be "hf/model@revision" for checkpoint entries
+        revision = cfg.get("revision", None)
+        hf_id    = model_id.split("@")[0] if "@" in model_id else model_id
+
+        model_safe   = model_id.replace("/", "_").replace("@", "_")
         staging_path = STAGING_DIR / f"{model_safe}_staging.csv"
 
         print("=" * 60)
@@ -355,7 +375,9 @@ def main():
         prefs_done_now = prefs_done
         ppl_done_now   = ppl_done
 
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        rev_kwargs = {"revision": revision} if revision else {}
+
+        tokenizer = AutoTokenizer.from_pretrained(hf_id, **rev_kwargs)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
@@ -370,18 +392,20 @@ def main():
                 print("  Loading model ...")
                 if multi_gpu:
                     model = AutoModelForCausalLM.from_pretrained(
-                        model_id,
+                        hf_id,
                         torch_dtype=torch.float16,
                         device_map="auto",
                         low_cpu_mem_usage=True,
                         cache_dir=tmp_cache,
                         max_memory={0: "75GiB", 1: "75GiB"},
+                        **rev_kwargs,
                     ).eval()
                     print(f"  Loaded with device_map='auto' across {torch.cuda.device_count()} GPUs")
                 else:
                     model = AutoModelForCausalLM.from_pretrained(
-                        model_id, torch_dtype=dtype,
+                        hf_id, torch_dtype=dtype,
                         low_cpu_mem_usage=True, cache_dir=tmp_cache,
+                        **rev_kwargs,
                     ).to(device).eval()
             else:
                 print("  All prompts already in staging — skipping model load.")
@@ -423,14 +447,16 @@ def main():
                     print("  Loading model for perplexity ...")
                     if multi_gpu:
                         model = AutoModelForCausalLM.from_pretrained(
-                            model_id, dtype=torch.float16, device_map="auto",
+                            hf_id, dtype=torch.float16, device_map="auto",
                             low_cpu_mem_usage=True, cache_dir=tmp_cache,
                             max_memory={0: "75GiB", 1: "75GiB"},
+                            **rev_kwargs,
                         ).eval()
                     else:
                         model = AutoModelForCausalLM.from_pretrained(
-                            model_id, torch_dtype=dtype,
+                            hf_id, torch_dtype=dtype,
                             low_cpu_mem_usage=True, cache_dir=tmp_cache,
+                            **rev_kwargs,
                         ).to(device).eval()
 
                 print("  Computing validation perplexity (WikiText-2 test) ...")

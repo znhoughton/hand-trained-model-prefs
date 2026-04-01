@@ -48,27 +48,23 @@ def main():
     mode = sys.argv[-1]
     assert mode in {"token", "word"}, ValueError('Calculation mode must be "token" or "word"')
 
-    # Optional revision: present when 5 args are passed (sentitems model revision mode)
-    revision = sys.argv[3] if len(sys.argv) == 5 else None
-    rev_kwargs = {"revision": revision} if revision else {}
-
     if "gpt-neox" in model_variant:
-        tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2], **rev_kwargs)
+        tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2])
     elif "gpt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **rev_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False)
     elif "opt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **rev_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False)
     elif "pythia" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], **rev_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], revision=sys.argv[3])
     else:
         raise ValueError("Unsupported LLM variant")
 
     if "pythia" in model_variant:
-        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2],
-                    torch_dtype=torch.float16, device_map="auto", **rev_kwargs)
+        model = GPTNeoXForCausalLM.from_pretrained(sys.argv[2], revision=sys.argv[3],
+                    torch_dtype=torch.float16, device_map="auto")
     else:
         model = AutoModelForCausalLM.from_pretrained(sys.argv[2],
-                    torch_dtype=torch.float16, device_map="auto", **rev_kwargs)
+                    torch_dtype=torch.float16, device_map="auto")
 
     model.eval()
     device = next(model.parameters()).device
@@ -84,8 +80,11 @@ def main():
         ids = tokenizer_output.input_ids
         attn = tokenizer_output.attention_mask
 
-        # these tokenizers do not append bos_id by default
-        if "gpt" in model_variant or "pythia" in model_variant:
+        # Prepend BOS if the tokenizer did not add it automatically.
+        # Standard facebook/opt-* tokenizers prepend BOS; custom OPT-based
+        # models (opt-babylm-*, opt-c4-*) may not.  GPT-2/GPT-Neo/Pythia
+        # never add BOS automatically.  Checking the first id is universal.
+        if bos_id is not None and (len(ids) == 0 or ids[0] != bos_id):
             ids = [bos_id] + ids
             attn = [1] + attn
 

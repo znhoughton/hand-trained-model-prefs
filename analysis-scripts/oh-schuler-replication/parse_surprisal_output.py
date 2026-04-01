@@ -37,17 +37,14 @@ def safe_name(model_id):
     return model_id.replace("/", "_")
 
 def main():
-    if len(sys.argv) not in (5, 6):
-        print(f"Usage: {sys.argv[0]} <surprisal_file> <model_id> <family> <params> [revision]")
+    if len(sys.argv) != 5:
+        print(f"Usage: {sys.argv[0]} <surprisal_file> <model_id> <family> <params>")
         sys.exit(1)
 
     surp_file = Path(sys.argv[1])
     model_id  = sys.argv[2]
     family    = sys.argv[3]
     params    = sys.argv[4]
-    revision  = sys.argv[5] if len(sys.argv) == 6 else None
-    # Use model@revision as the key so checkpoints don't overwrite the final entry
-    ppl_key   = f"{model_id}@{revision}" if revision else model_id
 
     # Load corpus word list (ground truth item/zone)
     # Format is headerless TSV: !item!zone\tword
@@ -101,6 +98,9 @@ def main():
 
     # Perplexity: surprisal values are in bits → mean * log(2) gives mean NLL in nats
     valid_surp = [r["surprisal"] for r in records if not math.isnan(r["surprisal"])]
+    if len(valid_surp) == 0:
+        print("ERROR: no valid surprisal values — check get_llm_surprisal.py output")
+        sys.exit(1)
     mean_nll_nats = (sum(valid_surp) / len(valid_surp)) * math.log(2)
     perplexity = math.exp(mean_nll_nats)
     print(f"Corpus perplexity: {perplexity:.4f}")
@@ -108,9 +108,9 @@ def main():
     # Update perplexity CSV
     ppl_df = pd.read_csv(PPL_CSV) if PPL_CSV.exists() else \
              pd.DataFrame(columns=["model", "family", "params", "perplexity"])
-    ppl_df = ppl_df[ppl_df["model"] != ppl_key]
+    ppl_df = ppl_df[ppl_df["model"] != model_id]
     ppl_df = pd.concat([ppl_df, pd.DataFrame([{
-        "model":      ppl_key,
+        "model":      model_id,
         "family":     family,
         "params":     params,
         "perplexity": perplexity,
