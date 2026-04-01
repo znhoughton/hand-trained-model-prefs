@@ -1,27 +1,46 @@
 #!/usr/bin/env Rscript
 # reading_time_delta_ll.R
 # =======================
-# Replication of Oh & Schuler (2023) Figure 1 (Natural Stories SPR panel)
+# Replication of Oh & Schuler (2023, TACL) Figure 1 — Natural Stories SPR panel
 # extended with BabyLM and C4 models.
 #
-# Method (following Oh & Schuler 2023, Section 3.3):
-#   Baseline LME: log(RT) ~ word_length + word_position
-#                           + (1 + word_length + word_position | subject)
-#                           + (1 | word_type)
-#                           + (1 | subject_sentence)
-#   Full LME: same + surprisal + (surprisal | subject) [added to random slopes]
-#   ΔLL = logLik(full) - logLik(baseline)
-#   Split: exploratory set = rows where (subject_id + sentence_id) %% 2 == 0
+# ── Methodology (Section 3.3 of the paper) ────────────────────────────────────
+# Response variable : log(RT)   [natural log, as in lme4 default]
+# Baseline predictors: word_length (nchar), word_position (zone within story)
+#                      — both centred and scaled (z-scored)
+# Random effects    : (1 + word_length_s + word_position_s | subject)   ← by-subject
+#                   + (1 | word_type)                                    ← by-word-type
+#                   + (1 | subject:item)                                 ← subject×sentence
+#   "The LME models included by-subject random slopes for all fixed effects
+#    as well as random intercepts for each subject and each word type.
+#    Additionally, for self-paced reading times … a random intercept for each
+#    subject-sentence interaction was included."  (Oh & Schuler 2023, p.339)
+# Full model: baseline + surprisal_s (also with by-subject random slope)
+# ΔLL = logLik(full) − logLik(baseline)   [REML = FALSE throughout]
+# Package: lme4::lmer()
 #
-# Inputs:
-#   natural_stories/processed_RTs.tsv  — Natural Stories reading times
-#     (download from github.com/languageMIT/naturalstories)
-#   ns_surprisal/<model>.csv           — per-word surprisal (from get_ns_surprisal.py)
-#   ns_surprisal/ns_perplexity.csv     — corpus perplexity per model
+# ── Filtering (Section 3.1) ───────────────────────────────────────────────────
+# - Remove subjects with correct ≤ 3 comprehension answers
+# - Remove sentence-initial (zone == 1) and sentence-final (zone == max per item) words
+# - Remove RTs < 100 ms or > 3000 ms
+# - All observations log-transformed before fitting
 #
-# Output:
-#   ns_delta_ll.csv          — ΔLL and perplexity per model
-#   ns_delta_ll_plot.pdf/png — Figure 1 replication
+# ── Split (Section 3.1 footnote 3) ──────────────────────────────────────────
+# Partition based on (subject_num + item) %% 2:
+#   each subject-by-sentence (item) combination stays intact in one partition.
+#   Exploratory set = remainder 0; held-out set = remainder 1.
+# We fit only on the exploratory set.
+#
+# ── Inputs ────────────────────────────────────────────────────────────────────
+# natural_stories/processed_RTs.tsv   Natural Stories reading times
+#   Columns: WorkerId  WorkTimeInSeconds  correct  item  zone  RT  word  ...
+#   Download: github.com/languageMIT/naturalstories → naturalstories_RTs/
+# ns_surprisal/<model>.csv            per-word surprisal from get_ns_surprisal.py
+# ns_surprisal/ns_perplexity.csv      corpus perplexity per model
+#
+# ── Outputs ───────────────────────────────────────────────────────────────────
+# ns_delta_ll.csv          ΔLL + perplexity per model
+# ns_delta_ll_plot.pdf/png Figure 1 replication
 
 suppressPackageStartupMessages({
   library(tidyverse)
@@ -49,67 +68,44 @@ if (!file.exists(RT_TSV)) {
   )
 }
 if (!file.exists(PPL_CSV)) {
-  stop("Perplexity file not found. Run get_ns_surprisal.py first.")
+  stop("Perplexity file not found: ", PPL_CSV,
+       "\nRun get_ns_surprisal.py first.")
 }
 
 # ── Load reading times ────────────────────────────────────────────────────────
 message("Loading reading times …")
 
 rt_raw <- read_tsv(RT_TSV, show_col_types = FALSE)
+message(sprintf("  Raw columns: %s", paste(names(rt_raw), collapse = ", ")))
 
-# Normalize column names (the RT file uses various conventions across releases)
-# Try to map to canonical names: subject, item, zone, word, RT, sentence
+# Normalise to canonical names
 rt_raw <- rt_raw |>
-  rename_with(tolower) |>
   rename(
-    subject  = any_of(c("workerid", "subject", "subj", "participant")),
-    item     = any_of(c("item", "story")),
-    zone     = any_of(c("zone", "word_num", "position")),
-    word     = any_of(c("word")),
-    RT       = any_of(c("rt", "reading_time")),
-    sentence = any_of(c("sentence", "sent", "sentence_num"))
+    subject = WorkerId,
+    RT      = RT,
+    item    = item,
+    zone    = zone,
+    word    = word,
+    correct = correct
   )
-
-# Verify required columns exist
-req_cols <- c("subject", "item", "zone", "word", "RT")
-missing  <- setdiff(req_cols, names(rt_raw))
-if (length(missing) > 0) {
-  message("Available columns: ", paste(names(rt_raw), collapse = ", "))
-  stop("Missing required columns: ", paste(missing, collapse = ", "))
-}
 
 message(sprintf("  Raw: %d rows, %d subjects",
                 nrow(rt_raw), n_distinct(rt_raw$subject)))
 
 # ── Filter subjects: remove those who answered ≤3 comprehension Qs correctly ─
-# Comprehension question accuracy is in columns like correct_1, correct_2, …
-# or a summary column. Try both approaches.
-if ("correct" %in% names(rt_raw)) {
-  # Summary column already present
-  good_subjects <- rt_raw |>
-    group_by(subject) |>
-    summarise(n_correct = sum(correct, na.rm = TRUE)) |>
-    filter(n_correct > 3) |>
-    pull(subject)
-} else {
-  correct_cols <- grep("^correct", names(rt_raw), value = TRUE)
-  if (length(correct_cols) > 0) {
-    good_subjects <- rt_raw |>
-      group_by(subject) |>
-      summarise(n_correct = sum(across(all_of(correct_cols)), na.rm = TRUE)) |>
-      filter(n_correct > 3) |>
-      pull(subject)
-  } else {
-    message("  WARNING: No comprehension question columns found; skipping accuracy filter.")
-    good_subjects <- unique(rt_raw$subject)
-  }
-}
+# 'correct' is a per-subject count repeated on every row for that subject.
+good_subjects <- rt_raw |>
+  distinct(subject, correct) |>
+  filter(correct > 3) |>
+  pull(subject)
+
+message(sprintf("  Subjects with correct > 3: %d of %d",
+                length(good_subjects), n_distinct(rt_raw$subject)))
 
 # ── Build analysis dataset ────────────────────────────────────────────────────
-# Keep only RT rows (drop comprehension question rows if any)
 rt <- rt_raw |>
   filter(subject %in% good_subjects,
-         !is.na(RT), !is.na(zone)) |>
+         !is.na(RT), !is.na(zone), !is.na(word)) |>
   mutate(
     RT      = as.numeric(RT),
     subject = as.character(subject),
@@ -117,29 +113,25 @@ rt <- rt_raw |>
     zone    = as.integer(zone)
   )
 
-# Per-story sentence index: sentence is needed for (subject:sentence) random intercept.
-# If 'sentence' column exists, use it; otherwise derive from item
-if (!"sentence" %in% names(rt)) {
-  # Each story (item) is treated as one sentence for the random effect
-  rt <- rt |> mutate(sentence = item)
-}
-
-# Word-level covariates
+# Word-level covariates (Oh & Schuler 2023: "word length measured in characters
+# and index of word position within each sentence")
 rt <- rt |>
   mutate(
-    word_length   = nchar(word),
-    word_position = zone
+    word_length   = nchar(as.character(word)),
+    word_position = zone          # position within story (proxy for sentence position)
   )
 
-# Filter reading times: remove sentence-initial (zone == 1) and sentence-final words,
-# RTs < 100 ms or > 3000 ms
-# Sentence-final: last zone per item
-last_zones <- rt |> group_by(item) |> summarise(last_zone = max(zone))
+# Remove sentence-initial (zone 1) and sentence-final (last zone per item) words,
+# and RTs outside [100, 3000] ms
+last_zones <- rt |>
+  group_by(item) |>
+  summarise(last_zone = max(zone), .groups = "drop")
+
 rt <- rt |>
   left_join(last_zones, by = "item") |>
   filter(
-    zone != 1,           # remove sentence-initial
-    zone != last_zone,   # remove sentence-final
+    zone != 1,
+    zone != last_zone,
     RT >= 100,
     RT <= 3000
   ) |>
@@ -148,42 +140,58 @@ rt <- rt |>
 message(sprintf("  After filtering: %d rows, %d subjects",
                 nrow(rt), n_distinct(rt$subject)))
 
-# Log-transform RT
+# Log-transform RT (natural log, as is lme4 convention and what the paper uses)
 rt <- rt |> mutate(log_rt = log(RT))
 
-# ── Exploratory / held-out split ──────────────────────────────────────────────
-# Split based on sum of (numeric subject_id + sentence_id) %% 2
-# Following Oh & Schuler (2023): each subject-by-sentence pair stays intact
+# ── Exploratory / held-out split (Section 3.1, footnote 3) ──────────────────
+# "partitioning was conducted based on the sum of subject ID and sentence ID,
+#  resulting in each subject-by-sentence combination remaining intact"
+# Natural Stories has no sentence boundaries in the RT file; item (story) is
+# used as the sentence unit for this split.
 rt <- rt |>
   mutate(
     subject_num = as.integer(factor(subject)),
-    split_key   = (subject_num + as.integer(sentence)) %% 2,
-    set         = if_else(split_key == 0, "exploratory", "held_out")
+    split_key   = (subject_num + item) %% 2,
+    set         = if_else(split_key == 0L, "exploratory", "held_out")
   )
+
+n_exp  <- sum(rt$set == "exploratory")
+n_held <- sum(rt$set == "held_out")
+message(sprintf("  Exploratory: %d rows  |  Held-out: %d rows", n_exp, n_held))
 
 exploratory <- filter(rt, set == "exploratory")
-message(sprintf("  Exploratory set: %d rows", nrow(exploratory)))
 
-# ── Centre and scale all predictors ──────────────────────────────────────────
-scale_vec <- function(x) as.numeric(scale(x))
+# ── Centre and scale predictors (z-score, applied to exploratory set) ────────
+# "All predictors were centered and scaled prior to model fitting" (p.339)
+z <- function(x) as.numeric(scale(x))
+
 exploratory <- exploratory |>
   mutate(
-    word_length_s   = scale_vec(word_length),
-    word_position_s = scale_vec(word_position)
+    word_length_s   = z(word_length),
+    word_position_s = z(word_position),
+    # word_type for by-word-type random intercept
+    word_type        = tolower(as.character(word)),
+    # subject:item interaction for the subject-sentence random intercept
+    subj_item        = paste(subject, item, sep = ":")
   )
 
-# ── Unique word type factor (for by-word random intercept) ───────────────────
-exploratory <- exploratory |>
-  mutate(word_type      = tolower(word),
-         subject_sentence = paste(subject, sentence, sep = "_"))
-
-# ── Fit baseline model (once, reused for all models) ─────────────────────────
+# ── Fit baseline model ────────────────────────────────────────────────────────
+# "by-subject random slopes for all fixed effects as well as random intercepts
+#  for each subject and each word type. Additionally, for self-paced reading
+#  times … a random intercept for each subject-sentence interaction"
+#
+# lmer notation:
+#   (1 + word_length_s + word_position_s | subject)  → by-subject intercept +
+#                                                        slopes for both predictors
+#   (1 | word_type)                                  → by-word-type intercept
+#   (1 | subj_item)                                  → subject × sentence intercept
 message("\nFitting baseline LME …")
+
 baseline_formula <- log_rt ~
   word_length_s + word_position_s +
   (1 + word_length_s + word_position_s | subject) +
   (1 | word_type) +
-  (1 | subject_sentence)
+  (1 | subj_item)
 
 baseline_mod <- lmer(
   baseline_formula,
@@ -198,29 +206,32 @@ message(sprintf("  Baseline log-likelihood: %.4f", baseline_ll))
 # ── Load perplexity table ─────────────────────────────────────────────────────
 ppl_df <- read_csv(PPL_CSV, show_col_types = FALSE)
 
-# ── Compute ΔLL for each model ────────────────────────────────────────────────
+# Build reverse-lookup: safe_name → model_id
+# get_ns_surprisal.py uses model_id.replace("/", "_") as safe_name
+safe_to_model <- setNames(
+  ppl_df$model,
+  gsub("/", "_", ppl_df$model)
+)
+
+# ── Compute ΔLL for each surprisal file ───────────────────────────────────────
 surp_files <- list.files(SURP_DIR, pattern = "\\.csv$", full.names = TRUE)
 surp_files <- surp_files[basename(surp_files) != "ns_perplexity.csv"]
 
 results <- vector("list", length(surp_files))
 
 for (i in seq_along(surp_files)) {
-  csv_path <- surp_files[[i]]
+  csv_path  <- surp_files[[i]]
   safe_name <- tools::file_path_sans_ext(basename(csv_path))
+  model_id  <- safe_to_model[safe_name]
 
-  # Recover model ID from safe_name (replace first _ in org/repo with /)
-  model_id <- sub("^([^_]+)_(.+)$", "\\1/\\2", safe_name)
-  # For simple model IDs (gpt2, gpt2-medium), no slash is expected
-  if (!model_id %in% ppl_df$model) model_id <- safe_name
-
-  # Match to perplexity table
-  ppl_row <- filter(ppl_df, model == model_id)
-  if (nrow(ppl_row) == 0) {
-    message(sprintf("  [SKIP] %s — not in perplexity table", model_id))
+  if (is.na(model_id)) {
+    message(sprintf("  [SKIP] %s — not found in perplexity table", safe_name))
     next
   }
 
-  message(sprintf("\n[%d/%d] %s", i, length(surp_files), model_id))
+  ppl_row <- filter(ppl_df, model == model_id)
+  message(sprintf("\n[%d/%d] %s  (ppl = %.2f)",
+                  i, length(surp_files), model_id, ppl_row$perplexity[1]))
 
   # Load surprisal
   surp <- tryCatch(
@@ -229,32 +240,41 @@ for (i in seq_along(surp_files)) {
   )
   if (is.null(surp) || nrow(surp) == 0) next
 
-  # Join surprisal to exploratory set
+  # Join surprisal onto the exploratory set (match by item + zone)
   d <- exploratory |>
     left_join(surp |> select(item, zone, surprisal),
               by = c("item", "zone")) |>
     filter(!is.na(surprisal), is.finite(surprisal))
 
   if (nrow(d) < 500) {
-    message(sprintf("  [SKIP] Only %d matched rows after join", nrow(d)))
+    message(sprintf("  [SKIP] Only %d matched rows after join — check item/zone alignment",
+                    nrow(d)))
     next
   }
+  message(sprintf("  Matched rows: %d", nrow(d)))
 
-  d <- d |> mutate(surprisal_s = scale_vec(surprisal))
+  # Scale surprisal (z-score within the exploratory set, same as other predictors)
+  d <- d |> mutate(surprisal_s = z(surprisal))
 
-  # Fit full model (surprisal added as fixed effect + random slope by subject)
-  full_formula <- update(
-    baseline_formula,
-    . ~ . + surprisal_s + (surprisal_s || subject)
-  )
+  # Full model: add surprisal as fixed effect and by-subject random slope.
+  # The paper says "by-subject random slopes for ALL fixed effects", so surprisal_s
+  # is added to the existing by-subject grouping.
+  full_formula <- log_rt ~
+    word_length_s + word_position_s + surprisal_s +
+    (1 + word_length_s + word_position_s + surprisal_s | subject) +
+    (1 | word_type) +
+    (1 | subj_item)
 
   full_mod <- tryCatch(
     lmer(full_formula, data = d, REML = FALSE,
          control = lmerControl(optimizer = "bobyqa",
                                optCtrl   = list(maxfun = 2e5))),
-    error   = function(e) { message("  lmer ERROR: ", e$message); NULL },
+    error = function(e) {
+      message("  lmer ERROR: ", e$message)
+      NULL
+    },
     warning = function(w) {
-      message("  lmer WARNING: ", w$message)
+      message("  lmer WARNING (proceeding): ", w$message)
       suppressWarnings(
         lmer(full_formula, data = d, REML = FALSE,
              control = lmerControl(optimizer = "bobyqa",
@@ -264,10 +284,10 @@ for (i in seq_along(surp_files)) {
   )
   if (is.null(full_mod)) next
 
-  full_ll <- as.numeric(logLik(full_mod))
+  full_ll  <- as.numeric(logLik(full_mod))
   delta_ll <- full_ll - baseline_ll
 
-  message(sprintf("  ΔLL = %.2f  (ppl = %.2f)", delta_ll, ppl_row$perplexity[1]))
+  message(sprintf("  ΔLL = %.4f", delta_ll))
 
   results[[i]] <- tibble(
     model      = model_id,
@@ -305,21 +325,20 @@ FAMILY_SHAPES <- c(
 plot_df <- results_df |>
   filter(!is.na(delta_ll), !is.na(perplexity)) |>
   mutate(
-    family = factor(family, levels = FAMILY_LEVELS),
-    # Params label: strip trailing M, convert large values to B notation
+    family     = factor(family, levels = FAMILY_LEVELS),
     params_num = as.numeric(gsub("M$", "", params)),
-    label = case_when(
-      params_num >= 1000 ~ paste0(params_num / 1000, "B"),
+    label      = case_when(
+      params_num >= 1000 ~ paste0(round(params_num / 1000, 1), "B"),
       TRUE               ~ paste0(params_num, "M")
     )
   )
 
-# Per-family regression lines (log-linear, as in Oh & Schuler Figure 1)
+# Least-squares log-linear regression line per family (as in Oh & Schuler Fig 1)
 family_lines <- plot_df |>
   group_by(family) |>
   filter(n() >= 2) |>
   group_modify(function(d, k) {
-    fit <- lm(delta_ll ~ log(perplexity), data = d)
+    fit   <- lm(delta_ll ~ log(perplexity), data = d)
     x_seq <- seq(min(d$perplexity), max(d$perplexity), length.out = 200)
     tibble(perplexity = x_seq,
            delta_ll   = predict(fit, newdata = data.frame(perplexity = x_seq)))
@@ -327,9 +346,8 @@ family_lines <- plot_df |>
   ungroup() |>
   mutate(family = factor(family, levels = FAMILY_LEVELS))
 
-p <- ggplot(plot_df, aes(x = perplexity, y = delta_ll,
-                         colour = family, shape = family)) +
-  # Least-squares regression lines per family (matching Oh & Schuler style)
+p <- ggplot(plot_df,
+            aes(x = perplexity, y = delta_ll, colour = family, shape = family)) +
   geom_line(
     data = family_lines,
     aes(x = perplexity, y = delta_ll, colour = family, group = family),
@@ -339,11 +357,11 @@ p <- ggplot(plot_df, aes(x = perplexity, y = delta_ll,
   ggrepel::geom_text_repel(
     aes(label = label),
     size = 2.8, fontface = "bold",
-    show.legend    = FALSE,
+    show.legend       = FALSE,
     min.segment.length = 0.2,
-    box.padding    = 0.3,
-    point.padding  = 0.2,
-    max.overlaps   = 20
+    box.padding       = 0.3,
+    point.padding     = 0.2,
+    max.overlaps      = 20
   ) +
   scale_x_continuous(
     "Perplexity",
@@ -352,7 +370,7 @@ p <- ggplot(plot_df, aes(x = perplexity, y = delta_ll,
   ) +
   scale_y_continuous("\u0394LL") +
   scale_colour_manual(values = FAMILY_COLOURS, name = "Model family") +
-  scale_shape_manual(values = FAMILY_SHAPES,  name = "Model family") +
+  scale_shape_manual(values  = FAMILY_SHAPES,  name = "Model family") +
   ggtitle("Natural Stories SPR") +
   theme_classic(base_size = 13) +
   theme(
