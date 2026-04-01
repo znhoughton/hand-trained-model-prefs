@@ -99,6 +99,15 @@ for entry in "${MODELS[@]}"; do
         continue
     fi
 
+    # Pre-download model shards to HF cache before loading into GPU memory.
+    # huggingface-cli download streams to disk without loading into RAM,
+    # avoiding the OOM that occurs when download + model load happen together.
+    echo "  Downloading ${MODEL_ID}..."
+    if ! huggingface-cli download "${MODEL_ID}" --repo-type model --quiet; then
+        echo "  ERROR: download failed for ${MODEL_ID}" >&2
+        continue
+    fi
+
     # Run Oh & Schuler's script — outputs to stdout
     echo "  Running get_llm_surprisal.py..."
     if python "${LLM_SURP_SCRIPT}" "${SENTITEMS}" "${MODEL_ID}" word \
@@ -107,12 +116,18 @@ for entry in "${MODELS[@]}"; do
     else
         echo "  ERROR: get_llm_surprisal.py failed for ${MODEL_ID}" >&2
         echo "  Check log: ${RAW_DIR}/${SAFE_NAME}.log" >&2
+        # Delete cache even on failure to free space for the next model
+        huggingface-cli delete-cache --include "${MODEL_ID}" --yes 2>/dev/null || true
         continue
     fi
 
     # Parse raw output into item/zone CSV + update perplexity table
     echo "  Parsing output..."
     python "${PARSE_SCRIPT}" "${RAW_FILE}" "${MODEL_ID}" "${FAMILY}" "${PARAMS}"
+
+    # Delete HF cache to free disk space before the next model downloads
+    echo "  Deleting cache for ${MODEL_ID}..."
+    huggingface-cli delete-cache --include "${MODEL_ID}" --yes 2>/dev/null || true
 
     echo "  Done."
 done
