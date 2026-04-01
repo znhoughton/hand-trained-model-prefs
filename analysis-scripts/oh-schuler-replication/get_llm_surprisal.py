@@ -58,7 +58,7 @@ def main():
     elif "gpt" in model_variant:
         tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **_rev_kw)
     elif "opt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **_rev_kw)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], **_rev_kw)
     elif "pythia" in model_variant:
         tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], revision=sys.argv[3])
     else:
