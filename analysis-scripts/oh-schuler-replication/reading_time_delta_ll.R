@@ -45,7 +45,6 @@
 suppressPackageStartupMessages({
   library(tidyverse)
   library(lme4)
-  library(ggrepel)
 })
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -326,49 +325,29 @@ plot_df <- results_df |>
   filter(!is.na(delta_ll), !is.na(perplexity)) |>
   mutate(
     family     = factor(family, levels = FAMILY_LEVELS),
-    params_num = as.numeric(gsub("M$", "", params)),
-    label      = case_when(
-      params_num >= 1000 ~ paste0(round(params_num / 1000, 1), "B"),
-      TRUE               ~ paste0(params_num, "M")
-    )
-  )
+    params_num = as.numeric(gsub("M$", "", params))
+  ) |>
+  arrange(family, perplexity)
 
-# Least-squares log-linear regression line per family (as in Oh & Schuler Fig 1)
-family_lines <- plot_df |>
-  group_by(family) |>
-  filter(n() >= 2) |>
-  group_modify(function(d, k) {
-    fit   <- lm(delta_ll ~ log(perplexity), data = d)
-    x_seq <- seq(min(d$perplexity), max(d$perplexity), length.out = 200)
-    tibble(perplexity = x_seq,
-           delta_ll   = predict(fit, newdata = data.frame(perplexity = x_seq)))
-  }) |>
-  ungroup() |>
-  mutate(family = factor(family, levels = FAMILY_LEVELS))
+# y-axis limits: pad 10% above and below the data range
+y_range  <- range(plot_df$delta_ll, na.rm = TRUE)
+y_pad    <- diff(y_range) * 0.1
+y_limits <- c(y_range[1] - y_pad, y_range[2] + y_pad)
 
 p <- ggplot(plot_df,
             aes(x = perplexity, y = delta_ll, colour = family, shape = family)) +
+  # Dashed lines connecting models within each family (sorted by perplexity)
   geom_line(
-    data = family_lines,
-    aes(x = perplexity, y = delta_ll, colour = family, group = family),
-    linetype = "dotted", linewidth = 0.8, inherit.aes = FALSE
+    aes(group = family),
+    linetype = "dashed", linewidth = 0.7, alpha = 0.7
   ) +
   geom_point(size = 3, alpha = 0.9) +
-  ggrepel::geom_text_repel(
-    aes(label = label),
-    size = 2.8, fontface = "bold",
-    show.legend       = FALSE,
-    min.segment.length = 0.2,
-    box.padding       = 0.3,
-    point.padding     = 0.2,
-    max.overlaps      = 20
-  ) +
   scale_x_continuous(
     "Perplexity",
     trans  = "log2",
     labels = scales::trans_format("log2", scales::math_format(2^.x))
   ) +
-  scale_y_continuous("\u0394LL") +
+  scale_y_continuous("\u0394LL", limits = y_limits) +
   scale_colour_manual(values = FAMILY_COLOURS, name = "Model family") +
   scale_shape_manual(values  = FAMILY_SHAPES,  name = "Model family") +
   ggtitle("Natural Stories SPR") +
