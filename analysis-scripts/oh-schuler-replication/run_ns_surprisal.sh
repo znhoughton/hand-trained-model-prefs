@@ -48,17 +48,34 @@ if [[ ! -f "${SENTITEMS}" ]]; then
     python "${PREPARE_SCRIPT}"
 fi
 
-# ── Model list: model_id | family | params ────────────────────────────────────
-# Format: "model_id|family|params"
+# ── Model list: model_id | family | params [| revision] ──────────────────────
+# Format: "model_id|family|params"          ← final checkpoints
+#         "model_id|family|params|revision" ← intermediate checkpoints
 MODELS=(
     # BabyLM — final checkpoint
     "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM|125M"
     "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM|350M"
     "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM|1300M"
+    # BabyLM — early checkpoint (~1/3 through training)
+    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (early)|125M|step-144"
+    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (early)|350M|step-96"
+    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (early)|1300M|step-144"
+    # BabyLM — mid checkpoint (~1/2 through training)
+    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (mid)|125M|step-432"
+    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (mid)|350M|step-288"
+    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (mid)|1300M|step-420"
     # C4 — final checkpoint
     "znhoughton/opt-c4-125m-seed964|C4|125M"
     "znhoughton/opt-c4-350m-seed964|C4|350M"
     "znhoughton/opt-c4-1.3b-seed964|C4|1300M"
+    # C4 — early checkpoint (~1/3 through training)
+    "znhoughton/opt-c4-125m-seed964|C4 (early)|125M|step-180"
+    "znhoughton/opt-c4-350m-seed964|C4 (early)|350M|step-112"
+    "znhoughton/opt-c4-1.3b-seed964|C4 (early)|1300M|step-204"
+    # C4 — mid checkpoint (~1/2 through training)
+    "znhoughton/opt-c4-125m-seed964|C4 (mid)|125M|step-480"
+    "znhoughton/opt-c4-350m-seed964|C4 (mid)|350M|step-312"
+    "znhoughton/opt-c4-1.3b-seed964|C4 (mid)|1300M|step-492"
     # GPT-2
     "gpt2|GPT-2|124M"
     "gpt2-medium|GPT-2|355M"
@@ -84,12 +101,20 @@ IDX=0
 
 for entry in "${MODELS[@]}"; do
     IDX=$((IDX + 1))
-    MODEL_ID="${entry%%|*}"
-    REST="${entry#*|}"
-    FAMILY="${REST%%|*}"
-    PARAMS="${REST##*|}"
+    IFS='|' read -ra FIELDS <<< "$entry"
+    MODEL_ID="${FIELDS[0]}"
+    FAMILY="${FIELDS[1]}"
+    PARAMS="${FIELDS[2]}"
+    REVISION="${FIELDS[3]:-}"
 
-    SAFE_NAME="${MODEL_ID//\//_}"
+    # PPL_KEY: include @revision for checkpoint entries so the CSV key matches
+    # what get_model_prefs.py writes to oh_schuler_perplexity.csv
+    if [[ -n "${REVISION}" ]]; then
+        PPL_KEY="${MODEL_ID}@${REVISION}"
+    else
+        PPL_KEY="${MODEL_ID}"
+    fi
+    SAFE_NAME="${PPL_KEY//\//_}"
     OUT_CSV="${SURP_DIR}/${SAFE_NAME}.csv"
     RAW_FILE="${RAW_DIR}/${SAFE_NAME}.surprisal"
 
@@ -105,16 +130,28 @@ for entry in "${MODELS[@]}"; do
     fi
 
     # Pre-download model shards to HF cache before loading into GPU memory.
-    echo "  Downloading ${MODEL_ID}..."
-    if ! huggingface-cli download "${MODEL_ID}" --repo-type model --quiet; then
+    echo "  Downloading ${MODEL_ID}${REVISION:+ @ ${REVISION}}..."
+    if [[ -n "${REVISION}" ]]; then
+        DL_ARGS="--revision ${REVISION}"
+    else
+        DL_ARGS=""
+    fi
+    # shellcheck disable=SC2086
+    if ! huggingface-cli download "${MODEL_ID}" ${DL_ARGS} --repo-type model --quiet; then
         echo "  ERROR: download failed for ${MODEL_ID}" >&2
         continue
     fi
 
     # Run Oh & Schuler's script — outputs to stdout
     echo "  Running get_llm_surprisal.py..."
-    if python "${LLM_SURP_SCRIPT}" "${SENTITEMS}" "${MODEL_ID}" word \
-            > "${RAW_FILE}" 2>"${RAW_DIR}/${SAFE_NAME}.log"; then
+    if [[ -n "${REVISION}" ]]; then
+        python "${LLM_SURP_SCRIPT}" "${SENTITEMS}" "${MODEL_ID}" "${REVISION}" word \
+            > "${RAW_FILE}" 2>"${RAW_DIR}/${SAFE_NAME}.log"
+    else
+        python "${LLM_SURP_SCRIPT}" "${SENTITEMS}" "${MODEL_ID}" word \
+            > "${RAW_FILE}" 2>"${RAW_DIR}/${SAFE_NAME}.log"
+    fi
+    if [[ $? -eq 0 ]]; then
         echo "  Surprisal written to ${RAW_FILE}"
     else
         echo "  ERROR: get_llm_surprisal.py failed for ${MODEL_ID}" >&2
@@ -123,9 +160,11 @@ for entry in "${MODELS[@]}"; do
         continue
     fi
 
-    # Parse raw output into item/zone CSV + update perplexity table
+    # Parse raw output into item/zone CSV + update perplexity table.
+    # PPL_KEY (model@revision or just model) is used as the model identifier in
+    # the output CSV so it matches the keys written by get_model_prefs.py.
     echo "  Parsing output..."
-    python "${PARSE_SCRIPT}" "${RAW_FILE}" "${MODEL_ID}" "${FAMILY}" "${PARAMS}"
+    python "${PARSE_SCRIPT}" "${RAW_FILE}" "${PPL_KEY}" "${FAMILY}" "${PARAMS}"
 
     # Delete HF cache to free disk space before the next model downloads
     echo "  Deleting cache for ${MODEL_ID}..."

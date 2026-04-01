@@ -305,20 +305,30 @@ print(results_df |> arrange(family, perplexity), n = Inf)
 # ── Plot ──────────────────────────────────────────────────────────────────────
 message("\nPlotting …")
 
-FAMILY_LEVELS  <- c("GPT-2", "GPT-Neo", "OPT", "BabyLM", "C4")
+FAMILY_LEVELS  <- c("GPT-2", "GPT-Neo", "OPT",
+                    "BabyLM", "BabyLM (early)", "BabyLM (mid)",
+                    "C4",     "C4 (early)",     "C4 (mid)")
 FAMILY_COLOURS <- c(
-  "GPT-2"   = "#2166ac",
-  "GPT-Neo" = "#4dac26",
-  "OPT"     = "#b2182b",
-  "BabyLM"  = "#e08214",
-  "C4"      = "#35978f"
+  "GPT-2"          = "#2166ac",
+  "GPT-Neo"        = "#4dac26",
+  "OPT"            = "#b2182b",
+  "BabyLM"         = "#e08214",
+  "BabyLM (early)" = "#fdbf6f",
+  "BabyLM (mid)"   = "#c87a0d",
+  "C4"             = "#35978f",
+  "C4 (early)"     = "#80cdc1",
+  "C4 (mid)"       = "#01665e"
 )
 FAMILY_SHAPES <- c(
-  "GPT-2"   = 16,
-  "GPT-Neo" = 15,
-  "OPT"     = 17,
-  "BabyLM"  = 18,
-  "C4"      = 8
+  "GPT-2"          = 16,
+  "GPT-Neo"        = 15,
+  "OPT"            = 17,
+  "BabyLM"         = 18,
+  "BabyLM (early)" = 1,
+  "BabyLM (mid)"   = 19,
+  "C4"             = 8,
+  "C4 (early)"     = 2,
+  "C4 (mid)"       = 6
 )
 
 plot_df <- results_df |>

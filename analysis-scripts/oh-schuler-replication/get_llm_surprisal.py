@@ -48,12 +48,17 @@ def main():
     mode = sys.argv[-1]
     assert mode in {"token", "word"}, ValueError('Calculation mode must be "token" or "word"')
 
+    # Optional revision: 5 args = [script, sentitems, model_id, revision, mode]
+    # Pythia already uses sys.argv[3] for revision; this unifies all other families.
+    _revision = sys.argv[3] if len(sys.argv) == 5 and "pythia" not in model_variant else None
+    _rev_kw   = {"revision": _revision} if _revision else {}
+
     if "gpt-neox" in model_variant:
         tokenizer = GPTNeoXTokenizerFast.from_pretrained(sys.argv[2])
     elif "gpt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **_rev_kw)
     elif "opt" in model_variant:
-        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], use_fast=False, **_rev_kw)
     elif "pythia" in model_variant:
         tokenizer = AutoTokenizer.from_pretrained(sys.argv[2], revision=sys.argv[3])
     else:
@@ -64,7 +69,7 @@ def main():
                     torch_dtype=torch.float16, device_map="auto")
     else:
         model = AutoModelForCausalLM.from_pretrained(sys.argv[2],
-                    torch_dtype=torch.float16, device_map="auto")
+                    torch_dtype=torch.float16, device_map="auto", **_rev_kw)
 
     model.eval()
     device = next(model.parameters()).device
