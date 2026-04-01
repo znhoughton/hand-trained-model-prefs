@@ -71,6 +71,7 @@ def main():
                     torch_dtype=torch.float16, device_map="auto", **rev_kwargs)
 
     model.eval()
+    device = next(model.parameters()).device
     softmax = torch.nn.Softmax(dim=-1)
     ctx_size = model.config.max_position_embeddings
     bos_id = model.config.bos_token_id
@@ -117,7 +118,7 @@ def main():
         batch_input, output_ids, start_idx, will_continue = batch
 
         with torch.no_grad():
-            model_output = model(**batch_input)
+            model_output = model(**{k: v.to(device) for k, v in batch_input.items()})
 
         toks = tokenizer.convert_ids_to_tokens(output_ids)
         index = torch.arange(0, output_ids.shape[0])
