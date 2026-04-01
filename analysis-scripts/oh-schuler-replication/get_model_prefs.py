@@ -92,22 +92,22 @@ MODEL_CONFIGS = {
     "znhoughton/opt-c4-125m-seed964":            {"params": "125M",   "family": "C4",     "label": "C4-125M",     "skip": False},
     "znhoughton/opt-c4-350m-seed964":            {"params": "350M",   "family": "C4",     "label": "C4-350M",     "skip": False},
     "znhoughton/opt-c4-1.3b-seed964":            {"params": "1300M",  "family": "C4",     "label": "C4-1.3B",     "skip": False},
-    # BabyLM — early checkpoint (step index 6/19, ~1/3 through training)
-    "znhoughton/opt-babylm-125m-64eps-seed964@step-144": {"params": "125M",  "family": "BabyLM (early)", "label": "BabyLM (early)-125M",  "skip": False, "ppl_only": True, "revision": "step-144"},
-    "znhoughton/opt-babylm-350m-64eps-seed964@step-96":  {"params": "350M",  "family": "BabyLM (early)", "label": "BabyLM (early)-350M",  "skip": False, "ppl_only": True, "revision": "step-96"},
-    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-144": {"params": "1300M", "family": "BabyLM (early)", "label": "BabyLM (early)-1.3B",  "skip": False, "ppl_only": True, "revision": "step-144"},
-    # BabyLM — mid checkpoint (step index 9/19, ~1/2 through training)
-    "znhoughton/opt-babylm-125m-64eps-seed964@step-432": {"params": "125M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-125M",    "skip": False, "ppl_only": True, "revision": "step-432"},
-    "znhoughton/opt-babylm-350m-64eps-seed964@step-288": {"params": "350M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-350M",    "skip": False, "ppl_only": True, "revision": "step-288"},
-    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-420": {"params": "1300M", "family": "BabyLM (mid)",   "label": "BabyLM (mid)-1.3B",    "skip": False, "ppl_only": True, "revision": "step-420"},
-    # C4 — early checkpoint (step index 6/19, ~1/3 through training)
-    "znhoughton/opt-c4-125m-seed964@step-180":  {"params": "125M",  "family": "C4 (early)", "label": "C4 (early)-125M",  "skip": False, "ppl_only": True, "revision": "step-180"},
-    "znhoughton/opt-c4-350m-seed964@step-112":  {"params": "350M",  "family": "C4 (early)", "label": "C4 (early)-350M",  "skip": False, "ppl_only": True, "revision": "step-112"},
-    "znhoughton/opt-c4-1.3b-seed964@step-204":  {"params": "1300M", "family": "C4 (early)", "label": "C4 (early)-1.3B",  "skip": False, "ppl_only": True, "revision": "step-204"},
-    # C4 — mid checkpoint (step index 9/19, ~1/2 through training)
-    "znhoughton/opt-c4-125m-seed964@step-480":  {"params": "125M",  "family": "C4 (mid)",   "label": "C4 (mid)-125M",    "skip": False, "ppl_only": True, "revision": "step-480"},
-    "znhoughton/opt-c4-350m-seed964@step-312":  {"params": "350M",  "family": "C4 (mid)",   "label": "C4 (mid)-350M",    "skip": False, "ppl_only": True, "revision": "step-312"},
-    "znhoughton/opt-c4-1.3b-seed964@step-492":  {"params": "1300M", "family": "C4 (mid)",   "label": "C4 (mid)-1.3B",    "skip": False, "ppl_only": True, "revision": "step-492"},
+    # BabyLM — early checkpoint (~1/3 through training by token count)
+    "znhoughton/opt-babylm-125m-64eps-seed964@step-3732": {"params": "125M",  "family": "BabyLM (early)", "label": "BabyLM (early)-125M",  "skip": False, "ppl_only": True, "revision": "step-3732"},
+    "znhoughton/opt-babylm-350m-64eps-seed964@step-2488": {"params": "350M",  "family": "BabyLM (early)", "label": "BabyLM (early)-350M",  "skip": False, "ppl_only": True, "revision": "step-2488"},
+    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-4020": {"params": "1300M", "family": "BabyLM (early)", "label": "BabyLM (early)-1.3B",  "skip": False, "ppl_only": True, "revision": "step-4020"},
+    # BabyLM — mid checkpoint (~1/2 through training by token count)
+    "znhoughton/opt-babylm-125m-64eps-seed964@step-5340": {"params": "125M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-125M",    "skip": False, "ppl_only": True, "revision": "step-5340"},
+    "znhoughton/opt-babylm-350m-64eps-seed964@step-3560": {"params": "350M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-350M",    "skip": False, "ppl_only": True, "revision": "step-3560"},
+    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-5532": {"params": "1300M", "family": "BabyLM (mid)",   "label": "BabyLM (mid)-1.3B",    "skip": False, "ppl_only": True, "revision": "step-5532"},
+    # C4 — early checkpoint (~1/3 through training by token count)
+    "znhoughton/opt-c4-125m-seed964@step-4104":  {"params": "125M",  "family": "C4 (early)", "label": "C4 (early)-125M",  "skip": False, "ppl_only": True, "revision": "step-4104"},
+    "znhoughton/opt-c4-350m-seed964@step-2720":  {"params": "350M",  "family": "C4 (early)", "label": "C4 (early)-350M",  "skip": False, "ppl_only": True, "revision": "step-2720"},
+    "znhoughton/opt-c4-1.3b-seed964@step-3948":  {"params": "1300M", "family": "C4 (early)", "label": "C4 (early)-1.3B",  "skip": False, "ppl_only": True, "revision": "step-3948"},
+    # C4 — mid checkpoint (~1/2 through training by token count)
+    "znhoughton/opt-c4-125m-seed964@step-5892":  {"params": "125M",  "family": "C4 (mid)",   "label": "C4 (mid)-125M",    "skip": False, "ppl_only": True, "revision": "step-5892"},
+    "znhoughton/opt-c4-350m-seed964@step-3920":  {"params": "350M",  "family": "C4 (mid)",   "label": "C4 (mid)-350M",    "skip": False, "ppl_only": True, "revision": "step-3920"},
+    "znhoughton/opt-c4-1.3b-seed964@step-5640":  {"params": "1300M", "family": "C4 (mid)",   "label": "C4 (mid)-1.3B",    "skip": False, "ppl_only": True, "revision": "step-5640"},
 }
 
 # ── Sentence-frame prompts ────────────────────────────────────────────────────

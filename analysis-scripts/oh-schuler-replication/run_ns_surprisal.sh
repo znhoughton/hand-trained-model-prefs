@@ -56,26 +56,26 @@ MODELS=(
     "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM|125M"
     "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM|350M"
     "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM|1300M"
-    # BabyLM — early checkpoint (~1/3 through training)
-    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (early)|125M|step-144"
-    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (early)|350M|step-96"
-    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (early)|1300M|step-144"
-    # BabyLM — mid checkpoint (~1/2 through training)
-    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (mid)|125M|step-432"
-    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (mid)|350M|step-288"
-    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (mid)|1300M|step-420"
+    # BabyLM — early checkpoint (~1/3 through training by token count)
+    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (early)|125M|step-3732"
+    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (early)|350M|step-2488"
+    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (early)|1300M|step-4020"
+    # BabyLM — mid checkpoint (~1/2 through training by token count)
+    "znhoughton/opt-babylm-125m-64eps-seed964|BabyLM (mid)|125M|step-5340"
+    "znhoughton/opt-babylm-350m-64eps-seed964|BabyLM (mid)|350M|step-3560"
+    "znhoughton/opt-babylm-1.3b-64eps-seed964|BabyLM (mid)|1300M|step-5532"
     # C4 — final checkpoint
     "znhoughton/opt-c4-125m-seed964|C4|125M"
     "znhoughton/opt-c4-350m-seed964|C4|350M"
     "znhoughton/opt-c4-1.3b-seed964|C4|1300M"
-    # C4 — early checkpoint (~1/3 through training)
-    "znhoughton/opt-c4-125m-seed964|C4 (early)|125M|step-180"
-    "znhoughton/opt-c4-350m-seed964|C4 (early)|350M|step-112"
-    "znhoughton/opt-c4-1.3b-seed964|C4 (early)|1300M|step-204"
-    # C4 — mid checkpoint (~1/2 through training)
-    "znhoughton/opt-c4-125m-seed964|C4 (mid)|125M|step-480"
-    "znhoughton/opt-c4-350m-seed964|C4 (mid)|350M|step-312"
-    "znhoughton/opt-c4-1.3b-seed964|C4 (mid)|1300M|step-492"
+    # C4 — early checkpoint (~1/3 through training by token count)
+    "znhoughton/opt-c4-125m-seed964|C4 (early)|125M|step-4104"
+    "znhoughton/opt-c4-350m-seed964|C4 (early)|350M|step-2720"
+    "znhoughton/opt-c4-1.3b-seed964|C4 (early)|1300M|step-3948"
+    # C4 — mid checkpoint (~1/2 through training by token count)
+    "znhoughton/opt-c4-125m-seed964|C4 (mid)|125M|step-5892"
+    "znhoughton/opt-c4-350m-seed964|C4 (mid)|350M|step-3920"
+    "znhoughton/opt-c4-1.3b-seed964|C4 (mid)|1300M|step-5640"
     # GPT-2
     "gpt2|GPT-2|124M"
     "gpt2-medium|GPT-2|355M"
