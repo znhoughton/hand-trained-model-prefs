@@ -50,9 +50,13 @@ def main():
     ppl_key   = f"{model_id}@{revision}" if revision else model_id
 
     # Load corpus word list (ground truth item/zone)
-    corpus = pd.read_csv(TOK_FILE, sep="\t",
-                         dtype={"word": str, "zone": int, "item": int})
-    corpus = corpus.sort_values(["item", "zone"]).reset_index(drop=True)
+    # Format is headerless TSV: !item!zone\tword
+    corpus = pd.read_csv(TOK_FILE, sep="\t", header=None, names=["tag", "word"],
+                         dtype=str)
+    parsed = corpus["tag"].str.extract(r"!(\d+)!(\d+)")
+    corpus["item"] = parsed[0].astype(int)
+    corpus["zone"] = parsed[1].astype(int)
+    corpus = corpus[["item", "zone", "word"]].sort_values(["item", "zone"]).reset_index(drop=True)
 
     # Parse surprisal output (skip header line)
     surp_lines = surp_file.read_text(encoding="utf-8").splitlines()

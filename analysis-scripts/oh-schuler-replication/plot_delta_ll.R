@@ -343,7 +343,8 @@ abspref_coef <- model_prefs |>
 
     d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
     if (nrow(d_fit) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
-                                       t = NA_real_, p = NA_real_, n = nrow(d_fit)))
+                                       t = NA_real_, p = NA_real_,
+                                       relfreq_coef = NA_real_, n = nrow(d_fit)))
     d_fit <- d_fit |> mutate(
       AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
       rf_c      = as.numeric(scale(rf,      scale = FALSE)),
@@ -373,7 +374,8 @@ abspref_coef <- model_prefs |>
     }
     cf <- summary(fit)$coefficients
     if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
-                                                       t = NA_real_, p = NA_real_, n = nrow(d_fit)))
+                                                       t = NA_real_, p = NA_real_,
+                                                       relfreq_coef = NA_real_, n = nrow(d_fit)))
     tibble(
       estimate = cf["AbsPref_c", "Estimate"],
       se       = cf["AbsPref_c", "Std. Error"],
@@ -472,7 +474,8 @@ if (file.exists(TRAIN_CSV)) {
       }
       d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
       if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
-                                     t = NA_real_, p = NA_real_, n = nrow(d)))
+                                     t = NA_real_, p = NA_real_,
+                                     relfreq_coef = NA_real_, n = nrow(d)))
       d <- d |> mutate(
         AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
         rf_c      = as.numeric(scale(rf,      scale = FALSE)),
@@ -487,18 +490,20 @@ if (file.exists(TRAIN_CSV)) {
       )
       cf <- summary(fit)$coefficients
       if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
-                                                         t = NA_real_, p = NA_real_, n = nrow(d)))
-      tibble(estimate = cf["AbsPref_c", "Estimate"],
-             se       = cf["AbsPref_c", "Std. Error"],
-             t        = cf["AbsPref_c", "t value"],
-             p        = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
-             n        = nrow(d))
+                                                         t = NA_real_, p = NA_real_,
+                                                         relfreq_coef = NA_real_, n = nrow(d)))
+      tibble(estimate     = cf["AbsPref_c", "Estimate"],
+             se           = cf["AbsPref_c", "Std. Error"],
+             t            = cf["AbsPref_c", "t value"],
+             p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+             relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
+             n            = nrow(d))
     }) |>
     ungroup()
 
   pythia_results <- pythia_delta_ll |>
     left_join(pythia_pref_coef |> select(model, pref_coef), by = "model") |>
-    left_join(pythia_abspref_coef |> select(model, estimate, se, t, p), by = "model") |>
+    left_join(pythia_abspref_coef |> select(model, estimate, se, t, p, relfreq_coef), by = "model") |>
     left_join(ppl |> select(model, perplexity), by = "model") |>
     mutate(params_M = as.numeric(sub("M$", "", model_params)))
 
@@ -614,7 +619,8 @@ if (file.exists(TRAIN_CSV)) {
       }
       d <- filter(d, !is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
       if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
-                                     t = NA_real_, p = NA_real_, n = nrow(d)))
+                                     t = NA_real_, p = NA_real_,
+                                     relfreq_coef = NA_real_, n = nrow(d)))
       d <- d |> mutate(
         AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
         rf_c      = as.numeric(scale(rf,      scale = FALSE)),
@@ -629,19 +635,21 @@ if (file.exists(TRAIN_CSV)) {
       )
       cf <- summary(fit)$coefficients
       if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
-                                                         t = NA_real_, p = NA_real_, n = nrow(d)))
-      tibble(estimate = cf["AbsPref_c", "Estimate"],
-             se       = cf["AbsPref_c", "Std. Error"],
-             t        = cf["AbsPref_c", "t value"],
-             p        = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
-             n        = nrow(d))
+                                                         t = NA_real_, p = NA_real_,
+                                                         relfreq_coef = NA_real_, n = nrow(d)))
+      tibble(estimate     = cf["AbsPref_c", "Estimate"],
+             se           = cf["AbsPref_c", "Std. Error"],
+             t            = cf["AbsPref_c", "t value"],
+             p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+             relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
+             n            = nrow(d))
     }) |>
     ungroup()
 
   ck_results <- ck_delta_ll |>
     left_join(ck_pref_coef  |> select(model, model_family, ppl_key, pref_coef),
               by = c("model", "model_family", "ppl_key")) |>
-    left_join(ck_abspref    |> select(model, model_family, ppl_key, estimate, se, t, p),
+    left_join(ck_abspref    |> select(model, model_family, ppl_key, estimate, se, t, p, relfreq_coef),
               by = c("model", "model_family", "ppl_key")) |>
     left_join(ppl |> select(model, perplexity), by = c("ppl_key" = "model")) |>
     filter(!is.na(perplexity)) |>
@@ -748,15 +756,15 @@ FACET_LEVELS <- c("GPT-2", "GPT-Neo", "OPT",
 
 results_long <- results |>
   pivot_longer(
-    cols      = c(delta_ll, pref_coef, estimate),
+    cols      = c(delta_ll, pref_coef, estimate, relfreq_coef),
     names_to  = "metric",
     values_to = "value"
   ) |>
   filter(!is.na(value)) |>
   mutate(
     metric = factor(metric,
-                    levels = c("delta_ll", "pref_coef", "estimate"),
-                    labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2")),
+                    levels = c("delta_ll", "pref_coef", "estimate", "relfreq_coef"),
+                    labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2", "RelFreq \u03b2")),
     # Collapse early/mid into the parent family column for faceting
     facet_family = case_when(
       model_family %in% c("BabyLM (early)", "BabyLM (mid)") ~ "BabyLM",
@@ -804,7 +812,7 @@ y_limits <- results_long |>
 
 # ── Reference lines (y = 0) only for pref / estimate rows ────────────────────
 hline_df <- expand.grid(
-  metric       = factor(c("Model Pref \u03b2", "AbsPref \u03b2"),
+  metric       = factor(c("Model Pref \u03b2", "AbsPref \u03b2", "RelFreq \u03b2"),
                         levels = levels(results_long$metric)),
   facet_family = factor(FACET_LEVELS, levels = FACET_LEVELS),
   stringsAsFactors = FALSE

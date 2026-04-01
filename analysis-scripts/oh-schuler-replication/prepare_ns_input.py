@@ -22,7 +22,10 @@ SCRIPT_DIR  = Path(__file__).parent
 TOK_FILE    = SCRIPT_DIR / "natural_stories" / "all_stories.tok"
 OUT_FILE    = SCRIPT_DIR / "natural_stories" / "ns.sentitems"
 
-df = pd.read_csv(TOK_FILE, sep="\t", dtype={"word": str, "zone": int, "item": int})
+df = pd.read_csv(TOK_FILE, sep="\t", header=None, names=["tag", "word"], dtype=str)
+parsed = df["tag"].str.extract(r"!(\d+)!(\d+)")
+df["item"] = parsed[0].astype(int)
+df["zone"]  = parsed[1].astype(int)
 df = df.sort_values(["item", "zone"])
 
 lines = []
