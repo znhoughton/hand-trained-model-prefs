@@ -195,10 +195,9 @@ _OLMO_CK_SOURCES = [
     # OLMo-1: 1B checkpoints are on the -hf repo; 7B checkpoints are on the non-hf repo
     ("allenai/OLMo-1B-hf",      "1000M",  "OLMo-1", None),
     ("allenai/OLMo-7B",         "7000M",  "OLMo-1", None),
-    # OLMo-2-1124: "step{N}-tokens{M}B" tags (no stage prefix for stage 1)
-    ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2", None),
-    ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2", None),
-    # OLMo-2-0425: "stage1-step{N}-tokens{M}B" tags
+    # OLMo-2: all variants use "stage1-step{N}-tokens{M}B" for pretraining checkpoints
+    ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2", "stage1"),
+    ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2", "stage1"),
     ("allenai/OLMo-2-0425-1B",  "1000M",  "OLMo-2", "stage1"),
     # OLMo-3: "stage1-step{N}" branches (no token count in name)
     ("allenai/Olmo-3-1025-7B",  "7000M",  "OLMo-3", "stage1"),
@@ -489,7 +488,7 @@ def main():
 
         rev_kwargs = {"revision": revision} if revision else {}
 
-        tokenizer = AutoTokenizer.from_pretrained(hf_id, **rev_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True, **rev_kwargs)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
@@ -510,6 +509,7 @@ def main():
                         low_cpu_mem_usage=True,
                         cache_dir=tmp_cache,
                         max_memory={0: "75GiB", 1: "75GiB"},
+                        trust_remote_code=True,
                         **rev_kwargs,
                     ).eval()
                     print(f"  Loaded with device_map='auto' across {torch.cuda.device_count()} GPUs")
@@ -517,6 +517,7 @@ def main():
                     model = AutoModelForCausalLM.from_pretrained(
                         hf_id, torch_dtype=dtype,
                         low_cpu_mem_usage=True, cache_dir=tmp_cache,
+                        trust_remote_code=True,
                         **rev_kwargs,
                     ).to(device).eval()
             else:
@@ -562,12 +563,14 @@ def main():
                             hf_id, dtype=torch.float16, device_map="auto",
                             low_cpu_mem_usage=True, cache_dir=tmp_cache,
                             max_memory={0: "75GiB", 1: "75GiB"},
+                            trust_remote_code=True,
                             **rev_kwargs,
                         ).eval()
                     else:
                         model = AutoModelForCausalLM.from_pretrained(
                             hf_id, torch_dtype=dtype,
                             low_cpu_mem_usage=True, cache_dir=tmp_cache,
+                            trust_remote_code=True,
                             **rev_kwargs,
                         ).to(device).eval()
 
