@@ -253,24 +253,111 @@ if (use_pile_freq) {
     left_join(pile_freq |> rename(freq_prob_c_pile = freq_prob_c), by = "binom")
 }
 
+# ── Dynamic (checkpoint-specific) freq for final BabyLM / C4 models ──────────
+# For each final BabyLM/C4 model, look up exposures at its final training step.
+# This gives freq_prob_c_dyn = P(alpha) - 0.5 and log_total_dyn = log(total seen)
+# computed from the actual corpus exposure counts at that checkpoint.
+dyn_freq_final <- NULL
+if (file.exists(EXPOSURES_CSV)) {
+  babylm_c4_models <- model_prefs |>
+    filter(grepl("babylm|opt-c4", model, ignore.case = TRUE)) |>
+    distinct(model)
+
+  if (nrow(babylm_c4_models) > 0) {
+    con_dyn <- dbConnect(duckdb::duckdb())
+    on.exit(dbDisconnect(con_dyn, shutdown = TRUE), add = TRUE)
+
+    exp_fwd_dyn <- gsub("\\\\", "/",
+                        if (file.exists(sub("\\.csv$", ".parquet", EXPOSURES_CSV)))
+                          sub("\\.csv$", ".parquet", EXPOSURES_CSV)
+                        else EXPOSURES_CSV)
+    fmt_dyn <- if (grepl("\\.parquet$", exp_fwd_dyn)) "read_parquet" else "read_csv_auto"
+    dbExecute(con_dyn, sprintf("CREATE VIEW exp_dyn AS SELECT * FROM %s('%s')",
+                               fmt_dyn, exp_fwd_dyn))
+    dbWriteTable(con_dyn, "bc_models", babylm_c4_models, overwrite = TRUE)
+
+    # Find final step per model (max step in exposures file)
+    final_steps <- dbGetQuery(con_dyn, "
+      SELECT model, MAX(step) AS step
+      FROM exp_dyn
+      INNER JOIN bc_models USING (model)
+      GROUP BY model
+    ")
+    dbWriteTable(con_dyn, "final_steps", final_steps, overwrite = TRUE)
+
+    dyn_freq_final <- dbGetQuery(con_dyn, "
+      SELECT e.model, e.binom,
+             ANY_VALUE(e.alpha_seen) AS alpha_seen,
+             ANY_VALUE(e.beta_seen)  AS beta_seen
+      FROM exp_dyn e
+      INNER JOIN final_steps f ON e.model = f.model AND e.step = f.step
+      GROUP BY e.model, e.binom
+    ") |>
+      as_tibble() |>
+      mutate(
+        freq_prob_c_dyn = if_else(alpha_seen > 0 & beta_seen > 0,
+                                  plogis(log(alpha_seen / beta_seen)) - 0.5,
+                                  NA_real_),
+        log_total_dyn   = if_else(alpha_seen + beta_seen > 0,
+                                  log(alpha_seen + beta_seen),
+                                  NA_real_)
+      ) |>
+      select(model, binom, freq_prob_c_dyn, log_total_dyn)
+
+    message(sprintf("  Dynamic freq for final BabyLM/C4: %d model-binom rows", nrow(dyn_freq_final)))
+    dbDisconnect(con_dyn, shutdown = TRUE)
+  }
+}
+
+if (!is.null(dyn_freq_final)) {
+  dat <- dat |>
+    left_join(dyn_freq_final, by = c("model", "binom"))
+}
+
 # ── Frequency predictor selection ─────────────────────────────────────────────
 # Use Pile RelFreq everywhere when available; fall back to Google Books RelFreq.
 PILE_FREQ_FAMILIES <- c("OPT", "OLMo-1", "OLMo-2", "OLMo-3", "BabyLM", "C4")  # kept for reference
 
-choose_freq <- function(d, family) {
-  if (use_pile_freq && "freq_prob_c_pile" %in% names(d)) {
+choose_freq <- function(d) {
+  # Priority: dynamic checkpoint-specific > Pile > Google
+  # Also sets ovf_raw (already log-transformed, will be z-scored later)
+  if ("freq_prob_c_dyn" %in% names(d) && !all(is.na(d$freq_prob_c_dyn))) {
+    d$freq_use <- d$freq_prob_c_dyn
+    d$ovf_raw  <- if ("log_total_dyn" %in% names(d)) d$log_total_dyn
+                  else log(pmax(d$OverallFreq, 1))
+  } else if ("freq_prob_c_ck" %in% names(d) && !all(is.na(d$freq_prob_c_ck))) {
+    d$freq_use <- d$freq_prob_c_ck
+    d$ovf_raw  <- if ("log_total_ck" %in% names(d)) d$log_total_ck
+                  else log(pmax(d$OverallFreq, 1))
+  } else if (use_pile_freq && "freq_prob_c_pile" %in% names(d) &&
+             !all(is.na(d$freq_prob_c_pile))) {
     d$freq_use <- d$freq_prob_c_pile
+    d$ovf_raw  <- if ("log_total" %in% names(d) && !all(is.na(d$log_total)))
+                    d$log_total
+                  else log(pmax(d$OverallFreq, 1))
   } else {
     d$freq_use <- d$RelFreq
+    d$ovf_raw  <- log(pmax(d$OverallFreq, 1))
   }
   d
 }
 
-# For abspref blocks: set rf/ovf columns using Pile when available
+# For abspref blocks: set rf/ovf columns (rf = RelFreq on -0.5..0.5 scale, ovf = log overall freq)
 choose_rf <- function(d) {
-  if (use_pile_freq && "RelFreq_pile" %in% names(d) && !all(is.na(d$RelFreq_pile))) {
+  # Priority: dynamic checkpoint-specific > Pile > Google
+  if ("freq_prob_c_dyn" %in% names(d) && !all(is.na(d$freq_prob_c_dyn))) {
+    d$rf  <- d$freq_prob_c_dyn
+    d$ovf <- if ("log_total_dyn" %in% names(d)) d$log_total_dyn
+             else d$OverallFreq_google
+  } else if ("freq_prob_c_ck" %in% names(d) && !all(is.na(d$freq_prob_c_ck))) {
+    d$rf  <- d$freq_prob_c_ck
+    d$ovf <- if ("log_total_ck" %in% names(d)) d$log_total_ck
+             else d$OverallFreq_google
+  } else if (use_pile_freq && "RelFreq_pile" %in% names(d) &&
+             !all(is.na(d$RelFreq_pile))) {
     d$rf  <- d$RelFreq_pile
-    d$ovf <- if ("OverallFreq_pile" %in% names(d)) d$OverallFreq_pile else d$OverallFreq_google
+    d$ovf <- if ("OverallFreq_pile" %in% names(d)) d$OverallFreq_pile
+             else d$OverallFreq_google
   } else {
     d$rf  <- d$RelFreq_google
     d$ovf <- d$OverallFreq_google
@@ -283,11 +370,11 @@ message("Fitting ΔLL logistic regressions ...")
 delta_ll <- dat |>
   group_by(model, model_family, model_params, model_label) |>
   group_modify(function(d, k) {
-    d <- choose_freq(d, k$model_family)
+    d <- choose_freq(d)
     if (any(is.na(d$freq_use))) d <- filter(d, !is.na(freq_use))
     if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, pref_coef = NA_real_,
                                    n_trials = nrow(d), n_items = NA_integer_))
-    d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+    d <- d |> mutate(ovf_c = as.numeric(scale(ovf_raw)),
                      preference_s = as.numeric(scale(preference)))
 
     baseline_mod <- glmer(
@@ -345,8 +432,16 @@ abspref_coef <- model_prefs |>
 
     d_fit <- model_prefs_by_prompt |>
       filter(model == this_model) |>
-      left_join(binom_items, by = "binom") |>
-      choose_rf()
+      left_join(binom_items, by = "binom")
+    # Join dynamic freq for BabyLM/C4 final models
+    if (!is.null(dyn_freq_final) && this_model %in% dyn_freq_final$model) {
+      d_fit <- d_fit |>
+        left_join(dyn_freq_final |>
+                    filter(model == this_model) |>
+                    select(binom, freq_prob_c_dyn, log_total_dyn),
+                  by = "binom")
+    }
+    d_fit <- choose_rf(d_fit)
 
     d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
     if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
@@ -411,22 +506,27 @@ if (file.exists(TRAIN_CSV)) {
     inner_join(pythia_final |> select(model, model_family, model_params, model_label,
                                       binom, preference),
                by = "binom")
+  if (use_pile_freq) {
+    pythia_dat <- pythia_dat |>
+      left_join(pile_freq |> rename(freq_prob_c_pile = freq_prob_c), by = "binom")
+  }
 
   pythia_delta_ll <- pythia_dat |>
     group_by(model, model_family, model_params, model_label) |>
     group_modify(function(d, k) {
-      d <- filter(d, !is.na(RelFreq), !is.na(OverallFreq), !is.na(preference))
-      d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+      d <- choose_freq(d)
+      d <- filter(d, !is.na(freq_use), !is.na(ovf_raw), !is.na(preference))
+      d <- d |> mutate(ovf_c = as.numeric(scale(ovf_raw)),
                        preference_s = as.numeric(scale(preference)))
       if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, pref_coef = NA_real_,
                                      n_trials = nrow(d), n_items = 0L))
       baseline <- glmer(
-        resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + (1 | binom) + (1 | participant),
+        resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
         family = binomial, data = d,
         control = glmerControl(optimizer = "bobyqa")
       )
       full <- glmer(
-        resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + preference_s +
+        resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + preference_s +
           (1 | binom) + (1 | participant),
         family = binomial, data = d,
         control = glmerControl(optimizer = "bobyqa")
@@ -581,13 +681,19 @@ if (file.exists(TRAIN_CSV)) {
              ANY_VALUE(e.beta_seen)  AS beta_seen
       FROM exposures e
       INNER JOIN needed_steps n ON e.model = n.model AND e.step = n.step
-      WHERE e.alpha_seen > 0 AND e.beta_seen > 0
-        AND e.alpha_seen IS NOT NULL AND e.beta_seen IS NOT NULL
+      WHERE e.alpha_seen IS NOT NULL AND e.beta_seen IS NOT NULL
       GROUP BY e.model, e.step, e.binom
     ") |>
       as_tibble() |>
-      mutate(freq_prob_c_ck = plogis(log(alpha_seen / beta_seen)) - 0.5) |>
-      select(model, step, binom, freq_prob_c_ck)
+      mutate(
+        freq_prob_c_ck = if_else(alpha_seen > 0 & beta_seen > 0,
+                                 plogis(log(alpha_seen / beta_seen)) - 0.5,
+                                 NA_real_),
+        log_total_ck   = if_else(alpha_seen + beta_seen > 0,
+                                 log(alpha_seen + beta_seen),
+                                 NA_real_)
+      ) |>
+      select(model, step, binom, freq_prob_c_ck, log_total_ck)
     message(sprintf("  Loaded checkpoint-specific freq: %d model-step-binom rows", nrow(ck_freq)))
   }
 
@@ -616,10 +722,10 @@ if (file.exists(TRAIN_CSV)) {
   ck_delta_ll <- ck_dat |>
     group_by(model, model_family, model_params, model_label, ppl_key) |>
     group_modify(function(d, k) {
-      d <- choose_freq(d, k$model_family)
+      d <- choose_freq(d)
       d <- filter(d, !is.na(freq_use), !is.na(preference))
       if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
-      d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+      d <- d |> mutate(ovf_c = as.numeric(scale(ovf_raw)),
                        preference_s = as.numeric(scale(preference)))
       baseline <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
                         family = binomial, data = d,
@@ -826,7 +932,7 @@ poly_smooth_all <- function(data_long, n_points = 200) {
     group_modify(function(d, k) {
       x_raw <- d$perplexity
       y_raw <- d$value
-      ok    <- !is.na(x_raw) & !is.na(y_raw)
+      ok    <- !is.na(x_raw) & !is.na(y_raw) & is.finite(x_raw) & x_raw > 0
       n_ok  <- sum(ok)
       if (n_ok < 2) return(tibble())
       x_log <- log2(x_raw[ok])
@@ -958,10 +1064,10 @@ compute_results_for_binoms <- function(binoms_sub) {
   dll <- d |>
     group_by(model, model_family, model_params, model_label) |>
     group_modify(function(d, k) {
-      d <- choose_freq(d, k$model_family)
+      d <- choose_freq(d)
       if (any(is.na(d$freq_use))) d <- filter(d, !is.na(freq_use))
       if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = NA_integer_))
-      d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+      d <- d |> mutate(ovf_c = as.numeric(scale(ovf_raw)),
                        preference_s = as.numeric(scale(preference)))
       baseline_mod <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
                             family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
@@ -1002,8 +1108,15 @@ compute_results_for_binoms <- function(binoms_sub) {
 
       d_fit <- model_prefs_by_prompt |>
         filter(model == this_model, binom %in% binoms_sub) |>
-        left_join(bi, by = "binom") |>
-        choose_rf()
+        left_join(bi, by = "binom")
+      if (!is.null(dyn_freq_final) && this_model %in% dyn_freq_final$model) {
+        d_fit <- d_fit |>
+          left_join(dyn_freq_final |>
+                      filter(model == this_model) |>
+                      select(binom, freq_prob_c_dyn, log_total_dyn),
+                    by = "binom")
+      }
+      d_fit <- choose_rf(d_fit)
 
       d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
       if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
@@ -1047,13 +1160,14 @@ compute_results_for_binoms <- function(binoms_sub) {
     py_dll <- py_dat_b |>
       group_by(model, model_family, model_params, model_label) |>
       group_modify(function(d, k) {
-        d <- filter(d, !is.na(RelFreq), !is.na(OverallFreq), !is.na(preference))
-        d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+        d <- choose_freq(d)
+        d <- filter(d, !is.na(freq_use), !is.na(ovf_raw), !is.na(preference))
+        d <- d |> mutate(ovf_c = as.numeric(scale(ovf_raw)),
                          preference_s = as.numeric(scale(preference)))
         if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
-        baseline <- glmer(resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + (1 | binom) + (1 | participant),
+        baseline <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
                           family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
-        full <- glmer(resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + preference_s +
+        full <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + preference_s +
                         (1 | binom) + (1 | participant),
                       family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
         tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
@@ -1126,10 +1240,10 @@ compute_results_for_binoms <- function(binoms_sub) {
     ck_dll_b <- ck_dat_b |>
       group_by(model, model_family, model_params, model_label, ppl_key) |>
       group_modify(function(d, k) {
-        d <- choose_freq(d, k$model_family)
-        d <- filter(d, !is.na(freq_use), !is.na(preference))
+        d <- choose_freq(d)
+        d <- filter(d, !is.na(freq_use), !is.na(ovf_raw), !is.na(preference))
         if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
-        d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+        d <- d |> mutate(ovf_c = as.numeric(scale(ovf_raw)),
                          preference_s = as.numeric(scale(preference)))
         baseline <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
                           family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
