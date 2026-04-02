@@ -488,7 +488,10 @@ def main():
 
         rev_kwargs = {"revision": revision} if revision else {}
 
-        tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True, **rev_kwargs)
+        # Load tokenizer from the base model (no revision) — tokenizers are
+        # identical across checkpoints and some revisions fail to load the
+        # tokenizer due to transformers version incompatibilities.
+        tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "right"
