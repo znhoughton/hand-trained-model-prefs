@@ -35,13 +35,19 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
 
-def _discover_olmo_checkpoints(model_id):
+def _discover_olmo_checkpoints(model_id, stage_prefix=None):
     """
-    Query the HuggingFace Hub for branch revisions of `model_id` that follow
-    the OLMo naming convention  step{N}-tokens{M}B  and return a dict mapping
-    phase label → revision name for four evenly spaced training phases:
+    Query the HuggingFace Hub for branch revisions of `model_id` and return a
+    dict mapping phase label → revision name for four training phases:
     'early' (~20%), 'early-mid' (~40%), 'mid' (~60%), 'mid-late' (~80%).
-    Returns {} if no such revisions are found or the Hub is unreachable.
+
+    stage_prefix : if given (e.g. "stage1"), only branches whose name starts
+                   with that prefix are considered — used for multi-stage models
+                   like OLMo-3 where we want only the first training stage.
+                   Expected branch format: "stage1-step{N}-tokens{M}B".
+                   Without a prefix the expected format is: "step{N}-tokens{M}B".
+
+    Returns {} if no matching revisions are found or the Hub is unreachable.
     """
     try:
         from huggingface_hub import list_repo_refs
@@ -52,9 +58,14 @@ def _discover_olmo_checkpoints(model_id):
     except Exception:
         return {}
 
+    if stage_prefix:
+        pattern = rf'^{re.escape(stage_prefix)}-step\d+-tokens(\d+(?:\.\d+)?)B$'
+    else:
+        pattern = r'^step\d+-tokens(\d+(?:\.\d+)?)B$'
+
     ck_list = []
     for branch in refs.branches:
-        m = re.match(r'^step\d+-tokens(\d+(?:\.\d+)?)B$', branch.name)
+        m = re.match(pattern, branch.name)
         if m:
             ck_list.append((float(m.group(1)), branch.name))
 
@@ -153,16 +164,19 @@ MODEL_CONFIGS = {
 # for four training phases: early, early-mid, mid, mid-late.
 _OLMO_CK_SOURCES = [
     # OLMo-1: try both the 1B and 7B -hf variants
-    ("allenai/OLMo-1B-hf",      "1000M",  "OLMo-1"),
-    ("allenai/OLMo-7B-hf",      "7000M",  "OLMo-1"),
+    ("allenai/OLMo-1B-hf",      "1000M",  "OLMo-1", None),
+    ("allenai/OLMo-7B-hf",      "7000M",  "OLMo-1", None),
     # OLMo-2: the 1124 variants have publicly available checkpoints
-    ("allenai/OLMo-2-0425-1B",  "1000M",  "OLMo-2"),
-    ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2"),
-    ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2"),
+    ("allenai/OLMo-2-0425-1B",  "1000M",  "OLMo-2", None),
+    ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2", None),
+    ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2", None),
+    # OLMo-3: multi-stage training; restrict to stage 1 only
+    ("allenai/Olmo-3-1025-7B",  "7000M",  "OLMo-3", "stage1"),
+    ("allenai/Olmo-3-1125-32B", "32000M", "OLMo-3", "stage1"),
 ]
 print("Discovering OLMo training checkpoints from HuggingFace Hub ...")
-for _base_id, _params, _fam in _OLMO_CK_SOURCES:
-    _revs = _discover_olmo_checkpoints(_base_id)
+for _base_id, _params, _fam, _stage in _OLMO_CK_SOURCES:
+    _revs = _discover_olmo_checkpoints(_base_id, stage_prefix=_stage)
     if not _revs:
         print(f"  No step-based revisions found for {_base_id} — skipping checkpoints.")
         continue
