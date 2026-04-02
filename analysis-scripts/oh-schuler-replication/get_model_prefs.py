@@ -74,9 +74,17 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
 
     ck_list.sort()
     max_tok = ck_list[-1][0]
-    phases  = [("early", 0.2), ("early-mid", 0.4), ("mid", 0.6), ("mid-late", 0.8)]
-    result  = {}
-    for phase_name, frac in phases:
+
+    result = {}
+
+    # Absolute token-count anchors (only added when training ran past that point)
+    for label, target_b in [("10B tokens", 10.0), ("50B tokens", 50.0)]:
+        if max_tok >= target_b:
+            best = min(ck_list, key=lambda x: abs(x[0] - target_b))
+            result[label] = best[1]
+
+    # Fractional phases relative to total training
+    for phase_name, frac in [("early", 0.2), ("early-mid", 0.4), ("mid", 0.6), ("mid-late", 0.8)]:
         target = max_tok * frac
         best   = min(ck_list, key=lambda x: abs(x[0] - target))
         result[phase_name] = best[1]
