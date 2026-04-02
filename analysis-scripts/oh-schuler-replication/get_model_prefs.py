@@ -54,10 +54,14 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
         return {}
     try:
         refs = list_repo_refs(model_id)
-    except Exception:
+    except Exception as e:
+        print(f"    [warn] list_repo_refs({model_id}) failed: {e}")
         return {}
 
     all_ref_names = [b.name for b in refs.branches] + [t.name for t in refs.tags]
+    step_refs = [n for n in all_ref_names if "step" in n.lower()]
+    print(f"    refs with 'step' in name ({len(step_refs)} total): "
+          f"{step_refs[:5]}{'...' if len(step_refs) > 5 else ''}")
 
     ck_list = []      # list of (sort_value, token_B_or_None, rev_name)
 
@@ -188,9 +192,9 @@ MODEL_CONFIGS = {
 # For each OLMo base model, query available step-based revisions and add entries
 # for four training phases: early, early-mid, mid, mid-late.
 _OLMO_CK_SOURCES = [
-    # OLMo-1: checkpoints on -hf repos as "step{N}-tokens{M}B" branches
+    # OLMo-1: 1B checkpoints are on the -hf repo; 7B checkpoints are on the non-hf repo
     ("allenai/OLMo-1B-hf",      "1000M",  "OLMo-1", None),
-    ("allenai/OLMo-7B-hf",      "7000M",  "OLMo-1", None),
+    ("allenai/OLMo-7B",         "7000M",  "OLMo-1", None),
     # OLMo-2-1124: "step{N}-tokens{M}B" tags (no stage prefix for stage 1)
     ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2", None),
     ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2", None),
