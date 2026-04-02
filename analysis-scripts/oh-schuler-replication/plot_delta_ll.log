@@ -239,3 +239,13 @@ Human trials:  726 → 594 unique binomials retained  (132 dropped as non-attest
 Model prefs:   725 → 594 unique binomials retained  (131 dropped as non-attested) 
 Final: 22895 human trials, 594 unique attested binomials, 32 models 
 Pile corpus frequencies loaded: 594 binomials with valid freq_prob_c 
+
+============================================================
+Run: 2026-04-01 20:49:58
+All models in oh_schuler_prefs.csv have a recognised model_family. 
+Per-prompt prefs: 32 models with by-prompt data; 0 models in averaged prefs only 
+Merged 12 checkpoint perplexity rows from ns_perplexity.csv 
+Human trials:  726 → 594 unique binomials retained  (132 dropped as non-attested) 
+Model prefs:   725 → 594 unique binomials retained  (131 dropped as non-attested) 
+Final: 22895 human trials, 594 unique attested binomials, 32 models 
+Pile corpus frequencies loaded: 594 binomials with valid freq_prob_c 

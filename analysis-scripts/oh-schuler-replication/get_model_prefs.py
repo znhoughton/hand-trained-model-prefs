@@ -23,6 +23,7 @@ Requirements:
 
 import os
 import math
+import re
 import datetime
 import shutil
 from pathlib import Path
@@ -32,6 +33,43 @@ import pandas as pd
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
+
+
+def _discover_olmo_checkpoints(model_id):
+    """
+    Query the HuggingFace Hub for branch revisions of `model_id` that follow
+    the OLMo naming convention  step{N}-tokens{M}B  and return a dict mapping
+    phase label → revision name for four evenly spaced training phases:
+    'early' (~20%), 'early-mid' (~40%), 'mid' (~60%), 'mid-late' (~80%).
+    Returns {} if no such revisions are found or the Hub is unreachable.
+    """
+    try:
+        from huggingface_hub import list_repo_refs
+    except ImportError:
+        return {}
+    try:
+        refs = list_repo_refs(model_id)
+    except Exception:
+        return {}
+
+    ck_list = []
+    for branch in refs.branches:
+        m = re.match(r'^step\d+-tokens(\d+(?:\.\d+)?)B$', branch.name)
+        if m:
+            ck_list.append((float(m.group(1)), branch.name))
+
+    if not ck_list:
+        return {}
+
+    ck_list.sort()
+    max_tok = ck_list[-1][0]
+    phases  = [("early", 0.2), ("early-mid", 0.4), ("mid", 0.6), ("mid-late", 0.8)]
+    result  = {}
+    for phase_name, frac in phases:
+        target = max_tok * frac
+        best   = min(ck_list, key=lambda x: abs(x[0] - target))
+        result[phase_name] = best[1]
+    return result
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR   = Path(__file__).parent
@@ -109,6 +147,36 @@ MODEL_CONFIGS = {
     "znhoughton/opt-c4-350m-seed964@step-3920":  {"params": "350M",  "family": "C4 (mid)",   "label": "C4 (mid)-350M",    "skip": False, "ppl_only": True, "revision": "step-3920"},
     "znhoughton/opt-c4-1.3b-seed964@step-5640":  {"params": "1300M", "family": "C4 (mid)",   "label": "C4 (mid)-1.3B",    "skip": False, "ppl_only": True, "revision": "step-5640"},
 }
+
+# ── OLMo training checkpoints (discovered dynamically from HF Hub) ─────────────
+# For each OLMo base model, query available step-based revisions and add entries
+# for four training phases: early, early-mid, mid, mid-late.
+_OLMO_CK_SOURCES = [
+    # OLMo-1: try both the 1B and 7B -hf variants
+    ("allenai/OLMo-1B-hf",      "1000M",  "OLMo-1"),
+    ("allenai/OLMo-7B-hf",      "7000M",  "OLMo-1"),
+    # OLMo-2: the 1124 variants have publicly available checkpoints
+    ("allenai/OLMo-2-0425-1B",  "1000M",  "OLMo-2"),
+    ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2"),
+    ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2"),
+]
+print("Discovering OLMo training checkpoints from HuggingFace Hub ...")
+for _base_id, _params, _fam in _OLMO_CK_SOURCES:
+    _revs = _discover_olmo_checkpoints(_base_id)
+    if not _revs:
+        print(f"  No step-based revisions found for {_base_id} — skipping checkpoints.")
+        continue
+    print(f"  {_base_id}: found {len(_revs)} checkpoint phases")
+    for _phase, _rev in _revs.items():
+        _ck_id = f"{_base_id}@{_rev}"
+        if _ck_id not in MODEL_CONFIGS:
+            MODEL_CONFIGS[_ck_id] = {
+                "params":   _params,
+                "family":   f"{_fam} ({_phase})",
+                "label":    f"{_fam} ({_phase})-{_params}",
+                "skip":     False,
+                "revision": _rev,
+            }
 
 # ── Sentence-frame prompts ────────────────────────────────────────────────────
 LIST_OF_PROMPTS = [
