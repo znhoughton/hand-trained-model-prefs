@@ -312,12 +312,12 @@ FAMILY_COLOURS <- c(
   "GPT-2"          = "#2166ac",
   "GPT-Neo"        = "#4dac26",
   "OPT"            = "#b2182b",
-  "BabyLM"         = "#e08214",
-  "BabyLM (early)" = "#fdbf6f",
-  "BabyLM (mid)"   = "#c87a0d",
-  "C4"             = "#35978f",
-  "C4 (early)"     = "#80cdc1",
-  "C4 (mid)"       = "#01665e"
+  "BabyLM"         = "#238443",
+  "BabyLM (early)" = "#d9f0a3",
+  "BabyLM (mid)"   = "#78c679",
+  "C4"             = "#980043",
+  "C4 (early)"     = "#d4b9da",
+  "C4 (mid)"       = "#df65b0"
 )
 FAMILY_SHAPES <- c(
   "GPT-2"          = 16,

@@ -145,7 +145,7 @@ def main():
                 curr_toks += [toks[i]]
                 curr_toks_str = tokenizer.convert_tokens_to_string(curr_toks)
                 # summing token-level surprisal
-                if words[curr_word_ix] == curr_toks_str.strip():
+                if words[curr_word_ix].lower() == curr_toks_str.strip().lower():
                     print(curr_toks_str.strip(), sum(curr_word_surp))
                     curr_word_surp = []
                     curr_toks = []

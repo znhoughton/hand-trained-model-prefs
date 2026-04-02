@@ -11,6 +11,8 @@
 library(tidyverse)
 library(ggh4x)
 library(lme4)
+library(duckdb)
+library(DBI)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR <- tryCatch(
@@ -31,6 +33,7 @@ HUMAN_CSV           <- file.path(DATA_DIR, "all_human_data.csv")
 BINOMS_CSV          <- file.path(DATA_DIR, "nonce_and_attested_binoms.csv")
 PILE_FREQ_CSV       <- file.path(SCRIPT_DIR, "pile_corpus_freq.csv")
 TRAIN_CSV           <- file.path(BASE_DIR, "Data", "processed", "training_attested.csv")
+EXPOSURES_CSV       <- file.path(BASE_DIR, "Data", "processed", "checkpoint_results_with_exposures.csv")
 OUT_PDF             <- file.path(SCRIPT_DIR, "delta_ll_plot.pdf")
 OUT_PNG             <- file.path(SCRIPT_DIR, "delta_ll_plot.png")
 
@@ -251,15 +254,26 @@ if (use_pile_freq) {
 }
 
 # ── Frequency predictor selection ─────────────────────────────────────────────
-# OPT, OLMo, BabyLM, and C4 are all trained on large web corpora → use Pile
-# freq when available. GPT-2 / GPT-Neo → Google Books RelFreq.
-PILE_FREQ_FAMILIES <- c("OPT", "OLMo-1", "OLMo-2", "OLMo-3", "BabyLM", "C4")
+# Use Pile RelFreq everywhere when available; fall back to Google Books RelFreq.
+PILE_FREQ_FAMILIES <- c("OPT", "OLMo-1", "OLMo-2", "OLMo-3", "BabyLM", "C4")  # kept for reference
 
 choose_freq <- function(d, family) {
-  if (use_pile_freq && family %in% PILE_FREQ_FAMILIES && "freq_prob_c_pile" %in% names(d)) {
+  if (use_pile_freq && "freq_prob_c_pile" %in% names(d)) {
     d$freq_use <- d$freq_prob_c_pile
   } else {
     d$freq_use <- d$RelFreq
+  }
+  d
+}
+
+# For abspref blocks: set rf/ovf columns using Pile when available
+choose_rf <- function(d) {
+  if (use_pile_freq && "RelFreq_pile" %in% names(d) && !all(is.na(d$RelFreq_pile))) {
+    d$rf  <- d$RelFreq_pile
+    d$ovf <- if ("OverallFreq_pile" %in% names(d)) d$OverallFreq_pile else d$OverallFreq_google
+  } else {
+    d$rf  <- d$RelFreq_google
+    d$ovf <- d$OverallFreq_google
   }
   d
 }
@@ -273,15 +287,16 @@ delta_ll <- dat |>
     if (any(is.na(d$freq_use))) d <- filter(d, !is.na(freq_use))
     if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, pref_coef = NA_real_,
                                    n_trials = nrow(d), n_items = NA_integer_))
-    d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
+    d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+                     preference_s = as.numeric(scale(preference)))
 
     baseline_mod <- glmer(
-      resp_alpha ~ freq_use + (1 | binom) + (1 | participant),
+      resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
       family = binomial, data = d,
       control = glmerControl(optimizer = "bobyqa")
     )
     full_mod <- glmer(
-      resp_alpha ~ freq_use + preference +
+      resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + preference_s +
         (1 | binom) + (1 | participant),
       family = binomial, data = d,
       control = glmerControl(optimizer = "bobyqa")
@@ -301,16 +316,17 @@ pref_coef_results <- dat |>
   group_modify(function(d, k) {
     d <- filter(d, !is.na(preference))
     if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+    d <- d |> mutate(preference_s = as.numeric(scale(preference)))
     fit <- tryCatch(
       glmer(
-        resp_alpha ~ preference + (1 | binom) + (1 | participant),
+        resp_alpha ~ preference_s + (1 | binom) + (1 | participant),
         family  = binomial, data = d,
         control = glmerControl(optimizer = "bobyqa")
       ),
       error = function(e) NULL
     )
     if (is.null(fit)) return(tibble(pref_coef = NA_real_))
-    tibble(pref_coef = fixef(fit)[["preference"]])
+    tibble(pref_coef = fixef(fit)[["preference_s"]])
   }) |>
   ungroup()
 
@@ -321,61 +337,36 @@ abspref_coef <- model_prefs |>
   group_by(model, model_family, model_params, model_label) |>
   group_modify(function(d, k) {
     this_model <- k$model
+    na_row <- tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                     p = NA_real_, relfreq_coef = NA_real_, n = NA_integer_)
 
-    if (has_by_prompt && this_model %in% models_with_prompt) {
-      d_fit <- model_prefs_by_prompt |>
-        filter(model == this_model) |>
-        left_join(binom_items, by = "binom")
-      use_lmer <- TRUE
-    } else {
-      d_fit <- d |> left_join(binom_items, by = "binom")
-      use_lmer <- FALSE
-    }
+    if (!has_by_prompt || !this_model %in% models_with_prompt)
+      return(na_row)
 
-    if (use_pile_freq && k$model_family %in% PILE_FREQ_FAMILIES &&
-        "RelFreq_pile" %in% names(d_fit) && "OverallFreq_pile" %in% names(d_fit)) {
-      d_fit$rf  <- d_fit$RelFreq_pile
-      d_fit$ovf <- d_fit$OverallFreq_pile
-    } else {
-      d_fit$rf  <- d_fit$RelFreq_google
-      d_fit$ovf <- d_fit$OverallFreq_google
-    }
+    d_fit <- model_prefs_by_prompt |>
+      filter(model == this_model) |>
+      left_join(binom_items, by = "binom") |>
+      choose_rf()
 
     d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
-    if (nrow(d_fit) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
-                                       t = NA_real_, p = NA_real_,
-                                       relfreq_coef = NA_real_, n = nrow(d_fit)))
+    if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
     d_fit <- d_fit |> mutate(
-      AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
-      rf_c      = as.numeric(scale(rf,      scale = FALSE)),
-      ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+      AbsPref_c = AbsPref - 0.5,
+      rf_c      = rf,
+      ovf_c     = as.numeric(scale(ovf))
     )
 
-    if (use_lmer && "prompt" %in% names(d_fit)) {
-      fit <- tryCatch(
-        lmer(preference ~ AbsPref_c + rf_c + ovf_c +
-               AbsPref_c:ovf_c + rf_c:ovf_c +
-               (1 | binom) + (1 | prompt),
-             data = d_fit, REML = TRUE),
-        error = function(e) NULL
-      )
-    } else {
-      fit <- NULL
-    }
-    if (is.null(fit)) {
-      fit <- tryCatch(
-        lmer(preference ~ AbsPref_c + rf_c + ovf_c +
-               AbsPref_c:ovf_c + rf_c:ovf_c +
-               (1 | binom),
-             data = d_fit, REML = TRUE),
-        error = function(e) lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                                 AbsPref_c:ovf_c + rf_c:ovf_c, data = d_fit)
-      )
-    }
+    fit <- tryCatch(
+      lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+             AbsPref_c:ovf_c + rf_c:ovf_c +
+             (1 | binom) + (1 | prompt),
+           data = d_fit, REML = TRUE),
+      error = function(e) NULL
+    )
+    if (is.null(fit)) return(na_row)
+
     cf <- summary(fit)$coefficients
-    if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
-                                                       t = NA_real_, p = NA_real_,
-                                                       relfreq_coef = NA_real_, n = nrow(d_fit)))
+    if (!"AbsPref_c" %in% rownames(cf)) return(na_row)
     tibble(
       estimate     = cf["AbsPref_c", "Estimate"],
       se           = cf["AbsPref_c", "Std. Error"],
@@ -425,16 +416,17 @@ if (file.exists(TRAIN_CSV)) {
     group_by(model, model_family, model_params, model_label) |>
     group_modify(function(d, k) {
       d <- filter(d, !is.na(RelFreq), !is.na(OverallFreq), !is.na(preference))
-      d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
+      d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+                       preference_s = as.numeric(scale(preference)))
       if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, pref_coef = NA_real_,
                                      n_trials = nrow(d), n_items = 0L))
       baseline <- glmer(
-        resp_alpha ~ RelFreq + ovf + RelFreq:ovf + (1 | binom) + (1 | participant),
+        resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + (1 | binom) + (1 | participant),
         family = binomial, data = d,
         control = glmerControl(optimizer = "bobyqa")
       )
       full <- glmer(
-        resp_alpha ~ RelFreq + ovf + RelFreq:ovf + preference +
+        resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + preference_s +
           (1 | binom) + (1 | participant),
         family = binomial, data = d,
         control = glmerControl(optimizer = "bobyqa")
@@ -449,16 +441,17 @@ if (file.exists(TRAIN_CSV)) {
     group_modify(function(d, k) {
       d <- filter(d, !is.na(preference))
       if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+      d <- d |> mutate(preference_s = as.numeric(scale(preference)))
       fit <- tryCatch(
         glmer(
-          resp_alpha ~ preference + (1 | binom) + (1 | participant),
+          resp_alpha ~ preference_s + (1 | binom) + (1 | participant),
           family  = binomial, data = d,
           control = glmerControl(optimizer = "bobyqa")
         ),
         error = function(e) NULL
       )
       if (is.null(fit)) return(tibble(pref_coef = NA_real_))
-      tibble(pref_coef = fixef(fit)[["preference"]])
+      tibble(pref_coef = fixef(fit)[["preference_s"]])
     }) |>
     ungroup()
 
@@ -466,29 +459,24 @@ if (file.exists(TRAIN_CSV)) {
     left_join(binom_items, by = "binom") |>
     group_by(model, model_family, model_params, model_label) |>
     group_modify(function(d, k) {
-      if (use_pile_freq && "RelFreq_pile" %in% names(d) && "OverallFreq_pile" %in% names(d)) {
-        d$rf  <- coalesce(d$RelFreq_pile,     d$RelFreq_google)
-        d$ovf <- coalesce(d$OverallFreq_pile, d$OverallFreq_google)
-      } else {
-        d$rf  <- d$RelFreq_google
-        d$ovf <- d$OverallFreq_google
-      }
+      d <- choose_rf(d)
       d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
       if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
                                      t = NA_real_, p = NA_real_,
                                      relfreq_coef = NA_real_, n = nrow(d)))
       d <- d |> mutate(
-        AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
-        rf_c      = as.numeric(scale(rf,      scale = FALSE)),
-        ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+        AbsPref_c = AbsPref - 0.5,
+        rf_c      = rf,
+        ovf_c     = as.numeric(scale(ovf))
       )
       fit <- tryCatch(
         lmer(preference ~ AbsPref_c + rf_c + ovf_c +
                AbsPref_c:ovf_c + rf_c:ovf_c + (1 | binom),
              data = d, REML = TRUE),
-        error = function(e) lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                                 AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+        error = function(e) NULL
       )
+      if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                                      p = NA_real_, relfreq_coef = NA_real_, n = nrow(d)))
       cf <- summary(fit)$coefficients
       if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
                                                          t = NA_real_, p = NA_real_,
@@ -521,22 +509,32 @@ ck_results <- NULL
 if (file.exists(TRAIN_CSV)) {
   message("Building BabyLM/C4 checkpoint families ...")
 
-  train_ck <- read_csv(TRAIN_CSV, show_col_types = FALSE) |>
-    filter(grepl("babylm|opt-c4", model, ignore.case = TRUE)) |>
-    filter(binom %in% attested_binoms)
+  con <- dbConnect(duckdb::duckdb())
+  on.exit(dbDisconnect(con, shutdown = TRUE), add = TRUE)
 
-  # Per model, identify the early and mid step numbers
-  ck_map <- train_ck |>
-    distinct(model, step, checkpoint) |>
+  train_csv_fwd <- gsub("\\\\", "/", TRAIN_CSV)
+  dbExecute(con, sprintf(
+    "CREATE VIEW train_csv AS SELECT * FROM read_csv_auto('%s')", train_csv_fwd
+  ))
+
+  # Read only metadata columns to identify early/mid steps — tiny result
+  ck_meta <- dbGetQuery(con, "
+    SELECT DISTINCT model, step, checkpoint, tokens
+    FROM train_csv
+    WHERE regexp_matches(lower(model), 'babylm|opt-c4')
+  ")
+
+  # Per model, identify the early and mid step numbers by token count
+  # (closest log-sampled checkpoint to 1/3 and 1/2 of total training tokens)
+  ck_map <- ck_meta |>
     group_by(model) |>
     arrange(step) |>
     mutate(
-      n     = n(),
-      idx   = row_number() - 1L,        # 0-based index
+      total_tokens = max(tokens),
       phase = case_when(
-        idx == floor(n[1] / 3) ~ "early",
-        idx == floor(n[1] / 2) ~ "mid",
-        TRUE                   ~ NA_character_
+        tokens == tokens[which.min(abs(tokens - total_tokens / 3))] ~ "early",
+        tokens == tokens[which.min(abs(tokens - total_tokens / 2))] ~ "mid",
+        TRUE ~ NA_character_
       )
     ) |>
     filter(!is.na(phase)) |>
@@ -550,9 +548,48 @@ if (file.exists(TRAIN_CSV)) {
       model_family = paste0(base_family, " (", phase, ")"),
       model_params = parse_params(model),
       model_label  = paste0(model_family, "-", model_params),
-      # Key used to look up perplexity: model@checkpoint
       ppl_key      = paste0(model, "@", checkpoint)
     )
+
+  # Push needed_steps and attested_binoms into DuckDB for server-side filtering
+  needed_steps <- ck_map |> distinct(model, step)
+  dbWriteTable(con, "needed_steps",   needed_steps,                         overwrite = TRUE)
+  dbWriteTable(con, "attested_binoms_tbl", data.frame(binom = attested_binoms), overwrite = TRUE)
+
+  # Pull only the rows we need — all heavy filtering happens inside DuckDB
+  train_ck <- dbGetQuery(con, "
+    SELECT t.*
+    FROM train_csv t
+    INNER JOIN needed_steps n    ON t.model = n.model AND t.step = n.step
+    INNER JOIN attested_binoms_tbl b ON t.binom = b.binom
+  ") |> as_tibble()
+  message(sprintf("  train_ck: %d rows loaded", nrow(train_ck)))
+
+  # Load checkpoint-specific relative frequency via DuckDB (uses parquet if available)
+  ck_freq <- NULL
+  if (file.exists(EXPOSURES_CSV)) {
+    exp_fwd <- gsub("\\\\", "/",
+                    if (file.exists(sub("\\.csv$", ".parquet", EXPOSURES_CSV)))
+                      sub("\\.csv$", ".parquet", EXPOSURES_CSV)
+                    else EXPOSURES_CSV)
+    fmt <- if (grepl("\\.parquet$", exp_fwd)) "read_parquet" else "read_csv_auto"
+    dbExecute(con, sprintf("CREATE VIEW exposures AS SELECT * FROM %s('%s')", fmt, exp_fwd))
+
+    ck_freq <- dbGetQuery(con, "
+      SELECT e.model, e.step, e.binom,
+             ANY_VALUE(e.alpha_seen) AS alpha_seen,
+             ANY_VALUE(e.beta_seen)  AS beta_seen
+      FROM exposures e
+      INNER JOIN needed_steps n ON e.model = n.model AND e.step = n.step
+      WHERE e.alpha_seen > 0 AND e.beta_seen > 0
+        AND e.alpha_seen IS NOT NULL AND e.beta_seen IS NOT NULL
+      GROUP BY e.model, e.step, e.binom
+    ") |>
+      as_tibble() |>
+      mutate(freq_prob_c_ck = plogis(log(alpha_seen / beta_seen)) - 0.5) |>
+      select(model, step, binom, freq_prob_c_ck)
+    message(sprintf("  Loaded checkpoint-specific freq: %d model-step-binom rows", nrow(ck_freq)))
+  }
 
   ck_dat <- human_trials |>
     select(binom, participant, resp_alpha, RelFreq, OverallFreq) |>
@@ -561,7 +598,7 @@ if (file.exists(TRAIN_CSV)) {
         inner_join(ck_map |> select(model, step, model_family, model_params,
                                     model_label, ppl_key),
                    by = c("model", "step")) |>
-        select(model, model_family, model_params, model_label, ppl_key,
+        select(model, step, model_family, model_params, model_label, ppl_key,
                binom, preference),
       by = "binom"
     )
@@ -571,17 +608,23 @@ if (file.exists(TRAIN_CSV)) {
       left_join(pile_freq |> rename(freq_prob_c_pile = freq_prob_c), by = "binom")
   }
 
+  if (!is.null(ck_freq)) {
+    ck_dat <- ck_dat |>
+      left_join(ck_freq, by = c("model", "step", "binom"))
+  }
+
   ck_delta_ll <- ck_dat |>
     group_by(model, model_family, model_params, model_label, ppl_key) |>
     group_modify(function(d, k) {
       d <- choose_freq(d, k$model_family)
       d <- filter(d, !is.na(freq_use), !is.na(preference))
       if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
-      d <- d |> mutate(ovf = log(pmax(OverallFreq, 1)))
-      baseline <- glmer(resp_alpha ~ freq_use + (1 | binom) + (1 | participant),
+      d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+                       preference_s = as.numeric(scale(preference)))
+      baseline <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
                         family = binomial, data = d,
                         control = glmerControl(optimizer = "bobyqa"))
-      full     <- glmer(resp_alpha ~ freq_use + preference + (1 | binom) + (1 | participant),
+      full     <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + preference_s + (1 | binom) + (1 | participant),
                         family = binomial, data = d,
                         control = glmerControl(optimizer = "bobyqa"))
       tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
@@ -594,46 +637,47 @@ if (file.exists(TRAIN_CSV)) {
     group_modify(function(d, k) {
       d <- filter(d, !is.na(preference))
       if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+      d <- d |> mutate(preference_s = as.numeric(scale(preference)))
       fit <- tryCatch(
-        glmer(resp_alpha ~ preference + (1 | binom) + (1 | participant),
+        glmer(resp_alpha ~ preference_s + (1 | binom) + (1 | participant),
               family = binomial, data = d,
               control = glmerControl(optimizer = "bobyqa")),
         error = function(e) NULL
       )
       if (is.null(fit)) return(tibble(pref_coef = NA_real_))
-      tibble(pref_coef = fixef(fit)[["preference"]])
+      tibble(pref_coef = fixef(fit)[["preference_s"]])
     }) |>
     ungroup()
 
-  ck_abspref <- train_ck |>
+  ck_abspref_base <- train_ck |>
     inner_join(ck_map |> select(model, step, model_family, model_params, model_label, ppl_key),
                by = c("model", "step")) |>
-    left_join(binom_items, by = "binom") |>
+    left_join(binom_items, by = "binom")
+  if (!is.null(ck_freq)) {
+    ck_abspref_base <- ck_abspref_base |>
+      left_join(ck_freq, by = c("model", "step", "binom"))
+  }
+  ck_abspref <- ck_abspref_base |>
     group_by(model, model_family, model_params, model_label, ppl_key) |>
     group_modify(function(d, k) {
-      if (use_pile_freq && "RelFreq_pile" %in% names(d)) {
-        d$rf  <- coalesce(d$RelFreq_pile,     d$RelFreq_google)
-        d$ovf <- coalesce(d$OverallFreq_pile, d$OverallFreq_google)
-      } else {
-        d$rf  <- d$RelFreq_google
-        d$ovf <- d$OverallFreq_google
-      }
+      d <- choose_rf(d)
       d <- filter(d, !is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
       if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
                                      t = NA_real_, p = NA_real_,
                                      relfreq_coef = NA_real_, n = nrow(d)))
       d <- d |> mutate(
-        AbsPref_c = as.numeric(scale(AbsPref, scale = FALSE)),
-        rf_c      = as.numeric(scale(rf,      scale = FALSE)),
-        ovf_c     = as.numeric(scale(ovf,     scale = FALSE))
+        AbsPref_c = AbsPref - 0.5,
+        rf_c      = rf,
+        ovf_c     = as.numeric(scale(ovf))
       )
       fit <- tryCatch(
         lmer(preference ~ AbsPref_c + rf_c + ovf_c +
                AbsPref_c:ovf_c + rf_c:ovf_c + (1 | binom),
              data = d, REML = TRUE),
-        error = function(e) lm(preference ~ AbsPref_c + rf_c + ovf_c +
-                                 AbsPref_c:ovf_c + rf_c:ovf_c, data = d)
+        error = function(e) NULL
       )
+      if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                                      p = NA_real_, relfreq_coef = NA_real_, n = nrow(d)))
       cf <- summary(fit)$coefficients
       if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
                                                          t = NA_real_, p = NA_real_,
@@ -707,12 +751,12 @@ family_colours <- c(
   "OLMo-2"         = "#f4a582",
   "OLMo-3"         = "#92c5de",
   "Pythia"         = "#762a83",
-  "BabyLM"         = "#e08214",
-  "BabyLM (early)" = "#fdbf6f",   # light orange
-  "BabyLM (mid)"   = "#c87a0d",   # darker orange
-  "C4"             = "#35978f",
-  "C4 (early)"     = "#80cdc1",   # light teal
-  "C4 (mid)"       = "#01665e"    # dark teal
+  "BabyLM"         = "#238443",   # dark green
+  "BabyLM (early)" = "#d9f0a3",   # light green
+  "BabyLM (mid)"   = "#78c679",   # medium green
+  "C4"             = "#980043",   # dark purple-red
+  "C4 (early)"     = "#d4b9da",   # light purple
+  "C4 (mid)"       = "#df65b0"    # medium pink-purple
 )
 
 shared_layers <- list(
@@ -886,3 +930,384 @@ print(p_combined)
 ggsave(OUT_PDF, p_combined, width = 22, height = 8)
 ggsave(OUT_PNG, p_combined, width = 22, height = 8, dpi = 150)
 message(sprintf("\nSaved:\n  %s\n  %s", OUT_PDF, OUT_PNG))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Frequency-binned plots
+# ══════════════════════════════════════════════════════════════════════════════
+message("\n\nBuilding frequency-binned plots ...")
+
+# Tertile bins based on log overall frequency (OverallFreq_google = log(OverallFreq))
+freq_bins <- binom_items |>
+  filter(!is.na(OverallFreq_google)) |>
+  mutate(freq_bin = ntile(OverallFreq_google, 3),
+         freq_bin_label = factor(freq_bin,
+                                 labels = c("Low frequency", "Mid frequency", "High frequency"))) |>
+  select(binom, freq_bin_label)
+
+message(sprintf("  Binomial counts per bin: %s",
+                paste(names(table(freq_bins$freq_bin_label)),
+                      table(freq_bins$freq_bin_label), sep = " = ", collapse = ", ")))
+
+# ── Helper: refit all regressions for a binom subset ─────────────────────────
+compute_results_for_binoms <- function(binoms_sub) {
+  d  <- dat         |> filter(binom %in% binoms_sub)
+  bi <- binom_items |> filter(binom %in% binoms_sub)
+  mp <- model_prefs |> filter(binom %in% binoms_sub)
+
+  # delta_ll
+  dll <- d |>
+    group_by(model, model_family, model_params, model_label) |>
+    group_modify(function(d, k) {
+      d <- choose_freq(d, k$model_family)
+      if (any(is.na(d$freq_use))) d <- filter(d, !is.na(freq_use))
+      if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = NA_integer_))
+      d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+                       preference_s = as.numeric(scale(preference)))
+      baseline_mod <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
+                            family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
+      full_mod <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + preference_s + (1 | binom) + (1 | participant),
+                        family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
+      tibble(delta_ll = as.numeric(logLik(full_mod)) - as.numeric(logLik(baseline_mod)),
+             n_trials = nrow(d), n_items = n_distinct(d$binom))
+    }) |>
+    ungroup()
+
+  # pref_coef
+  pc <- d |>
+    group_by(model, model_family, model_params, model_label) |>
+    group_modify(function(d, k) {
+      d <- filter(d, !is.na(preference))
+      if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+      d <- d |> mutate(preference_s = as.numeric(scale(preference)))
+      fit <- tryCatch(
+        glmer(resp_alpha ~ preference_s + (1 | binom) + (1 | participant),
+              family = binomial, data = d, control = glmerControl(optimizer = "bobyqa")),
+        error = function(e) NULL
+      )
+      if (is.null(fit)) return(tibble(pref_coef = NA_real_))
+      tibble(pref_coef = fixef(fit)[["preference_s"]])
+    }) |>
+    ungroup()
+
+  # abspref
+  ac <- mp |>
+    group_by(model, model_family, model_params, model_label) |>
+    group_modify(function(d, k) {
+      this_model <- k$model
+      na_row <- tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                       p = NA_real_, relfreq_coef = NA_real_, n = NA_integer_)
+
+      if (!has_by_prompt || !this_model %in% models_with_prompt)
+        return(na_row)
+
+      d_fit <- model_prefs_by_prompt |>
+        filter(model == this_model, binom %in% binoms_sub) |>
+        left_join(bi, by = "binom") |>
+        choose_rf()
+
+      d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+      if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
+      d_fit <- d_fit |> mutate(
+        AbsPref_c = AbsPref - 0.5,
+        rf_c      = rf,
+        ovf_c     = as.numeric(scale(ovf))
+      )
+      fit <- tryCatch(
+        lmer(preference ~ AbsPref_c + rf_c + ovf_c + AbsPref_c:ovf_c + rf_c:ovf_c +
+               (1 | binom) + (1 | prompt), data = d_fit, REML = TRUE),
+        error = function(e) NULL
+      )
+      if (is.null(fit)) return(na_row)
+      cf <- summary(fit)$coefficients
+      if (!"AbsPref_c" %in% rownames(cf)) return(na_row)
+      tibble(estimate     = cf["AbsPref_c", "Estimate"],
+             se           = cf["AbsPref_c", "Std. Error"],
+             t            = cf["AbsPref_c", "t value"],
+             p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+             relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
+             n            = nrow(d_fit))
+    }) |>
+    ungroup()
+
+  # Combine main model results
+  r <- dll |>
+    left_join(pc |> select(model, pref_coef), by = "model") |>
+    left_join(ac |> select(model, model_family, model_params, model_label,
+                            estimate, se, t, p, relfreq_coef),
+              by = c("model", "model_family", "model_params", "model_label")) |>
+    left_join(ppl |> select(model, perplexity), by = "model") |>
+    filter(!is.na(perplexity)) |>
+    mutate(params_M = as.numeric(sub("M$", "", model_params)))
+
+  # Pythia
+  if (exists("pythia_dat") && !is.null(pythia_dat)) {
+    py_dat_b   <- pythia_dat   |> filter(binom %in% binoms_sub)
+    py_final_b <- pythia_final |> filter(binom %in% binoms_sub)
+
+    py_dll <- py_dat_b |>
+      group_by(model, model_family, model_params, model_label) |>
+      group_modify(function(d, k) {
+        d <- filter(d, !is.na(RelFreq), !is.na(OverallFreq), !is.na(preference))
+        d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+                         preference_s = as.numeric(scale(preference)))
+        if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
+        baseline <- glmer(resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + (1 | binom) + (1 | participant),
+                          family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
+        full <- glmer(resp_alpha ~ RelFreq + ovf_c + RelFreq:ovf_c + preference_s +
+                        (1 | binom) + (1 | participant),
+                      family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
+        tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+               n_trials = nrow(d), n_items = n_distinct(d$binom))
+      }) |>
+      ungroup()
+
+    py_pc <- py_dat_b |>
+      group_by(model, model_family, model_params, model_label) |>
+      group_modify(function(d, k) {
+        d <- filter(d, !is.na(preference))
+        if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+        d <- d |> mutate(preference_s = as.numeric(scale(preference)))
+        fit <- tryCatch(
+          glmer(resp_alpha ~ preference_s + (1 | binom) + (1 | participant),
+                family = binomial, data = d, control = glmerControl(optimizer = "bobyqa")),
+          error = function(e) NULL
+        )
+        if (is.null(fit)) return(tibble(pref_coef = NA_real_))
+        tibble(pref_coef = fixef(fit)[["preference_s"]])
+      }) |>
+      ungroup()
+
+    py_ac <- py_final_b |>
+      left_join(bi, by = "binom") |>
+      group_by(model, model_family, model_params, model_label) |>
+      group_modify(function(d, k) {
+        d <- choose_rf(d)
+        d <- d |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+        if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
+                                       t = NA_real_, p = NA_real_,
+                                       relfreq_coef = NA_real_, n = nrow(d)))
+        d <- d |> mutate(AbsPref_c = AbsPref - 0.5,
+                         rf_c      = rf,
+                         ovf_c     = as.numeric(scale(ovf)))
+        fit <- tryCatch(
+          lmer(preference ~ AbsPref_c + rf_c + ovf_c + AbsPref_c:ovf_c + rf_c:ovf_c +
+                 (1 | binom), data = d, REML = TRUE),
+          error = function(e) NULL
+        )
+        if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                                        p = NA_real_, relfreq_coef = NA_real_, n = nrow(d)))
+        cf <- summary(fit)$coefficients
+        if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
+                                                           t = NA_real_, p = NA_real_,
+                                                           relfreq_coef = NA_real_, n = nrow(d)))
+        tibble(estimate     = cf["AbsPref_c", "Estimate"],
+               se           = cf["AbsPref_c", "Std. Error"],
+               t            = cf["AbsPref_c", "t value"],
+               p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+               relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
+               n            = nrow(d))
+      }) |>
+      ungroup()
+
+    py_res_b <- py_dll |>
+      left_join(py_pc |> select(model, pref_coef),                             by = "model") |>
+      left_join(py_ac |> select(model, estimate, se, t, p, relfreq_coef),       by = "model") |>
+      left_join(ppl   |> select(model, perplexity),                             by = "model") |>
+      mutate(params_M = as.numeric(sub("M$", "", model_params)))
+
+    r <- bind_rows(r, py_res_b |> filter(!is.na(perplexity)))
+  }
+
+  # Checkpoints
+  if (exists("ck_dat") && !is.null(ck_dat)) {
+    ck_dat_b <- ck_dat   |> filter(binom %in% binoms_sub)
+    cf_b     <- if (!is.null(ck_freq)) ck_freq |> filter(binom %in% binoms_sub) else NULL
+
+    ck_dll_b <- ck_dat_b |>
+      group_by(model, model_family, model_params, model_label, ppl_key) |>
+      group_modify(function(d, k) {
+        d <- choose_freq(d, k$model_family)
+        d <- filter(d, !is.na(freq_use), !is.na(preference))
+        if (nrow(d) < 5) return(tibble(delta_ll = NA_real_, n_trials = nrow(d), n_items = 0L))
+        d <- d |> mutate(ovf_c = as.numeric(scale(log(pmax(OverallFreq, 1)))),
+                         preference_s = as.numeric(scale(preference)))
+        baseline <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + (1 | binom) + (1 | participant),
+                          family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
+        full     <- glmer(resp_alpha ~ freq_use + ovf_c + freq_use:ovf_c + preference_s + (1 | binom) + (1 | participant),
+                          family = binomial, data = d, control = glmerControl(optimizer = "bobyqa"))
+        tibble(delta_ll = as.numeric(logLik(full)) - as.numeric(logLik(baseline)),
+               n_trials = nrow(d), n_items = n_distinct(d$binom))
+      }) |>
+      ungroup()
+
+    ck_pc_b <- ck_dat_b |>
+      group_by(model, model_family, model_params, model_label, ppl_key) |>
+      group_modify(function(d, k) {
+        d <- filter(d, !is.na(preference))
+        if (nrow(d) < 5) return(tibble(pref_coef = NA_real_))
+        d <- d |> mutate(preference_s = as.numeric(scale(preference)))
+        fit <- tryCatch(
+          glmer(resp_alpha ~ preference_s + (1 | binom) + (1 | participant),
+                family = binomial, data = d, control = glmerControl(optimizer = "bobyqa")),
+          error = function(e) NULL
+        )
+        if (is.null(fit)) return(tibble(pref_coef = NA_real_))
+        tibble(pref_coef = fixef(fit)[["preference_s"]])
+      }) |>
+      ungroup()
+
+    cab_b <- train_ck |>
+      filter(binom %in% binoms_sub) |>
+      inner_join(ck_map |> select(model, step, model_family, model_params, model_label, ppl_key),
+                 by = c("model", "step")) |>
+      left_join(bi, by = "binom")
+    if (!is.null(cf_b)) cab_b <- cab_b |> left_join(cf_b, by = c("model", "step", "binom"))
+
+    ck_ac_b <- cab_b |>
+      group_by(model, model_family, model_params, model_label, ppl_key) |>
+      group_modify(function(d, k) {
+        d <- choose_rf(d)
+        d <- filter(d, !is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+        if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
+                                       t = NA_real_, p = NA_real_,
+                                       relfreq_coef = NA_real_, n = nrow(d)))
+        d <- d |> mutate(AbsPref_c = AbsPref - 0.5,
+                         rf_c      = rf,
+                         ovf_c     = as.numeric(scale(ovf)))
+        fit <- tryCatch(
+          lmer(preference ~ AbsPref_c + rf_c + ovf_c + AbsPref_c:ovf_c + rf_c:ovf_c +
+                 (1 | binom), data = d, REML = TRUE),
+          error = function(e) NULL
+        )
+        if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                                        p = NA_real_, relfreq_coef = NA_real_, n = nrow(d)))
+        cf <- summary(fit)$coefficients
+        if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
+                                                           t = NA_real_, p = NA_real_,
+                                                           relfreq_coef = NA_real_, n = nrow(d)))
+        tibble(estimate     = cf["AbsPref_c", "Estimate"],
+               se           = cf["AbsPref_c", "Std. Error"],
+               t            = cf["AbsPref_c", "t value"],
+               p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
+               relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
+               n            = nrow(d))
+      }) |>
+      ungroup()
+
+    ck_res_b <- ck_dll_b |>
+      left_join(ck_pc_b |> select(model, model_family, ppl_key, pref_coef),
+                by = c("model", "model_family", "ppl_key")) |>
+      left_join(ck_ac_b |> select(model, model_family, ppl_key, estimate, se, t, p, relfreq_coef),
+                by = c("model", "model_family", "ppl_key")) |>
+      left_join(ppl |> select(model, perplexity), by = c("ppl_key" = "model")) |>
+      filter(!is.na(perplexity)) |>
+      mutate(params_M = as.numeric(sub("M$", "", model_params)))
+
+    r <- bind_rows(r, ck_res_b)
+  }
+
+  r |>
+    mutate(model_family = factor(model_family,
+                                 levels = c("GPT-2", "GPT-Neo", "OPT",
+                                            "OLMo-1", "OLMo-2", "OLMo-3",
+                                            "Pythia", "BabyLM", "C4",
+                                            "BabyLM (early)", "BabyLM (mid)",
+                                            "C4 (early)", "C4 (mid)"))) |>
+    arrange(model_family, params_M)
+}
+
+# ── Helper: build faceted plot from any results tibble ───────────────────────
+make_faceted_plot <- function(res, subtitle) {
+  res_long <- res |>
+    pivot_longer(cols = c(delta_ll, pref_coef, estimate, relfreq_coef),
+                 names_to = "metric", values_to = "value") |>
+    filter(!is.na(value)) |>
+    mutate(
+      metric = factor(metric,
+                      levels = c("delta_ll", "pref_coef", "estimate", "relfreq_coef"),
+                      labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2", "RelFreq \u03b2")),
+      facet_family = case_when(
+        model_family %in% c("BabyLM (early)", "BabyLM (mid)") ~ "BabyLM",
+        model_family %in% c("C4 (early)",     "C4 (mid)")     ~ "C4",
+        TRUE ~ as.character(model_family)
+      ),
+      facet_family = factor(facet_family, levels = FACET_LEVELS)
+    )
+
+  smooth_b <- poly_smooth_all(res_long)
+
+  y_lim_b <- res_long |>
+    group_by(metric) |>
+    summarise(ymin = min(value, na.rm = TRUE), ymax = max(value, na.rm = TRUE), .groups = "drop") |>
+    mutate(pad = (ymax - ymin) * 0.1, ymin = ymin - pad, ymax = ymax + pad)
+
+  hline_b <- expand.grid(
+    metric       = factor(c("Model Pref \u03b2", "AbsPref \u03b2", "RelFreq \u03b2"),
+                          levels = levels(res_long$metric)),
+    facet_family = factor(FACET_LEVELS, levels = FACET_LEVELS),
+    stringsAsFactors = FALSE
+  )
+
+  labels_b <- res_long |>
+    mutate(params_num = as.numeric(gsub("M$", "", model_params)),
+           size_label = case_when(params_num >= 1000 ~ paste0(round(params_num / 1000, 1), "B"),
+                                  TRUE               ~ paste0(params_num, "M")))
+
+  ggplot(res_long, aes(x = perplexity, y = value, colour = model_family)) +
+    geom_hline(data = hline_b, aes(yintercept = 0),
+               linetype = "dotted", colour = "grey50", inherit.aes = FALSE) +
+    geom_line(data = smooth_b,
+              aes(x = perplexity, y = fit, colour = model_family, group = model_family),
+              linetype = "dashed", linewidth = 0.9, inherit.aes = FALSE) +
+    geom_point(size = 2.5, alpha = 0.9) +
+    geom_text(data = labels_b,
+              aes(label = size_label, colour = model_family),
+              vjust = -0.7, hjust = 0.5, size = 2.6, fontface = "bold", show.legend = FALSE) +
+    ggh4x::facetted_pos_scales(
+      y = map2(y_lim_b$ymin, y_lim_b$ymax, ~ scale_y_continuous(limits = c(.x, .y)))
+    ) +
+    scale_x_continuous("Validation perplexity (log\u2082 scale)", trans = "log2",
+                       labels = scales::trans_format("log2", scales::math_format(2^.x))) +
+    scale_y_continuous(NULL) +
+    scale_colour_manual(values = family_colours, name = "Model family") +
+    guides(colour = guide_legend(override.aes = list(size = 3))) +
+    facet_grid(metric ~ facet_family, scales = "free_y") +
+    ggtitle(subtitle) +
+    theme_classic(base_size = 12) +
+    theme(
+      panel.grid.major  = element_line(colour = "grey92", linewidth = 0.4),
+      axis.line         = element_line(colour = "grey40"),
+      axis.ticks        = element_line(colour = "grey40"),
+      strip.background  = element_rect(fill = "grey95", colour = "grey70"),
+      strip.text        = element_text(face = "bold", size = 11),
+      strip.text.y      = element_text(angle = 0),
+      legend.position   = "bottom",
+      panel.spacing.x   = unit(0.6, "lines"),
+      panel.spacing.y   = unit(0.5, "lines"),
+      plot.title        = element_text(face = "bold", hjust = 0.5)
+    )
+}
+
+# ── Run binned analyses and save plots ────────────────────────────────────────
+BIN_LABELS   <- c("Low frequency", "Mid frequency", "High frequency")
+BIN_SUFFIXES <- c("low", "mid", "high")
+
+for (i in seq_along(BIN_LABELS)) {
+  bin_label  <- BIN_LABELS[[i]]
+  bin_suffix <- BIN_SUFFIXES[[i]]
+  message(sprintf("\n── %s binomials ──", bin_label))
+
+  bin_binoms <- freq_bins |> filter(freq_bin_label == bin_label) |> pull(binom)
+  message(sprintf("  %d binomials", length(bin_binoms)))
+
+  res_b <- suppressWarnings(compute_results_for_binoms(bin_binoms))
+  p_b   <- make_faceted_plot(res_b, subtitle = bin_label)
+
+  out_pdf_b <- sub("\\.pdf$", paste0("_freq_", bin_suffix, ".pdf"), OUT_PDF)
+  out_png_b <- sub("\\.png$", paste0("_freq_", bin_suffix, ".png"), OUT_PNG)
+  ggsave(out_pdf_b, p_b, width = 22, height = 8)
+  ggsave(out_png_b, p_b, width = 22, height = 8, dpi = 150)
+  message(sprintf("  Saved: %s", out_pdf_b))
+}
+
+message("\nAll frequency-binned plots complete.")
