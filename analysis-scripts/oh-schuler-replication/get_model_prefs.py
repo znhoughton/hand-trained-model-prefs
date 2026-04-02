@@ -37,15 +37,14 @@ from datasets import load_dataset
 
 def _discover_olmo_checkpoints(model_id, stage_prefix=None):
     """
-    Query the HuggingFace Hub for branch revisions of `model_id` and return a
-    dict mapping phase label → revision name for four training phases:
-    'early' (~20%), 'early-mid' (~40%), 'mid' (~60%), 'mid-late' (~80%).
+    Query the HuggingFace Hub for branch/tag revisions of `model_id` and return
+    a dict mapping phase label → revision name.
 
-    stage_prefix : if given (e.g. "stage1"), only branches whose name starts
-                   with that prefix are considered — used for multi-stage models
-                   like OLMo-3 where we want only the first training stage.
-                   Expected branch format: "stage1-step{N}-tokens{M}B".
-                   Without a prefix the expected format is: "step{N}-tokens{M}B".
+    Naming conventions by OLMo generation (confirmed from HF Hub):
+      OLMo-1  : branches  "step{N}-tokens{M}B"
+      OLMo-2-1124 : tags  "step{N}-tokens{M}B"  (no stage prefix for stage 1)
+      OLMo-2-0425 : tags  "stage1-step{N}-tokens{M}B"  → pass stage_prefix="stage1"
+      OLMo-3  : branches  "stage1-step{N}"  (no token count) → pass stage_prefix="stage1"
 
     Returns {} if no matching revisions are found or the Hub is unreachable.
     """
@@ -58,36 +57,54 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
     except Exception:
         return {}
 
-    if stage_prefix:
-        pattern = rf'^{re.escape(stage_prefix)}-step\d+-tokens(\d+(?:\.\d+)?)B$'
-    else:
-        pattern = r'^step\d+-tokens(\d+(?:\.\d+)?)B$'
+    all_ref_names = [b.name for b in refs.branches] + [t.name for t in refs.tags]
 
-    ck_list = []
-    for branch in refs.branches:
-        m = re.match(pattern, branch.name)
-        if m:
-            ck_list.append((float(m.group(1)), branch.name))
+    ck_list = []      # list of (sort_value, token_B_or_None, rev_name)
+
+    for name in all_ref_names:
+        if stage_prefix:
+            # Pattern with token count: "stage1-step{N}-tokens{M}B"
+            m = re.match(
+                rf'^{re.escape(stage_prefix)}-step\d+-tokens(\d+(?:\.\d+)?)B$',
+                name, re.IGNORECASE)
+            if m:
+                tok = float(m.group(1))
+                ck_list.append((tok, tok, name))
+                continue
+            # Pattern without token count: "stage1-step{N}"  (OLMo-3)
+            m = re.match(rf'^{re.escape(stage_prefix)}-step(\d+)$', name, re.IGNORECASE)
+            if m:
+                step = int(m.group(1))
+                ck_list.append((step, None, name))
+        else:
+            # No stage prefix: "step{N}-tokens{M}B"
+            m = re.match(r'^step\d+-tokens(\d+(?:\.\d+)?)B$', name, re.IGNORECASE)
+            if m:
+                tok = float(m.group(1))
+                ck_list.append((tok, tok, name))
 
     if not ck_list:
         return {}
 
     ck_list.sort()
-    max_tok = ck_list[-1][0]
+    max_val      = ck_list[-1][0]           # tokens_B when available, else step count
+    has_tok_info = ck_list[0][1] is not None
 
     result = {}
 
-    # Absolute token-count anchors (only added when training ran past that point)
-    for label, target_b in [("10B tokens", 10.0), ("50B tokens", 50.0)]:
-        if max_tok >= target_b:
-            best = min(ck_list, key=lambda x: abs(x[0] - target_b))
-            result[label] = best[1]
+    # Absolute token-count anchors — only when revision names carry token counts
+    if has_tok_info:
+        for label, target_b in [("10B tokens", 10.0), ("50B tokens", 50.0)]:
+            if max_val >= target_b:
+                best = min(ck_list, key=lambda x: abs(x[0] - target_b))
+                result[label] = best[2]
 
-    # Fractional phases relative to total training
+    # Fractional phases relative to total training (works for both tokens and steps)
     for phase_name, frac in [("early", 0.2), ("early-mid", 0.4), ("mid", 0.6), ("mid-late", 0.8)]:
-        target = max_tok * frac
+        target = max_val * frac
         best   = min(ck_list, key=lambda x: abs(x[0] - target))
-        result[phase_name] = best[1]
+        result[phase_name] = best[2]
+
     return result
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -171,14 +188,15 @@ MODEL_CONFIGS = {
 # For each OLMo base model, query available step-based revisions and add entries
 # for four training phases: early, early-mid, mid, mid-late.
 _OLMO_CK_SOURCES = [
-    # OLMo-1: try both the 1B and 7B -hf variants
+    # OLMo-1: checkpoints on -hf repos as "step{N}-tokens{M}B" branches
     ("allenai/OLMo-1B-hf",      "1000M",  "OLMo-1", None),
     ("allenai/OLMo-7B-hf",      "7000M",  "OLMo-1", None),
-    # OLMo-2: the 1124 variants have publicly available checkpoints
-    ("allenai/OLMo-2-0425-1B",  "1000M",  "OLMo-2", None),
+    # OLMo-2-1124: "step{N}-tokens{M}B" tags (no stage prefix for stage 1)
     ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2", None),
     ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2", None),
-    # OLMo-3: multi-stage training; restrict to stage 1 only
+    # OLMo-2-0425: "stage1-step{N}-tokens{M}B" tags
+    ("allenai/OLMo-2-0425-1B",  "1000M",  "OLMo-2", "stage1"),
+    # OLMo-3: "stage1-step{N}" branches (no token count in name)
     ("allenai/Olmo-3-1025-7B",  "7000M",  "OLMo-3", "stage1"),
     ("allenai/Olmo-3-1125-32B", "32000M", "OLMo-3", "stage1"),
 ]
