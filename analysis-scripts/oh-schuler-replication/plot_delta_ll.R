@@ -850,7 +850,7 @@ y_limits <- results_long |>
     .groups = "drop"
   ) |>
   mutate(
-    pad  = (ymax - ymin) * 0.1,
+    pad  = (ymax - ymin) * 0.2,
     ymin = ymin - pad,
     ymax = ymax + pad
   )
