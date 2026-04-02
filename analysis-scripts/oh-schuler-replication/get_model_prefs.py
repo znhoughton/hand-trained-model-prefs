@@ -98,7 +98,9 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
 
     # Absolute token-count anchors — only when revision names carry token counts
     if has_tok_info:
-        for label, target_b in [("10B tokens", 10.0), ("50B tokens", 50.0)]:
+        for label, target_b in [("1B tokens", 1.0), ("5B tokens", 5.0),
+                                 ("10B tokens", 10.0), ("15B tokens", 15.0),
+                                 ("30B tokens", 30.0), ("50B tokens", 50.0)]:
             if max_val >= target_b:
                 best = min(ck_list, key=lambda x: abs(x[0] - target_b))
                 result[label] = best[2]
