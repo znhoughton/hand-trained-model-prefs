@@ -848,10 +848,11 @@ y_limits <- results_long |>
     .groups = "drop"
   ) |>
   mutate(
-    pad  = (ymax - ymin) * 0.2,
-    ymin = ymin - pad,
-    ymax = ymax + pad
-  )
+    range = ymax - ymin,
+    ymin  = ymin - range * 0.15,
+    ymax  = ymax + range * 0.35    # extra top room for size-label text
+  ) |>
+  select(-range)
 
 # ── Reference lines (y = 0) only for pref / estimate rows ────────────────────
 hline_df <- expand.grid(
@@ -925,8 +926,8 @@ p_combined <- ggplot(results_long,
 
 print(p_combined)
 
-ggsave(OUT_PDF, p_combined, width = 22, height = 8)
-ggsave(OUT_PNG, p_combined, width = 22, height = 8, dpi = 150)
+ggsave(OUT_PDF, p_combined, width = 22, height = 12)
+ggsave(OUT_PNG, p_combined, width = 22, height = 12, dpi = 150)
 message(sprintf("\nSaved:\n  %s\n  %s", OUT_PDF, OUT_PNG))
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1165,7 +1166,8 @@ make_faceted_plot <- function(res, subtitle) {
   y_lim_b <- res_long |>
     group_by(metric) |>
     summarise(ymin = min(value, na.rm = TRUE), ymax = max(value, na.rm = TRUE), .groups = "drop") |>
-    mutate(pad = (ymax - ymin) * 0.1, ymin = ymin - pad, ymax = ymax + pad)
+    mutate(range = ymax - ymin, ymin = ymin - range * 0.15, ymax = ymax + range * 0.35) |>
+    select(-range)
 
   hline_b <- expand.grid(
     metric       = factor(c("Model Pref \u03b2", "AbsPref \u03b2", "RelFreq \u03b2"),
@@ -1231,8 +1233,8 @@ for (i in seq_along(BIN_LABELS)) {
 
   out_pdf_b <- sub("\\.pdf$", paste0("_freq_", bin_suffix, ".pdf"), OUT_PDF)
   out_png_b <- sub("\\.png$", paste0("_freq_", bin_suffix, ".png"), OUT_PNG)
-  ggsave(out_pdf_b, p_b, width = 22, height = 8)
-  ggsave(out_png_b, p_b, width = 22, height = 8, dpi = 150)
+  ggsave(out_pdf_b, p_b, width = 22, height = 12)
+  ggsave(out_png_b, p_b, width = 22, height = 12, dpi = 150)
   message(sprintf("  Saved: %s", out_pdf_b))
 }
 
