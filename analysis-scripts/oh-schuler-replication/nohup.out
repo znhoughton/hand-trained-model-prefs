@@ -777,3 +777,430 @@ Token indices sequence length is longer than the specified maximum sequence leng
    Preferences → /opt/modeling/zhoughton/misc/hand-trained-model-prefs/analysis-scripts/oh-schuler-replication/oh_schuler_prefs.csv
    Perplexity  → /opt/modeling/zhoughton/misc/hand-trained-model-prefs/analysis-scripts/oh-schuler-replication/oh_schuler_perplexity.csv
    Staging dir → /opt/modeling/zhoughton/misc/hand-trained-model-prefs/analysis-scripts/oh-schuler-replication/staging  (can be deleted if no longer needed)
+`torch_dtype` is deprecated! Use `dtype` instead!
+Discovering OLMo training checkpoints from HuggingFace Hub ...
+    refs with 'step' in name (351 total): ['step99000-tokens415B', 'step98000-tokens410B', 'step97000-tokens406B', 'step96000-tokens402B', 'step95000-tokens398B']...
+  allenai/OLMo-1B-hf: found 10 checkpoint phases
+    refs with 'step' in name (558 total): ['step557000-tokens2464B', 'step556000-tokens2460B', 'step555000-tokens2455B', 'step554000-tokens2451B', 'step553000-tokens2446B']...
+  allenai/OLMo-7B: found 10 checkpoint phases
+    refs with 'step' in name (964 total): ['stage2-ingredient3-step1000-tokens5B', 'stage2-ingredient3-step11000-tokens47B', 'stage2-ingredient3-step3000-tokens13B', 'stage2-ingredient3-step4000-tokens17B', 'stage2-ingredient3-step5000-tokens21B']...
+  allenai/OLMo-2-1124-7B: found 10 checkpoint phases
+    refs with 'step' in name (717 total): ['stage1-step99000-tokens831B', 'stage1-step98000-tokens823B', 'stage1-step97000-tokens814B', 'stage1-step96000-tokens806B', 'stage1-step95000-tokens797B']...
+  allenai/OLMo-2-1124-13B: found 10 checkpoint phases
+    refs with 'step' in name (267 total): ['stage2-ingredient3-step23852-tokens51B', 'stage2-ingredient3-step23000-tokens49B', 'stage2-ingredient3-step22000-tokens47B', 'stage2-ingredient3-step21000-tokens45B', 'stage2-ingredient3-step20000-tokens42B']...
+  allenai/OLMo-2-0425-1B: found 10 checkpoint phases
+    refs with 'step' in name (1483 total): ['stage3-step1000', 'stage3-step10000', 'stage3-step11000', 'stage3-step11900', 'stage3-step11921']...
+  allenai/Olmo-3-1025-7B: found 4 checkpoint phases
+    refs with 'step' in name (718 total): ['stage1-step597000', 'stage1-step589000', 'stage1-step581000', 'stage1-step574000', 'stage1-step578830']...
+  allenai/Olmo-3-1125-32B: found 4 checkpoint phases
+Using device: cuda
+
+Loading human experiment binomials ...
+Binomials dropped (NaN in Alpha or Nonalpha): 1 / 726
+  nan  |  nan
+  725 unique binomials retained  (log → /opt/modeling/zhoughton/misc/hand-trained-model-prefs/analysis-scripts/oh-schuler-replication/get_model_prefs.log)
+
+============================================================
+Model: gpt2  (GPT-2, 124M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: gpt2-medium  (GPT-2, 355M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: gpt2-large  (GPT-2, 774M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: gpt2-xl  (GPT-2, 1542M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: EleutherAI/gpt-neo-125m  (GPT-Neo, 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: EleutherAI/gpt-neo-1.3B  (GPT-Neo, 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: EleutherAI/gpt-neo-2.7B  (GPT-Neo, 2700M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-125m  (OPT, 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-350m  (OPT, 350M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-1.3b  (OPT, 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-2.7b  (OPT, 2700M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-6.7b  (OPT, 6700M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-13b  (OPT, 13000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-30b  (OPT, 30000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: facebook/opt-66b  (OPT, 66000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+Skipping facebook/opt-175b (skip=True)
+============================================================
+Model: EleutherAI/pythia-160m  (Pythia, 160M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: EleutherAI/pythia-410m  (Pythia, 410M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: EleutherAI/pythia-1.4b  (Pythia, 1400M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: EleutherAI/pythia-2.8b  (Pythia, 2800M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf  (OLMo-1, 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B-hf  (OLMo-1, 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-0724-hf  (OLMo-1, 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B-0424-hf  (OLMo-1, 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B-0724-hf  (OLMo-1, 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-0425-1B  (OLMo-2, 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B  (OLMo-2, 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-13B  (OLMo-2, 13000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-0325-32B  (OLMo-2, 32000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/Olmo-3-1025-7B  (OLMo-3, 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/Olmo-3-1125-32B  (OLMo-3, 32000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-125m-64eps-seed964  (BabyLM, 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-350m-64eps-seed964  (BabyLM, 350M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-1.3b-64eps-seed964  (BabyLM, 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-125m-seed964  (C4, 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-350m-seed964  (C4, 350M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-1.3b-seed964  (C4, 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-125m-64eps-seed964@step-3732  (BabyLM (early), 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-350m-64eps-seed964@step-2488  (BabyLM (early), 350M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-1.3b-64eps-seed964@step-4020  (BabyLM (early), 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-125m-64eps-seed964@step-5340  (BabyLM (mid), 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-350m-64eps-seed964@step-3560  (BabyLM (mid), 350M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-babylm-1.3b-64eps-seed964@step-5532  (BabyLM (mid), 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-125m-seed964@step-4104  (C4 (early), 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-350m-seed964@step-2720  (C4 (early), 350M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-1.3b-seed964@step-3948  (C4 (early), 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-125m-seed964@step-5892  (C4 (mid), 125M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-350m-seed964@step-3920  (C4 (mid), 350M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: znhoughton/opt-c4-1.3b-seed964@step-5640  (C4 (mid), 1300M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step1000-tokens4B  (OLMo-1 (1B tokens), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step2000-tokens8B  (OLMo-1 (10B tokens), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step4000-tokens16B  (OLMo-1 (15B tokens), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step5000-tokens20B  (OLMo-1 (30B tokens), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step12000-tokens50B  (OLMo-1 (50B tokens), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step117850-tokens494B  (OLMo-1 (early), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step330000-tokens1383B  (OLMo-1 (early-mid), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step443000-tokens1857B  (OLMo-1 (mid), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-1B-hf@step591000-tokens2477B  (OLMo-1 (mid-late), 1000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step0-tokens0B  (OLMo-1 (1B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step1000-tokens4B  (OLMo-1 (5B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step2000-tokens9B  (OLMo-1 (10B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step3000-tokens13B  (OLMo-1 (15B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step7000-tokens31B  (OLMo-1 (30B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step11000-tokens49B  (OLMo-1 (50B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step111000-tokens491B  (OLMo-1 (early), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step223000-tokens986B  (OLMo-1 (early-mid), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step334000-tokens1478B  (OLMo-1 (mid), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-7B@step446000-tokens1973B  (OLMo-1 (mid-late), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step150-tokens1B  (OLMo-2 (1B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step1000-tokens5B  (OLMo-2 (5B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step2150-tokens10B  (OLMo-2 (10B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step3000-tokens13B  (OLMo-2 (15B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step7000-tokens30B  (OLMo-2 (30B tokens), 7000M)
+============================================================
+  Loading model ...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files:  17%|█▋        | 1/6 [04:30<22:32, 270.48s/it]Fetching 6 files:  33%|███▎      | 2/6 [05:20<09:23, 140.92s/it]Fetching 6 files:  50%|█████     | 3/6 [05:33<04:06, 82.23s/it] Fetching 6 files: 100%|██████████| 6/6 [05:33<00:00, 55.52s/it]
+Loading checkpoint shards:   0%|          | 0/6 [00:00<?, ?it/s]Loading checkpoint shards:  17%|█▋        | 1/6 [00:01<00:07,  1.58s/it]Loading checkpoint shards:  33%|███▎      | 2/6 [00:03<00:06,  1.53s/it]Loading checkpoint shards:  50%|█████     | 3/6 [00:04<00:04,  1.53s/it]Loading checkpoint shards:  67%|██████▋   | 4/6 [00:06<00:03,  1.51s/it]Loading checkpoint shards:  83%|████████▎ | 5/6 [00:07<00:01,  1.52s/it]Loading checkpoint shards: 100%|██████████| 6/6 [00:09<00:00,  1.50s/it]Loading checkpoint shards: 100%|██████████| 6/6 [00:09<00:00,  1.51s/it]
+  Scoring binomial preferences ...
+  Prompts: 0 already complete, 51 to run.
+  prompts:   0%|          | 0/51 [00:00<?, ?it/s]  prompts:   2%|▏         | 1/51 [00:04<03:48,  4.58s/it]  prompts:   4%|▍         | 2/51 [00:06<02:15,  2.77s/it]  prompts:   6%|▌         | 3/51 [00:07<01:45,  2.19s/it]  prompts:   8%|▊         | 4/51 [00:08<01:24,  1.81s/it]  prompts:  10%|▉         | 5/51 [00:10<01:18,  1.70s/it]  prompts:  12%|█▏        | 6/51 [00:11<01:13,  1.64s/it]  prompts:  14%|█▎        | 7/51 [00:13<01:10,  1.60s/it]  prompts:  16%|█▌        | 8/51 [00:14<01:07,  1.57s/it]  prompts:  18%|█▊        | 9/51 [00:16<01:05,  1.56s/it]  prompts:  20%|█▉        | 10/51 [00:18<01:06,  1.61s/it]  prompts:  22%|██▏       | 11/51 [00:19<01:03,  1.59s/it]  prompts:  24%|██▎       | 12/51 [00:21<01:03,  1.63s/it]  prompts:  25%|██▌       | 13/51 [00:22<01:00,  1.60s/it]  prompts:  27%|██▋       | 14/51 [00:24<01:01,  1.65s/it]  prompts:  29%|██▉       | 15/51 [00:26<01:01,  1.72s/it]  prompts:  31%|███▏      | 16/51 [00:28<01:01,  1.76s/it]  prompts:  33%|███▎      | 17/51 [00:30<01:00,  1.79s/it]  prompts:  35%|███▌      | 18/51 [00:32<00:59,  1.81s/it]  prompts:  37%|███▋      | 19/51 [00:33<00:57,  1.80s/it]  prompts:  39%|███▉      | 20/51 [00:35<00:53,  1.72s/it]  prompts:  41%|████      | 21/51 [00:37<00:53,  1.77s/it]  prompts:  43%|████▎     | 22/51 [00:39<00:52,  1.80s/it]  prompts:  45%|████▌     | 23/51 [00:41<00:51,  1.84s/it]  prompts:  47%|████▋     | 24/51 [00:42<00:49,  1.82s/it]  prompts:  49%|████▉     | 25/51 [00:44<00:47,  1.84s/it]  prompts:  51%|█████     | 26/51 [00:46<00:46,  1.85s/it]  prompts:  53%|█████▎    | 27/51 [00:48<00:44,  1.87s/it]  prompts:  55%|█████▍    | 28/51 [00:50<00:43,  1.88s/it]  prompts:  57%|█████▋    | 29/51 [00:52<00:41,  1.89s/it]  prompts:  59%|█████▉    | 30/51 [00:54<00:39,  1.86s/it]  prompts:  61%|██████    | 31/51 [00:56<00:37,  1.88s/it]  prompts:  63%|██████▎   | 32/51 [00:57<00:35,  1.89s/it]  prompts:  65%|██████▍   | 33/51 [00:59<00:34,  1.90s/it]  prompts:  67%|██████▋   | 34/51 [01:01<00:32,  1.91s/it]  prompts:  69%|██████▊   | 35/51 [01:03<00:30,  1.91s/it]  prompts:  71%|███████   | 36/51 [01:05<00:28,  1.91s/it]  prompts:  73%|███████▎  | 37/51 [01:07<00:26,  1.92s/it]  prompts:  75%|███████▍  | 38/51 [01:09<00:24,  1.92s/it]  prompts:  76%|███████▋  | 39/51 [01:11<00:23,  1.92s/it]  prompts:  78%|███████▊  | 40/51 [01:13<00:21,  1.92s/it]  prompts:  80%|████████  | 41/51 [01:15<00:19,  1.93s/it]  prompts:  82%|████████▏ | 42/51 [01:17<00:17,  1.94s/it]  prompts:  84%|████████▍ | 43/51 [01:19<00:15,  1.94s/it]  prompts:  86%|████████▋ | 44/51 [01:21<00:13,  1.94s/it]  prompts:  88%|████████▊ | 45/51 [01:23<00:11,  1.94s/it]  prompts:  90%|█████████ | 46/51 [01:25<00:09,  1.95s/it]  prompts:  92%|█████████▏| 47/51 [01:27<00:07,  1.95s/it]  prompts:  94%|█████████▍| 48/51 [01:29<00:05,  1.96s/it]  prompts:  96%|█████████▌| 49/51 [01:30<00:03,  1.96s/it]  prompts:  98%|█████████▊| 50/51 [01:32<00:01,  1.96s/it]  prompts: 100%|██████████| 51/51 [01:34<00:00,  1.96s/it]                                                          `trust_remote_code` is not supported anymore.
+Please check that the Hugging Face dataset 'wikitext' isn't based on a loading script and remove `trust_remote_code`.
+If the dataset is based on a loading script, please ask the dataset author to remove it and convert it to a standard format like Parquet.
+  ✅ Preferences saved → /opt/modeling/zhoughton/misc/hand-trained-model-prefs/analysis-scripts/oh-schuler-replication/oh_schuler_prefs.csv
+  ✅ Per-prompt preferences saved → /opt/modeling/zhoughton/misc/hand-trained-model-prefs/analysis-scripts/oh-schuler-replication/oh_schuler_prefs_by_prompt.csv
+  Computing validation perplexity (WikiText-2 test) ...
+  Perplexity: 15.92
+  ✅ Perplexity saved → /opt/modeling/zhoughton/misc/hand-trained-model-prefs/analysis-scripts/oh-schuler-replication/oh_schuler_perplexity.csv
+  🗑️  Model cache deleted.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step12000-tokens51B  (OLMo-2 (50B tokens), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step186000-tokens781B  (OLMo-2 (early), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step371000-tokens1557B  (OLMo-2 (early-mid), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step557000-tokens2337B  (OLMo-2 (mid), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-7B@stage1-step743000-tokens3117B  (OLMo-2 (mid-late), 7000M)
+============================================================
+  ✅ Already fully scored and saved — skipping.
+
+============================================================
+Model: allenai/OLMo-2-1124-13B@stage1-step0-tokens0B  (OLMo-2 (1B tokens), 13000M)
+============================================================
+  Loading model ...
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:   8%|▊         | 1/12 [04:52<53:39, 292.64s/it]
