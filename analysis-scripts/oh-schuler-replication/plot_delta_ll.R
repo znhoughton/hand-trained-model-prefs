@@ -705,9 +705,15 @@ results <- results |>
   mutate(
     model_family = factor(model_family,
                           levels = c("GPT-2", "GPT-Neo", "OPT",
-                                     "OLMo-1", "OLMo-1 (10B tokens)", "OLMo-1 (50B tokens)", "OLMo-1 (early)", "OLMo-1 (early-mid)", "OLMo-1 (mid)", "OLMo-1 (mid-late)",
-                                     "OLMo-2", "OLMo-2 (10B tokens)", "OLMo-2 (50B tokens)", "OLMo-2 (early)", "OLMo-2 (early-mid)", "OLMo-2 (mid)", "OLMo-2 (mid-late)",
-                                     "OLMo-3", "OLMo-3 (10B tokens)", "OLMo-3 (50B tokens)", "OLMo-3 (early)", "OLMo-3 (early-mid)", "OLMo-3 (mid)", "OLMo-3 (mid-late)",
+                                     "OLMo-1",
+                                       "OLMo-1 (1B tokens)", "OLMo-1 (5B tokens)", "OLMo-1 (10B tokens)", "OLMo-1 (15B tokens)", "OLMo-1 (30B tokens)", "OLMo-1 (50B tokens)",
+                                       "OLMo-1 (early)", "OLMo-1 (early-mid)", "OLMo-1 (mid)", "OLMo-1 (mid-late)",
+                                     "OLMo-2",
+                                       "OLMo-2 (1B tokens)", "OLMo-2 (5B tokens)", "OLMo-2 (10B tokens)", "OLMo-2 (15B tokens)", "OLMo-2 (30B tokens)", "OLMo-2 (50B tokens)",
+                                       "OLMo-2 (early)", "OLMo-2 (early-mid)", "OLMo-2 (mid)", "OLMo-2 (mid-late)",
+                                     "OLMo-3",
+                                       "OLMo-3 (1B tokens)", "OLMo-3 (5B tokens)", "OLMo-3 (10B tokens)", "OLMo-3 (15B tokens)", "OLMo-3 (30B tokens)", "OLMo-3 (50B tokens)",
+                                       "OLMo-3 (early)", "OLMo-3 (early-mid)", "OLMo-3 (mid)", "OLMo-3 (mid-late)",
                                      "BabyLM", "C4",
                                      "BabyLM (early)", "BabyLM (mid)",
                                      "C4 (early)", "C4 (mid)"))
@@ -721,39 +727,57 @@ print(results |> select(model_family, model_label, model_params, perplexity,
 
 # ── Plot aesthetics ───────────────────────────────────────────────────────────
 family_colours <- c(
-  "GPT-2"                = "#2166ac",
-  "GPT-Neo"              = "#4dac26",
-  "OPT"                  = "#b2182b",
-  # OLMo-1 gradient: very light → dark red (#d6604d)
-  "OLMo-1 (10B tokens)"  = "#feede9",
-  "OLMo-1 (50B tokens)"  = "#fcd7cf",
-  "OLMo-1 (early)"       = "#f5a99d",
-  "OLMo-1 (early-mid)"   = "#e87e72",
-  "OLMo-1 (mid)"         = "#de6a5e",
-  "OLMo-1 (mid-late)"    = "#da6458",
-  "OLMo-1"               = "#d6604d",
-  # OLMo-2 gradient: very light → medium orange (#f4a582)
-  "OLMo-2 (10B tokens)"  = "#fff6f1",
-  "OLMo-2 (50B tokens)"  = "#fee8d8",
-  "OLMo-2 (early)"       = "#fdd5bc",
-  "OLMo-2 (early-mid)"   = "#fabf9c",
-  "OLMo-2 (mid)"         = "#f7b28c",
-  "OLMo-2 (mid-late)"    = "#f6ad88",
-  "OLMo-2"               = "#f4a582",
-  # OLMo-3 gradient: very light → steel blue (#92c5de)
-  "OLMo-3 (10B tokens)"  = "#f0f9fd",
-  "OLMo-3 (50B tokens)"  = "#d8eef7",
-  "OLMo-3 (early)"       = "#bce0f0",
-  "OLMo-3 (early-mid)"   = "#a9d5e9",
-  "OLMo-3 (mid)"         = "#9dcde4",
-  "OLMo-3 (mid-late)"    = "#9dcbe3",
-  "OLMo-3"               = "#92c5de",
-  "BabyLM"              = "#238443",   # dark green
-  "BabyLM (early)"      = "#d9f0a3",   # light green
-  "BabyLM (mid)"        = "#78c679",   # medium green
-  "C4"                  = "#980043",   # dark purple-red
-  "C4 (early)"          = "#d4b9da",   # light purple
-  "C4 (mid)"            = "#df65b0"    # medium pink-purple
+  "GPT-2"                  = "#2166ac",
+  "GPT-Neo"                = "#4dac26",
+  "OPT"                    = "#b2182b",
+
+  # OLMo-1: white → deep brick red (#8c2d04)
+  # 1B=lightest, 50B=darkest, full model=endpoint
+  "OLMo-1 (1B tokens)"     = "#fdd0a2",
+  "OLMo-1 (5B tokens)"     = "#fdae6b",
+  "OLMo-1 (10B tokens)"    = "#fd8d3c",
+  "OLMo-1 (15B tokens)"    = "#e6550d",
+  "OLMo-1 (30B tokens)"    = "#a63603",
+  "OLMo-1 (50B tokens)"    = "#7f2704",
+  "OLMo-1 (early)"         = "#fcbba1",   # kept for back-compat if present
+  "OLMo-1 (early-mid)"     = "#fc9272",
+  "OLMo-1 (mid)"           = "#fb6a4a",
+  "OLMo-1 (mid-late)"      = "#de2d26",
+  "OLMo-1"                 = "#8c2d04",
+
+  # OLMo-2: white → teal (#005824)
+  "OLMo-2 (1B tokens)"     = "#c7e9c0",
+  "OLMo-2 (5B tokens)"     = "#a1d99b",
+  "OLMo-2 (10B tokens)"    = "#74c476",
+  "OLMo-2 (15B tokens)"    = "#41ab5d",
+  "OLMo-2 (30B tokens)"    = "#238b45",
+  "OLMo-2 (50B tokens)"    = "#005a32",
+  "OLMo-2 (early)"         = "#d9f0a3",
+  "OLMo-2 (early-mid)"     = "#addd8e",
+  "OLMo-2 (mid)"           = "#78c679",
+  "OLMo-2 (mid-late)"      = "#31a354",
+  "OLMo-2"                 = "#005824",
+
+  # OLMo-3: white → deep purple (#3f007d)
+  "OLMo-3 (1B tokens)"     = "#dadaeb",
+  "OLMo-3 (5B tokens)"     = "#bcbddc",
+  "OLMo-3 (10B tokens)"    = "#9e9ac8",
+  "OLMo-3 (15B tokens)"    = "#807dba",
+  "OLMo-3 (30B tokens)"    = "#6a51a3",
+  "OLMo-3 (50B tokens)"    = "#4a1486",
+  "OLMo-3 (early)"         = "#efedf5",
+  "OLMo-3 (early-mid)"     = "#cbc9e2",
+  "OLMo-3 (mid)"           = "#9e9ac8",
+  "OLMo-3 (mid-late)"      = "#756bb1",
+  "OLMo-3"                 = "#3f007d",
+
+  # BabyLM / C4 unchanged
+  "BabyLM"                 = "#238443",
+  "BabyLM (early)"         = "#d9f0a3",
+  "BabyLM (mid)"           = "#78c679",
+  "C4"                     = "#980043",
+  "C4 (early)"             = "#d4b9da",
+  "C4 (mid)"               = "#df65b0"
 )
 
 shared_layers <- list(
