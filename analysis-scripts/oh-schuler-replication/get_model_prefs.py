@@ -536,7 +536,7 @@ def main():
         tokenizer.padding_side = "right"
 
         model     = None
-        tmp_cache = str(Path.home() / ".cache" / "hf_prefs" / model_safe)
+        tmp_cache = str(Path(os.environ.get("HF_MODEL_CACHE", Path.home() / ".cache" / "hf_prefs")) / model_safe)
         Path(tmp_cache).mkdir(parents=True, exist_ok=True)
         try:
             if not all_prompts_staged:
