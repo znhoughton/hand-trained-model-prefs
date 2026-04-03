@@ -510,7 +510,7 @@ if (file.exists(TRAIN_CSV)) {
       )
     ) |>
     filter(!is.na(phase)) |>
-    select(model, step, checkpoint, phase) |>
+    select(model, step, checkpoint, phase, tokens) |>
     ungroup()
 
   # Base corpus tag (BabyLM / C4) and params for each model
@@ -627,45 +627,73 @@ if (file.exists(TRAIN_CSV)) {
     }) |>
     ungroup()
 
-  ck_abspref_base <- train_ck |>
-    inner_join(ck_map |> select(model, step, model_family, model_params, model_label, ppl_key),
-               by = c("model", "step")) |>
-    left_join(binom_items, by = "binom")
-  if (!is.null(ck_freq)) {
-    ck_abspref_base <- ck_abspref_base |>
-      left_join(ck_freq, by = c("model", "step", "binom"))
-  }
-  ck_abspref <- ck_abspref_base |>
+  # Build a lookup from ppl_key → (model base id, step) for ck_freq joins
+  ck_ppl_map <- ck_map |> select(model, step, model_family, model_params, model_label, ppl_key)
+
+  ck_abspref <- ck_ppl_map |>
     group_by(model, model_family, model_params, model_label, ppl_key) |>
     group_modify(function(d, k) {
-      d <- choose_rf(d)
-      d <- filter(d, !is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
-      if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
-                                     t = NA_real_, p = NA_real_,
-                                     relfreq_coef = NA_real_, n = nrow(d)))
-      d <- d |> mutate(
-        AbsPref_c = AbsPref - 0.5,
-        rf_c      = rf,
-        ovf_c     = as.numeric(scale(ovf))
-      )
-      fit <- tryCatch(
-        lmer(preference ~ AbsPref_c + rf_c + ovf_c +
-               AbsPref_c:ovf_c + rf_c:ovf_c + (1 | binom),
-             data = d, REML = TRUE),
-        error = function(e) NULL
-      )
-      if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
-                                      p = NA_real_, relfreq_coef = NA_real_, n = nrow(d)))
+      this_ppl_key <- k$ppl_key
+      na_row <- tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                       p = NA_real_, relfreq_coef = NA_real_, n = NA_integer_)
+
+      if (has_by_prompt && this_ppl_key %in% models_with_prompt) {
+        # Per-prompt path: same as main abspref_coef block
+        d_fit <- model_prefs_by_prompt |>
+          filter(model == this_ppl_key) |>
+          left_join(binom_items, by = "binom")
+        if (!is.null(ck_freq)) {
+          d_fit <- d_fit |>
+            left_join(ck_freq |>
+                        filter(model == k$model, step == k$step) |>
+                        select(binom, freq_prob_c_ck, log_total_ck),
+                      by = "binom")
+        }
+        d_fit <- choose_rf(d_fit)
+        d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+        if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
+        d_fit <- d_fit |> mutate(AbsPref_c = AbsPref - 0.5, rf_c = rf,
+                                  ovf_c = as.numeric(scale(ovf)))
+        fit <- tryCatch(
+          lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+                 AbsPref_c:ovf_c + rf_c:ovf_c +
+                 (1 | binom) + (1 | prompt),
+               data = d_fit, REML = TRUE),
+          error = function(e) NULL
+        )
+      } else {
+        # Fallback: one preference per binom from train_ck — use lm()
+        d_fit <- train_ck |>
+          filter(model == k$model, step == k$step) |>
+          left_join(binom_items, by = "binom")
+        if (!is.null(ck_freq)) {
+          d_fit <- d_fit |>
+            left_join(ck_freq |>
+                        filter(model == k$model, step == k$step) |>
+                        select(binom, freq_prob_c_ck, log_total_ck),
+                      by = "binom")
+        }
+        d_fit <- choose_rf(d_fit)
+        d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+        if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
+        d_fit <- d_fit |> mutate(AbsPref_c = AbsPref - 0.5, rf_c = rf,
+                                  ovf_c = as.numeric(scale(ovf)))
+        fit <- tryCatch(
+          lm(preference ~ AbsPref_c + rf_c + ovf_c + AbsPref_c:ovf_c + rf_c:ovf_c,
+             data = d_fit),
+          error = function(e) NULL
+        )
+      }
+
+      if (is.null(fit)) return(na_row)
       cf <- summary(fit)$coefficients
-      if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
-                                                         t = NA_real_, p = NA_real_,
-                                                         relfreq_coef = NA_real_, n = nrow(d)))
+      if (!"AbsPref_c" %in% rownames(cf)) return(na_row)
       tibble(estimate     = cf["AbsPref_c", "Estimate"],
              se           = cf["AbsPref_c", "Std. Error"],
              t            = cf["AbsPref_c", "t value"],
              p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
              relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
-             n            = nrow(d))
+             n            = if (exists("d_fit")) nrow(d_fit) else NA_integer_)
     }) |>
     ungroup()
 
@@ -676,7 +704,8 @@ if (file.exists(TRAIN_CSV)) {
               by = c("model", "model_family", "ppl_key")) |>
     left_join(ppl |> select(model, perplexity), by = c("ppl_key" = "model")) |>
     filter(!is.na(perplexity)) |>
-    mutate(params_M = as.numeric(sub("M$", "", model_params)))
+    mutate(params_M = as.numeric(sub("M$", "", model_params))) |>
+    left_join(ck_map |> select(ppl_key, tokens), by = "ppl_key")
 
   message(sprintf("  BabyLM/C4 checkpoints: %d rows retained with perplexity", nrow(ck_results)))
 }
@@ -1113,41 +1142,68 @@ compute_results_for_binoms <- function(binoms_sub) {
       }) |>
       ungroup()
 
-    cab_b <- train_ck |>
-      filter(binom %in% binoms_sub) |>
-      inner_join(ck_map |> select(model, step, model_family, model_params, model_label, ppl_key),
-                 by = c("model", "step")) |>
-      left_join(bi, by = "binom")
-    if (!is.null(cf_b)) cab_b <- cab_b |> left_join(cf_b, by = c("model", "step", "binom"))
-
-    ck_ac_b <- cab_b |>
+    ck_ac_b <- ck_map |>
       group_by(model, model_family, model_params, model_label, ppl_key) |>
       group_modify(function(d, k) {
-        d <- choose_rf(d)
-        d <- filter(d, !is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
-        if (nrow(d) < 5) return(tibble(estimate = NA_real_, se = NA_real_,
-                                       t = NA_real_, p = NA_real_,
-                                       relfreq_coef = NA_real_, n = nrow(d)))
-        d <- d |> mutate(AbsPref_c = AbsPref - 0.5,
-                         rf_c      = rf,
-                         ovf_c     = as.numeric(scale(ovf)))
-        fit <- tryCatch(
-          lmer(preference ~ AbsPref_c + rf_c + ovf_c + AbsPref_c:ovf_c + rf_c:ovf_c +
-                 (1 | binom), data = d, REML = TRUE),
-          error = function(e) NULL
-        )
-        if (is.null(fit)) return(tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
-                                        p = NA_real_, relfreq_coef = NA_real_, n = nrow(d)))
+        this_ppl_key <- k$ppl_key
+        na_row <- tibble(estimate = NA_real_, se = NA_real_, t = NA_real_,
+                         p = NA_real_, relfreq_coef = NA_real_, n = NA_integer_)
+
+        if (has_by_prompt && this_ppl_key %in% models_with_prompt) {
+          d_fit <- model_prefs_by_prompt |>
+            filter(model == this_ppl_key, binom %in% binoms_sub) |>
+            left_join(bi, by = "binom")
+          if (!is.null(cf_b)) {
+            d_fit <- d_fit |>
+              left_join(cf_b |>
+                          filter(model == k$model, step == k$step) |>
+                          select(binom, freq_prob_c_ck, log_total_ck),
+                        by = "binom")
+          }
+          d_fit <- choose_rf(d_fit)
+          d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+          if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
+          d_fit <- d_fit |> mutate(AbsPref_c = AbsPref - 0.5, rf_c = rf,
+                                    ovf_c = as.numeric(scale(ovf)))
+          fit <- tryCatch(
+            lmer(preference ~ AbsPref_c + rf_c + ovf_c +
+                   AbsPref_c:ovf_c + rf_c:ovf_c +
+                   (1 | binom) + (1 | prompt),
+                 data = d_fit, REML = TRUE),
+            error = function(e) NULL
+          )
+        } else {
+          d_fit <- train_ck |>
+            filter(model == k$model, step == k$step, binom %in% binoms_sub) |>
+            left_join(bi, by = "binom")
+          if (!is.null(cf_b)) {
+            d_fit <- d_fit |>
+              left_join(cf_b |>
+                          filter(model == k$model, step == k$step) |>
+                          select(binom, freq_prob_c_ck, log_total_ck),
+                        by = "binom")
+          }
+          d_fit <- choose_rf(d_fit)
+          d_fit <- d_fit |> filter(!is.na(AbsPref), !is.na(rf), !is.na(ovf), !is.na(preference))
+          if (nrow(d_fit) < 5) return(na_row |> mutate(n = nrow(d_fit)))
+          d_fit <- d_fit |> mutate(AbsPref_c = AbsPref - 0.5, rf_c = rf,
+                                    ovf_c = as.numeric(scale(ovf)))
+          fit <- tryCatch(
+            lm(preference ~ AbsPref_c + rf_c + ovf_c + AbsPref_c:ovf_c + rf_c:ovf_c,
+               data = d_fit),
+            error = function(e) NULL
+          )
+        }
+
+        if (is.null(fit)) return(na_row)
         cf <- summary(fit)$coefficients
-        if (!"AbsPref_c" %in% rownames(cf)) return(tibble(estimate = NA_real_, se = NA_real_,
-                                                           t = NA_real_, p = NA_real_,
-                                                           relfreq_coef = NA_real_, n = nrow(d)))
+        if (!"AbsPref_c" %in% rownames(cf)) return(na_row)
         tibble(estimate     = cf["AbsPref_c", "Estimate"],
                se           = cf["AbsPref_c", "Std. Error"],
                t            = cf["AbsPref_c", "t value"],
                p            = if ("Pr(>|t|)" %in% colnames(cf)) cf["AbsPref_c", "Pr(>|t|)"] else NA_real_,
                relfreq_coef = if ("rf_c" %in% rownames(cf)) cf["rf_c", "Estimate"] else NA_real_,
-               n            = nrow(d))
+               n            = if (exists("d_fit")) nrow(d_fit) else NA_integer_)
       }) |>
       ungroup()
 
@@ -1269,3 +1325,116 @@ for (i in seq_along(BIN_LABELS)) {
 }
 
 message("\nAll frequency-binned plots complete.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Training curve plot — coefficients as a function of tokens seen
+# ══════════════════════════════════════════════════════════════════════════════
+message("\nBuilding training curve plot ...")
+
+# Helper: extract token count (billions) from a model ID or revision string.
+# Handles "step186000-tokens781B", "stage1-step186000-tokens781B", etc.
+extract_tokens_B <- function(x) {
+  m <- regmatches(x, regexpr("tokens([0-9]+(?:\\.[0-9]+)?)B", x, perl = TRUE, ignore.case = TRUE))
+  ifelse(nchar(m) == 0, NA_real_,
+         as.numeric(sub("(?i)tokens([0-9.]+)B", "\\1", m, perl = TRUE)))
+}
+
+# Helper: canonical facet label — strip "(early)" etc., convert params to B/M.
+base_model_label <- function(family, params) {
+  fam  <- sub(" \\(.*\\)$", "", as.character(family))
+  p    <- suppressWarnings(as.numeric(sub("M$", "", as.character(params))))
+  size <- ifelse(!is.na(p) & p >= 1000, paste0(round(p / 1000, 1), "B"), paste0(p, "M"))
+  paste(fam, size)
+}
+
+# 1. BabyLM/C4 checkpoints — tokens from ck_results (raw token count from CSV)
+curve_ck <- NULL
+if (!is.null(ck_results) && "tokens" %in% names(ck_results)) {
+  curve_ck <- ck_results |>
+    filter(!is.na(tokens)) |>
+    mutate(tokens_B   = tokens / 1e9,
+           base_model = base_model_label(model_family, model_params)) |>
+    select(base_model, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
+}
+
+# 2. BabyLM/C4 final models — token count = max training tokens from ck_meta
+curve_final_bc <- NULL
+if (exists("ck_meta") && !is.null(ck_meta)) {
+  final_tok <- ck_meta |>
+    group_by(model) |>
+    summarise(tokens_final = max(tokens), .groups = "drop")
+  curve_final_bc <- results |>
+    filter(as.character(model_family) %in% c("BabyLM", "C4")) |>
+    left_join(final_tok, by = "model") |>
+    filter(!is.na(tokens_final)) |>
+    mutate(tokens_B   = tokens_final / 1e9,
+           base_model = base_model_label(model_family, model_params)) |>
+    select(base_model, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
+}
+
+# 3. OLMo checkpoints — extract token count from "@revision" in model column
+curve_olmo <- results |>
+  filter(grepl("@", model, fixed = TRUE),
+         grepl("^OLMo", as.character(model_family))) |>
+  mutate(tokens_B   = extract_tokens_B(model),
+         base_model = base_model_label(model_family, model_params)) |>
+  filter(!is.na(tokens_B)) |>
+  select(base_model, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
+
+# Combine and pivot to long
+training_curve_df <- bind_rows(
+  curve_ck,
+  curve_final_bc,
+  curve_olmo
+) |>
+  pivot_longer(cols = c(delta_ll, pref_coef, estimate, relfreq_coef),
+               names_to  = "metric",
+               values_to = "value") |>
+  filter(!is.na(value), !is.na(tokens_B)) |>
+  mutate(
+    metric = factor(metric,
+                    levels = c("delta_ll", "pref_coef", "estimate", "relfreq_coef"),
+                    labels = c("\u0394LL", "Model Pref \u03b2", "AbsPref \u03b2", "RelFreq \u03b2"))
+  )
+
+message(sprintf("  Training curve: %d model-checkpoint-metric rows across %d base models",
+                nrow(training_curve_df),
+                n_distinct(training_curve_df$base_model)))
+
+if (nrow(training_curve_df) > 0) {
+  METRIC_COLOURS <- c(
+    "\u0394LL"           = "#1b7837",
+    "Model Pref \u03b2" = "#2166ac",
+    "AbsPref \u03b2"    = "#d6604d",
+    "RelFreq \u03b2"    = "#762a83"
+  )
+
+  p_curve <- ggplot(training_curve_df,
+                    aes(x = tokens_B, y = value, colour = metric, group = metric)) +
+    geom_hline(yintercept = 0, linetype = "dotted", colour = "grey60") +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2.2) +
+    scale_x_continuous("Billions of tokens seen during training") +
+    scale_y_continuous(NULL) +
+    scale_colour_manual(values = METRIC_COLOURS, name = "Coefficient") +
+    guides(colour = guide_legend(override.aes = list(size = 3))) +
+    facet_wrap(~ base_model, scales = "free") +
+    theme_classic(base_size = 12) +
+    theme(
+      panel.grid.major = element_line(colour = "grey92", linewidth = 0.4),
+      axis.line        = element_line(colour = "grey40"),
+      axis.ticks       = element_line(colour = "grey40"),
+      strip.background = element_rect(fill = "grey95", colour = "grey70"),
+      strip.text       = element_text(face = "bold", size = 10),
+      legend.position  = "bottom",
+      panel.spacing    = unit(0.8, "lines")
+    )
+
+  OUT_CURVE_PDF <- sub("\\.pdf$", "_training_curve.pdf", OUT_PDF)
+  OUT_CURVE_PNG <- sub("\\.pdf$", "_training_curve.png", OUT_PDF)
+  ggsave(OUT_CURVE_PDF, p_curve, width = 18, height = 12)
+  ggsave(OUT_CURVE_PNG, p_curve, width = 18, height = 12, dpi = 150)
+  message(sprintf("Training curve saved:\n  %s\n  %s", OUT_CURVE_PDF, OUT_CURVE_PNG))
+} else {
+  message("No training curve data available — no token counts found in results.")
+}
