@@ -44,7 +44,9 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
       OLMo-1  : branches  "step{N}-tokens{M}B"
       OLMo-2-1124 : tags  "step{N}-tokens{M}B"  (no stage prefix for stage 1)
       OLMo-2-0425 : tags  "stage1-step{N}-tokens{M}B"  → pass stage_prefix="stage1"
-      OLMo-3  : branches  "stage1-step{N}"  (no token count) → pass stage_prefix="stage1"
+      OLMo-3  : branches  "stage1-step{N}"  (no token count in name, but token count
+                can be derived: 4,194,304 tokens/step = 4096 seqs × 1024 tokens)
+                → pass stage_prefix="stage1"
 
     Returns {} if no matching revisions are found or the Hub is unreachable.
     """
@@ -76,10 +78,12 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
                 ck_list.append((tok, tok, name))
                 continue
             # Pattern without token count: "stage1-step{N}"  (OLMo-3)
+            # Token count derived from fixed batch size: 4096 seqs × 1024 tokens = 4,194,304/step
             m = re.match(rf'^{re.escape(stage_prefix)}-step(\d+)$', name, re.IGNORECASE)
             if m:
                 step = int(m.group(1))
-                ck_list.append((step, None, name))
+                tok = step * 4_194_304 / 1e9   # convert to billions
+                ck_list.append((tok, tok, name))
         else:
             # No stage prefix: "step{N}-tokens{M}B"
             m = re.match(r'^step\d+-tokens(\d+(?:\.\d+)?)B$', name, re.IGNORECASE)

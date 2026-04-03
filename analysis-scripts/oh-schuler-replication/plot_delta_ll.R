@@ -578,7 +578,8 @@ if (file.exists(TRAIN_CSV)) {
                    by = c("model", "step")) |>
         select(model, step, model_family, model_params, model_label, ppl_key,
                binom, preference),
-      by = "binom"
+      by = "binom",
+      relationship = "many-to-many"
     )
 
   if (use_pile_freq) {
@@ -645,7 +646,7 @@ if (file.exists(TRAIN_CSV)) {
         if (!is.null(ck_freq)) {
           d_fit <- d_fit |>
             left_join(ck_freq |>
-                        filter(model == k$model, step == k$step) |>
+                        filter(model == k$model, step == d$step[1]) |>
                         select(binom, freq_prob_c_ck, log_total_ck),
                       by = "binom")
         }
@@ -664,12 +665,12 @@ if (file.exists(TRAIN_CSV)) {
       } else {
         # Fallback: one preference per binom from train_ck — use lm()
         d_fit <- train_ck |>
-          filter(model == k$model, step == k$step) |>
+          filter(model == k$model, step == d$step[1]) |>
           left_join(binom_items, by = "binom")
         if (!is.null(ck_freq)) {
           d_fit <- d_fit |>
             left_join(ck_freq |>
-                        filter(model == k$model, step == k$step) |>
+                        filter(model == k$model, step == d$step[1]) |>
                         select(binom, freq_prob_c_ck, log_total_ck),
                       by = "binom")
         }
@@ -1156,7 +1157,7 @@ compute_results_for_binoms <- function(binoms_sub) {
           if (!is.null(cf_b)) {
             d_fit <- d_fit |>
               left_join(cf_b |>
-                          filter(model == k$model, step == k$step) |>
+                          filter(model == k$model, step == d$step[1]) |>
                           select(binom, freq_prob_c_ck, log_total_ck),
                         by = "binom")
           }
@@ -1174,12 +1175,12 @@ compute_results_for_binoms <- function(binoms_sub) {
           )
         } else {
           d_fit <- train_ck |>
-            filter(model == k$model, step == k$step, binom %in% binoms_sub) |>
+            filter(model == k$model, step == d$step[1], binom %in% binoms_sub) |>
             left_join(bi, by = "binom")
           if (!is.null(cf_b)) {
             d_fit <- d_fit |>
               left_join(cf_b |>
-                          filter(model == k$model, step == k$step) |>
+                          filter(model == k$model, step == d$step[1]) |>
                           select(binom, freq_prob_c_ck, log_total_ck),
                         by = "binom")
           }
@@ -1334,9 +1335,12 @@ message("\nBuilding training curve plot ...")
 # Helper: extract token count (billions) from a model ID or revision string.
 # Handles "step186000-tokens781B", "stage1-step186000-tokens781B", etc.
 extract_tokens_B <- function(x) {
-  m <- regmatches(x, regexpr("tokens([0-9]+(?:\\.[0-9]+)?)B", x, perl = TRUE, ignore.case = TRUE))
-  ifelse(nchar(m) == 0, NA_real_,
-         as.numeric(sub("(?i)tokens([0-9.]+)B", "\\1", m, perl = TRUE)))
+  has_match <- grepl("tokens[0-9.]+B", x, ignore.case = TRUE)
+  tok <- ifelse(has_match,
+                sub(".*tokens([0-9]+(?:\\.[0-9]+)?)B.*", "\\1", x,
+                    perl = TRUE, ignore.case = TRUE),
+                NA_character_)
+  as.numeric(tok)
 }
 
 # Helper: canonical facet label — strip "(early)" etc., convert params to B/M.
@@ -1372,12 +1376,33 @@ if (exists("ck_meta") && !is.null(ck_meta)) {
     select(base_model, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
 }
 
-# 3. OLMo checkpoints — extract token count from "@revision" in model column
+# 3. OLMo checkpoints — extract token count from "@revision" in model column.
+# OLMo-1/2: revision contains "tokens{M}B" directly.
+# OLMo-3:   revision is "stage1-step{N}" only; token count derived from
+#            4,194,304 tokens/step (4096 seqs × 1024 tokens).
+extract_step_N <- function(x) {
+  has_match <- grepl("step(\\d+)", x, perl = TRUE)
+  step <- ifelse(has_match,
+                 as.numeric(sub(".*step(\\d+).*", "\\1", x, perl = TRUE)),
+                 NA_real_)
+  step
+}
+
+OLMO3_TOKENS_PER_STEP_B <- 4194304 / 1e9   # 4,194,304 tokens per step → billions
+
 curve_olmo <- results |>
   filter(grepl("@", model, fixed = TRUE),
          grepl("^OLMo", as.character(model_family))) |>
-  mutate(tokens_B   = extract_tokens_B(model),
-         base_model = base_model_label(model_family, model_params)) |>
+  mutate(
+    tokens_B_explicit = extract_tokens_B(model),
+    tokens_B_olmo3    = if_else(
+      grepl("^OLMo-3", as.character(model_family)),
+      extract_step_N(model) * OLMO3_TOKENS_PER_STEP_B,
+      NA_real_
+    ),
+    tokens_B   = coalesce(tokens_B_explicit, tokens_B_olmo3),
+    base_model = base_model_label(model_family, model_params)
+  ) |>
   filter(!is.na(tokens_B)) |>
   select(base_model, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
 
