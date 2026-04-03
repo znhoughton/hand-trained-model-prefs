@@ -496,20 +496,26 @@ if (file.exists(TRAIN_CSV)) {
     WHERE regexp_matches(lower(model), 'babylm|opt-c4')
   ")
 
-  # Per model, identify the early and mid step numbers by token count
-  # (closest log-sampled checkpoint to 1/3 and 1/2 of total training tokens)
+  # Select 10 evenly spaced checkpoints per model by token count,
+  # matching the Python discovery logic in get_model_prefs.py.
+  N_CK <- 10L
+
   ck_map <- ck_meta |>
     group_by(model) |>
-    arrange(step) |>
+    arrange(tokens) |>
     mutate(
-      total_tokens = max(tokens),
-      phase = case_when(
-        tokens == tokens[which.min(abs(tokens - total_tokens / 3))] ~ "early",
-        tokens == tokens[which.min(abs(tokens - total_tokens / 2))] ~ "mid",
-        TRUE ~ NA_character_
-      )
+      n    = n(),
+      rank = row_number() - 1L,                          # 0-based rank
+      # Indices of the N_CK evenly spaced checkpoints (0-based, rounded)
+      target_rank = list(unique(round(seq(0, first(n) - 1, length.out = N_CK)))),
+      selected    = rank %in% unlist(target_rank),
+      ck_index    = cumsum(selected)                     # 1..N_CK for selected rows
     ) |>
-    filter(!is.na(phase)) |>
+    filter(selected) |>
+    mutate(
+      tok_b  = tokens / 1e9,
+      phase  = sprintf("ck%02d (%.1fB)", ck_index, tok_b)
+    ) |>
     select(model, step, checkpoint, phase, tokens) |>
     ungroup()
 
@@ -1358,7 +1364,7 @@ if (!is.null(ck_results) && "tokens" %in% names(ck_results)) {
     filter(!is.na(tokens)) |>
     mutate(tokens_B   = tokens / 1e9,
            base_model = base_model_label(model_family, model_params)) |>
-    select(base_model, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
+    select(base_model, model_params, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
 }
 
 # 2. BabyLM/C4 final models — token count = max training tokens from ck_meta
@@ -1373,7 +1379,7 @@ if (exists("ck_meta") && !is.null(ck_meta)) {
     filter(!is.na(tokens_final)) |>
     mutate(tokens_B   = tokens_final / 1e9,
            base_model = base_model_label(model_family, model_params)) |>
-    select(base_model, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
+    select(base_model, model_params, tokens_B, delta_ll, pref_coef, estimate, relfreq_coef)
 }
 
 # 3. OLMo checkpoints — extract token count from "@revision" in model column.
@@ -1460,6 +1466,270 @@ if (nrow(training_curve_df) > 0) {
   ggsave(OUT_CURVE_PDF, p_curve, width = 18, height = 12)
   ggsave(OUT_CURVE_PNG, p_curve, width = 18, height = 12, dpi = 150)
   message(sprintf("Training curve saved:\n  %s\n  %s", OUT_CURVE_PDF, OUT_CURVE_PNG))
+
+  # ── Training curve faceted by coefficient (one panel per metric) ──────────
+  # Colour by base_model (parent family), polynomial smooth per base_model.
+  # base_model_label() returns e.g. "OLMo-2 7B" — map back to parent family
+  # for colour lookup in family_colours.
+  tc_fam_df <- training_curve_df |>
+    mutate(
+      parent_family = sub(" [0-9].*$", "", base_model)   # "OLMo-2 7B" → "OLMo-2"
+    )
+
+  # Polynomial smooth lines per base_model × metric
+  tc_smooth <- tc_fam_df |>
+    group_by(metric, base_model, parent_family) |>
+    group_modify(function(d, k) {
+      x_raw <- d$tokens_B
+      y_raw <- d$value
+      ok    <- !is.na(x_raw) & !is.na(y_raw) & is.finite(x_raw) & x_raw > 0
+      if (sum(ok) < 2) return(tibble())
+      x_seq <- seq(min(x_raw[ok]), max(x_raw[ok]), length.out = 200)
+      deg   <- max(1L, min(2L, sum(ok) - 2L))
+      fit   <- lm(y ~ poly(x, deg), data = data.frame(x = x_raw[ok], y = y_raw[ok]))
+      tibble(tokens_B = x_seq, fit = predict(fit, newdata = data.frame(x = x_seq)))
+    }) |>
+    ungroup()
+
+  # Build a colour map: one colour per base_model, derived from parent family
+  base_model_colours <- tc_fam_df |>
+    distinct(base_model, parent_family) |>
+    mutate(colour = family_colours[parent_family]) |>
+    { \(d) setNames(d$colour, d$base_model) }()
+
+  p_curve_coef <- ggplot(tc_fam_df,
+                         aes(x = tokens_B, y = value,
+                             colour = base_model, group = base_model)) +
+    geom_hline(yintercept = 0, linetype = "dotted", colour = "grey60") +
+    geom_line(data = tc_smooth,
+              aes(x = tokens_B, y = fit, colour = base_model, group = base_model),
+              linetype = "dashed", linewidth = 0.8, inherit.aes = FALSE) +
+    geom_point(size = 2.2, alpha = 0.9) +
+    scale_x_continuous("Billions of tokens seen during training") +
+    scale_y_continuous(NULL) +
+    scale_colour_manual(values = base_model_colours, name = "Model") +
+    guides(colour = guide_legend(override.aes = list(size = 3))) +
+    facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+    theme_classic(base_size = 12) +
+    theme(
+      panel.grid.major = element_line(colour = "grey92", linewidth = 0.4),
+      axis.line        = element_line(colour = "grey40"),
+      axis.ticks       = element_line(colour = "grey40"),
+      strip.background = element_rect(fill = "grey95", colour = "grey70"),
+      strip.text       = element_text(face = "bold", size = 11),
+      legend.position  = "right",
+      panel.spacing    = unit(0.8, "lines")
+    )
+
+  OUT_CURVE_COEF_PDF <- sub("\\.pdf$", "_training_curve_by_coef.pdf", OUT_PDF)
+  OUT_CURVE_COEF_PNG <- sub("\\.pdf$", "_training_curve_by_coef.png", OUT_PDF)
+  ggsave(OUT_CURVE_COEF_PDF, p_curve_coef, width = 14, height = 10)
+  ggsave(OUT_CURVE_COEF_PNG, p_curve_coef, width = 14, height = 10, dpi = 150)
+  message(sprintf("Training curve (by coef) saved:\n  %s\n  %s",
+                  OUT_CURVE_COEF_PDF, OUT_CURVE_COEF_PNG))
+
+  # ── First-100B-tokens version ─────────────────────────────────────────────
+  tc_100b <- tc_fam_df |> filter(tokens_B <= 100)
+
+  if (nrow(tc_100b) > 0) {
+    tc_smooth_100b <- tc_100b |>
+      group_by(metric, base_model, parent_family) |>
+      group_modify(function(d, k) {
+        x_raw <- d$tokens_B
+        y_raw <- d$value
+        ok    <- !is.na(x_raw) & !is.na(y_raw) & is.finite(x_raw) & x_raw > 0
+        if (sum(ok) < 2) return(tibble())
+        x_seq <- seq(min(x_raw[ok]), max(x_raw[ok]), length.out = 200)
+        deg   <- max(1L, min(2L, sum(ok) - 2L))
+        fit   <- lm(y ~ poly(x, deg), data = data.frame(x = x_raw[ok], y = y_raw[ok]))
+        tibble(tokens_B = x_seq, fit = predict(fit, newdata = data.frame(x = x_seq)))
+      }) |>
+      ungroup()
+
+    p_curve_coef_100b <- ggplot(tc_100b,
+                                aes(x = tokens_B, y = value,
+                                    colour = base_model, group = base_model)) +
+      geom_hline(yintercept = 0, linetype = "dotted", colour = "grey60") +
+      geom_line(data = tc_smooth_100b,
+                aes(x = tokens_B, y = fit, colour = base_model, group = base_model),
+                linetype = "dashed", linewidth = 0.8, inherit.aes = FALSE) +
+      geom_point(size = 2.2, alpha = 0.9) +
+      scale_x_continuous("Billions of tokens seen during training",
+                         limits = c(0, 100)) +
+      scale_y_continuous(NULL) +
+      scale_colour_manual(values = base_model_colours, name = "Model") +
+      guides(colour = guide_legend(override.aes = list(size = 3))) +
+      facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+      theme_classic(base_size = 12) +
+      theme(
+        panel.grid.major = element_line(colour = "grey92", linewidth = 0.4),
+        axis.line        = element_line(colour = "grey40"),
+        axis.ticks       = element_line(colour = "grey40"),
+        strip.background = element_rect(fill = "grey95", colour = "grey70"),
+        strip.text       = element_text(face = "bold", size = 11),
+        legend.position  = "right",
+        panel.spacing    = unit(0.8, "lines")
+      )
+
+    OUT_100B_PDF <- sub("\\.pdf$", "_training_curve_by_coef_100b.pdf", OUT_PDF)
+    OUT_100B_PNG <- sub("\\.pdf$", "_training_curve_by_coef_100b.png", OUT_PDF)
+    ggsave(OUT_100B_PDF, p_curve_coef_100b, width = 14, height = 10)
+    ggsave(OUT_100B_PNG, p_curve_coef_100b, width = 14, height = 10, dpi = 150)
+    message(sprintf("Training curve 0–100B (by coef) saved:\n  %s\n  %s",
+                    OUT_100B_PDF, OUT_100B_PNG))
+  } else {
+    message("No data with tokens_B <= 100 — skipping 100B plot.")
+  }
+
+  # ── Training curve faceted by coefficient × model family, labelled by size ──
+  # Size label extracted from model_params (e.g. "1300M" → "1.3B", "125M" → "125M")
+  # Extract size label from base_model string (e.g. "OLMo-2 7B" → "7B", "BabyLM 125M" → "125M")
+  tc_grid_df <- tc_fam_df |>
+    mutate(size_label = sub("^.* ", "", base_model))   # everything after the last space
+
+  # Order size labels by numeric magnitude for a sensible legend
+  size_order <- tc_grid_df |>
+    distinct(size_label) |>
+    mutate(n = suppressWarnings(
+      as.numeric(sub("B$", "000", sub("M$", "", size_label)))
+    )) |>
+    arrange(n) |>
+    pull(size_label)
+  tc_grid_df <- tc_grid_df |>
+    mutate(size_label = factor(size_label, levels = size_order))
+
+  size_labels <- size_order
+  SIZE_PALETTE <- c("#1b7837","#2166ac","#d6604d","#762a83",
+                    "#e08214","#4dac26","#b2182b","#969696",
+                    "#f6e8c3","#01665e")
+  size_colours <- setNames(
+    SIZE_PALETTE[seq_along(size_labels)],
+    size_labels
+  )
+
+  # Polynomial smooth per size × metric × parent_family
+  tc_grid_smooth <- tc_grid_df |>
+    group_by(metric, parent_family, size_label) |>
+    group_modify(function(d, k) {
+      x_raw <- d$tokens_B
+      y_raw <- d$value
+      ok    <- !is.na(x_raw) & !is.na(y_raw) & is.finite(x_raw) & x_raw > 0
+      if (sum(ok) < 2) return(tibble())
+      x_seq <- seq(min(x_raw[ok]), max(x_raw[ok]), length.out = 200)
+      deg   <- max(1L, min(2L, sum(ok) - 2L))
+      fit   <- lm(y ~ poly(x, deg), data = data.frame(x = x_raw[ok], y = y_raw[ok]))
+      tibble(tokens_B = x_seq, fit = predict(fit, newdata = data.frame(x = x_seq)))
+    }) |>
+    ungroup()
+
+  # Label at the rightmost point per size × metric × parent_family
+  tc_grid_labels <- tc_grid_df |>
+    group_by(metric, parent_family, size_label) |>
+    filter(tokens_B == max(tokens_B, na.rm = TRUE)) |>
+    slice(1) |>
+    ungroup()
+
+  p_curve_grid <- ggplot(tc_grid_df,
+                         aes(x = tokens_B, y = value,
+                             colour = size_label, group = size_label)) +
+    geom_hline(yintercept = 0, linetype = "dotted", colour = "grey60") +
+    geom_line(data = tc_grid_smooth,
+              aes(x = tokens_B, y = fit, colour = size_label, group = size_label),
+              linetype = "dashed", linewidth = 0.8, inherit.aes = FALSE) +
+    geom_point(size = 2.0, alpha = 0.9) +
+    geom_text(data = tc_grid_labels,
+              aes(label = size_label, colour = size_label),
+              hjust = -0.15, vjust = 0.5, size = 2.8, fontface = "bold",
+              show.legend = FALSE) +
+    scale_x_continuous("Billions of tokens seen during training") +
+    scale_y_continuous(NULL) +
+    scale_colour_manual(values = size_colours, name = "Model size") +
+    guides(colour = guide_legend(override.aes = list(size = 3))) +
+    facet_grid(metric ~ parent_family, scales = "free_y") +
+    theme_classic(base_size = 11) +
+    theme(
+      panel.grid.major  = element_line(colour = "grey92", linewidth = 0.4),
+      axis.line         = element_line(colour = "grey40"),
+      axis.ticks        = element_line(colour = "grey40"),
+      strip.background  = element_rect(fill = "grey95", colour = "grey70"),
+      strip.text        = element_text(face = "bold", size = 10),
+      strip.text.y      = element_text(angle = 0),
+      legend.position   = "right",
+      panel.spacing.x   = unit(0.6, "lines"),
+      panel.spacing.y   = unit(0.5, "lines")
+    )
+
+  OUT_GRID_PDF <- sub("\\.pdf$", "_training_curve_grid.pdf", OUT_PDF)
+  OUT_GRID_PNG <- sub("\\.pdf$", "_training_curve_grid.png", OUT_PDF)
+  ggsave(OUT_GRID_PDF, p_curve_grid, width = 20, height = 12)
+  ggsave(OUT_GRID_PNG, p_curve_grid, width = 20, height = 12, dpi = 150)
+  message(sprintf("Training curve grid (coef × family) saved:\n  %s\n  %s",
+                  OUT_GRID_PDF, OUT_GRID_PNG))
+
+  # ── 0–100B version of the grid plot ────────────────────────────────────────
+  tc_grid_100b <- tc_grid_df |> filter(tokens_B <= 100)
+
+  if (nrow(tc_grid_100b) > 0) {
+    tc_grid_smooth_100b <- tc_grid_100b |>
+      group_by(metric, parent_family, size_label) |>
+      group_modify(function(d, k) {
+        x_raw <- d$tokens_B
+        y_raw <- d$value
+        ok    <- !is.na(x_raw) & !is.na(y_raw) & is.finite(x_raw) & x_raw > 0
+        if (sum(ok) < 2) return(tibble())
+        x_seq <- seq(min(x_raw[ok]), max(x_raw[ok]), length.out = 200)
+        deg   <- max(1L, min(2L, sum(ok) - 2L))
+        fit   <- lm(y ~ poly(x, deg), data = data.frame(x = x_raw[ok], y = y_raw[ok]))
+        tibble(tokens_B = x_seq, fit = predict(fit, newdata = data.frame(x = x_seq)))
+      }) |>
+      ungroup()
+
+    tc_grid_labels_100b <- tc_grid_100b |>
+      group_by(metric, parent_family, size_label) |>
+      filter(tokens_B == max(tokens_B, na.rm = TRUE)) |>
+      slice(1) |>
+      ungroup()
+
+    p_curve_grid_100b <- ggplot(tc_grid_100b,
+                                aes(x = tokens_B, y = value,
+                                    colour = size_label, group = size_label)) +
+      geom_hline(yintercept = 0, linetype = "dotted", colour = "grey60") +
+      geom_line(data = tc_grid_smooth_100b,
+                aes(x = tokens_B, y = fit, colour = size_label, group = size_label),
+                linetype = "dashed", linewidth = 0.8, inherit.aes = FALSE) +
+      geom_point(size = 2.0, alpha = 0.9) +
+      geom_text(data = tc_grid_labels_100b,
+                aes(label = size_label, colour = size_label),
+                hjust = -0.15, vjust = 0.5, size = 2.8, fontface = "bold",
+                show.legend = FALSE) +
+      scale_x_continuous("Billions of tokens seen during training",
+                         limits = c(0, 100)) +
+      scale_y_continuous(NULL) +
+      scale_colour_manual(values = size_colours, name = "Model size") +
+      guides(colour = guide_legend(override.aes = list(size = 3))) +
+      facet_grid(metric ~ parent_family, scales = "free_y") +
+      theme_classic(base_size = 11) +
+      theme(
+        panel.grid.major  = element_line(colour = "grey92", linewidth = 0.4),
+        axis.line         = element_line(colour = "grey40"),
+        axis.ticks        = element_line(colour = "grey40"),
+        strip.background  = element_rect(fill = "grey95", colour = "grey70"),
+        strip.text        = element_text(face = "bold", size = 10),
+        strip.text.y      = element_text(angle = 0),
+        legend.position   = "right",
+        panel.spacing.x   = unit(0.6, "lines"),
+        panel.spacing.y   = unit(0.5, "lines")
+      )
+
+    OUT_GRID_100B_PDF <- sub("\\.pdf$", "_training_curve_grid_100b.pdf", OUT_PDF)
+    OUT_GRID_100B_PNG <- sub("\\.pdf$", "_training_curve_grid_100b.png", OUT_PDF)
+    ggsave(OUT_GRID_100B_PDF, p_curve_grid_100b, width = 20, height = 12)
+    ggsave(OUT_GRID_100B_PNG, p_curve_grid_100b, width = 20, height = 12, dpi = 150)
+    message(sprintf("Training curve grid 0-100B saved:\n  %s\n  %s",
+                    OUT_GRID_100B_PDF, OUT_GRID_100B_PNG))
+  } else {
+    message("No data with tokens_B <= 100 for grid plot — skipping.")
+  }
 } else {
   message("No training curve data available — no token counts found in results.")
 }

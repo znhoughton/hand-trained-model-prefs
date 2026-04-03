@@ -95,25 +95,17 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
         return {}
 
     ck_list.sort()
-    max_val      = ck_list[-1][0]           # tokens_B when available, else step count
-    has_tok_info = ck_list[0][1] is not None
+    max_val = ck_list[-1][0]           # tokens_B when available, else step count
 
     result = {}
 
-    # Absolute token-count anchors — only when revision names carry token counts
-    if has_tok_info:
-        for label, target_b in [("1B tokens", 1.0), ("5B tokens", 5.0),
-                                 ("10B tokens", 10.0), ("15B tokens", 15.0),
-                                 ("30B tokens", 30.0), ("50B tokens", 50.0)]:
-            if max_val >= target_b:
-                best = min(ck_list, key=lambda x: abs(x[0] - target_b))
-                result[label] = best[2]
-
-    # Fractional phases relative to total training (works for both tokens and steps)
-    for phase_name, frac in [("early", 0.2), ("early-mid", 0.4), ("mid", 0.6), ("mid-late", 0.8)]:
-        target = max_val * frac
-        best   = min(ck_list, key=lambda x: abs(x[0] - target))
-        result[phase_name] = best[2]
+    # Absolute token-count anchors: 1B, then 5B, 10B, 15B, ..., 100B
+    targets = [1.0] + list(range(5, 105, 5))   # [1, 5, 10, 15, ..., 100]
+    for target_b in targets:
+        if max_val >= target_b:
+            best = min(ck_list, key=lambda x: abs(x[0] - target_b))
+            label = f"{int(target_b)}B tokens" if target_b == int(target_b) else f"{target_b}B tokens"
+            result[label] = best[2]
 
     return result
 
@@ -176,23 +168,64 @@ MODEL_CONFIGS = {
     "znhoughton/opt-c4-125m-seed964":            {"params": "125M",   "family": "C4",     "label": "C4-125M",     "skip": False},
     "znhoughton/opt-c4-350m-seed964":            {"params": "350M",   "family": "C4",     "label": "C4-350M",     "skip": False},
     "znhoughton/opt-c4-1.3b-seed964":            {"params": "1300M",  "family": "C4",     "label": "C4-1.3B",     "skip": False},
-    # BabyLM — early checkpoint (~1/3 through training by token count)
-    "znhoughton/opt-babylm-125m-64eps-seed964@step-3732": {"params": "125M",  "family": "BabyLM (early)", "label": "BabyLM (early)-125M",  "skip": False, "revision": "step-3732"},
-    "znhoughton/opt-babylm-350m-64eps-seed964@step-2488": {"params": "350M",  "family": "BabyLM (early)", "label": "BabyLM (early)-350M",  "skip": False, "revision": "step-2488"},
-    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-4020": {"params": "1300M", "family": "BabyLM (early)", "label": "BabyLM (early)-1.3B",  "skip": False, "revision": "step-4020"},
-    # BabyLM — mid checkpoint (~1/2 through training by token count)
-    "znhoughton/opt-babylm-125m-64eps-seed964@step-5340": {"params": "125M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-125M",    "skip": False, "revision": "step-5340"},
-    "znhoughton/opt-babylm-350m-64eps-seed964@step-3560": {"params": "350M",  "family": "BabyLM (mid)",   "label": "BabyLM (mid)-350M",    "skip": False, "revision": "step-3560"},
-    "znhoughton/opt-babylm-1.3b-64eps-seed964@step-5532": {"params": "1300M", "family": "BabyLM (mid)",   "label": "BabyLM (mid)-1.3B",    "skip": False, "revision": "step-5532"},
-    # C4 — early checkpoint (~1/3 through training by token count)
-    "znhoughton/opt-c4-125m-seed964@step-4104":  {"params": "125M",  "family": "C4 (early)", "label": "C4 (early)-125M",  "skip": False, "revision": "step-4104"},
-    "znhoughton/opt-c4-350m-seed964@step-2720":  {"params": "350M",  "family": "C4 (early)", "label": "C4 (early)-350M",  "skip": False, "revision": "step-2720"},
-    "znhoughton/opt-c4-1.3b-seed964@step-3948":  {"params": "1300M", "family": "C4 (early)", "label": "C4 (early)-1.3B",  "skip": False, "revision": "step-3948"},
-    # C4 — mid checkpoint (~1/2 through training by token count)
-    "znhoughton/opt-c4-125m-seed964@step-5892":  {"params": "125M",  "family": "C4 (mid)",   "label": "C4 (mid)-125M",    "skip": False, "revision": "step-5892"},
-    "znhoughton/opt-c4-350m-seed964@step-3920":  {"params": "350M",  "family": "C4 (mid)",   "label": "C4 (mid)-350M",    "skip": False, "revision": "step-3920"},
-    "znhoughton/opt-c4-1.3b-seed964@step-5640":  {"params": "1300M", "family": "C4 (mid)",   "label": "C4 (mid)-1.3B",    "skip": False, "revision": "step-5640"},
 }
+
+# ── BabyLM / C4 training checkpoints (10 evenly spaced by token count) ────────
+# Reads the checkpoint manifest from training_attested.csv and selects 10
+# checkpoints per model at evenly spaced token-count fractions (0/9 … 9/9).
+_BC_PARAMS = {
+    "znhoughton/opt-babylm-125m-64eps-seed964": ("125M",  "BabyLM"),
+    "znhoughton/opt-babylm-350m-64eps-seed964": ("350M",  "BabyLM"),
+    "znhoughton/opt-babylm-1.3b-64eps-seed964": ("1300M", "BabyLM"),
+    "znhoughton/opt-c4-125m-seed964":           ("125M",  "C4"),
+    "znhoughton/opt-c4-350m-seed964":           ("350M",  "C4"),
+    "znhoughton/opt-c4-1.3b-seed964":           ("1300M", "C4"),
+}
+_N_CK = 10   # number of evenly spaced checkpoints per model
+
+_TRAIN_CSV = DATA_DIR / "processed" / "training_attested.csv"
+if _TRAIN_CSV.exists():
+    print("Discovering BabyLM/C4 checkpoints from training_attested.csv ...")
+    _ck_meta = {}   # model → sorted list of (tokens, checkpoint_str)
+    with open(_TRAIN_CSV, newline="", encoding="utf-8") as _f:
+        import csv as _csv
+        _reader = _csv.DictReader(_f)
+        for _row in _reader:
+            _m = _row.get("model", "")
+            if _m not in _BC_PARAMS:
+                continue
+            try:
+                _tok = int(_row["tokens"])
+                _ck  = _row["checkpoint"]
+            except (KeyError, ValueError):
+                continue
+            _ck_meta.setdefault(_m, set()).add((_tok, _ck))
+
+    for _model_id, _ck_set in _ck_meta.items():
+        _params, _fam = _BC_PARAMS[_model_id]
+        _sorted = sorted(_ck_set)          # ascending by token count
+        _n      = len(_sorted)
+        if _n < 2:
+            continue
+        # Pick indices evenly spaced across [0, n-1], _N_CK points
+        _indices = [round(i * (_n - 1) / (_N_CK - 1)) for i in range(_N_CK)]
+        _indices = sorted(set(_indices))   # deduplicate in case n < N_CK
+        print(f"  {_model_id}: {_n} checkpoints available, selecting {len(_indices)}")
+        for _rank, _idx in enumerate(_indices):
+            _tok, _ck = _sorted[_idx]
+            _tok_b    = _tok / 1e9
+            _phase    = f"ck{_rank+1:02d} ({_tok_b:.1f}B)"
+            _ck_id    = f"{_model_id}@{_ck}"
+            if _ck_id not in MODEL_CONFIGS:
+                MODEL_CONFIGS[_ck_id] = {
+                    "params":   _params,
+                    "family":   f"{_fam} ({_phase})",
+                    "label":    f"{_fam} ({_phase})-{_params}",
+                    "skip":     False,
+                    "revision": _ck,
+                }
+else:
+    print(f"WARNING: {_TRAIN_CSV} not found — BabyLM/C4 checkpoints skipped.")
 
 # ── OLMo training checkpoints (discovered dynamically from HF Hub) ─────────────
 # For each OLMo base model, query available step-based revisions and add entries
