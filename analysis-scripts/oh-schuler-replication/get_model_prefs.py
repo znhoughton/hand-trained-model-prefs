@@ -440,14 +440,19 @@ def compute_validation_perplexity(model, tokenizer, max_tokens: int = 4096) -> f
 
         chunk   = input_ids[begin:end].unsqueeze(0).to(first_dev)
         outputs = model(chunk, labels=chunk)
-        chunk_nll = outputs.loss.item() * (end - begin - 1)
-        nll_sum  += chunk_nll * target_len / (end - begin - 1)
+        chunk_nll = outputs.loss.item()
+        if not math.isfinite(chunk_nll):
+            prev_end = end
+            continue
+        nll_sum  += chunk_nll * target_len
         n_tokens += target_len
         prev_end  = end
 
         if end >= seq_len:
             break
 
+    if n_tokens == 0:
+        return float("nan")
     return math.exp(nll_sum / n_tokens)
 
 
