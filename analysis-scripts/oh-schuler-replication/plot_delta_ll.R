@@ -316,7 +316,7 @@ if (!is.null(dyn_freq_final)) {
 
 # ── Frequency predictor selection ─────────────────────────────────────────────
 # Use Pile RelFreq everywhere when available; fall back to Google Books RelFreq.
-PILE_FREQ_FAMILIES <- c("OPT", "OLMo-1", "OLMo-2", "OLMo-3", "BabyLM", "C4")  # kept for reference
+PILE_FREQ_FAMILIES <- c("OLMo-1", "OLMo-2", "OLMo-3", "BabyLM", "C4")  # kept for reference
 
 choose_freq <- function(d) {
   # Priority: dynamic checkpoint-specific > Pile > Google
@@ -738,10 +738,10 @@ if (nrow(na_label_rows) > 0) {
 }
 
 results <- results |>
+  filter(!model_family %in% c("GPT-2", "GPT-Neo", "OPT")) |>
   mutate(
     model_family = factor(model_family,
-                          levels = c("GPT-2", "GPT-Neo", "OPT",
-                                     "OLMo-1",
+                          levels = c("OLMo-1",
                                        "OLMo-1 (1B tokens)", "OLMo-1 (5B tokens)", "OLMo-1 (10B tokens)", "OLMo-1 (15B tokens)", "OLMo-1 (30B tokens)", "OLMo-1 (50B tokens)",
                                        "OLMo-1 (early)", "OLMo-1 (early-mid)", "OLMo-1 (mid)", "OLMo-1 (mid-late)",
                                      "OLMo-2",
@@ -763,10 +763,6 @@ print(results |> select(model_family, model_label, model_params, perplexity,
 
 # ── Plot aesthetics ───────────────────────────────────────────────────────────
 family_colours <- c(
-  "GPT-2"                  = "#2166ac",
-  "GPT-Neo"                = "#4dac26",
-  "OPT"                    = "#b2182b",
-
   # OLMo-1: white → deep brick red (#8c2d04)
   # 1B=lightest, 50B=darkest, full model=endpoint
   "OLMo-1 (1B tokens)"     = "#fdd0a2",
@@ -852,9 +848,7 @@ message("\nSlope tests (log2 perplexity × ΔLL) by family:")
 print(slope_tests)
 
 # ── Long-format results for faceting ─────────────────────────────────────────
-FACET_LEVELS <- c("GPT-2", "GPT-Neo", "OPT",
-                  "OLMo-1", "OLMo-2", "OLMo-3",
-                  "BabyLM", "C4")
+FACET_LEVELS <- c("OLMo-1", "OLMo-2", "OLMo-3", "BabyLM", "C4")
 
 # Collapse checkpoint sub-families to their parent for facet column assignment
 to_facet_family <- function(fam) {
@@ -1228,8 +1222,7 @@ compute_results_for_binoms <- function(binoms_sub) {
 
   r |>
     mutate(model_family = factor(model_family,
-                                 levels = c("GPT-2", "GPT-Neo", "OPT",
-                                            "OLMo-1", "OLMo-2", "OLMo-3",
+                                 levels = c("OLMo-1", "OLMo-2", "OLMo-3",
                                             "BabyLM", "C4",
                                             "BabyLM (early)", "BabyLM (mid)",
                                             "C4 (early)", "C4 (mid)"))) |>

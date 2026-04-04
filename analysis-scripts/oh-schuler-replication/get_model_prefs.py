@@ -110,6 +110,13 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
 
     return result
 
+# ── Redirect HF cache to /workspace if it exists (RunPod volume), else default ─
+_workspace = Path("/workspace")
+if _workspace.exists() and not os.environ.get("HF_HOME"):
+    os.environ["HF_HOME"] = str(_workspace / ".cache" / "huggingface")
+if _workspace.exists() and not os.environ.get("HF_MODEL_CACHE"):
+    os.environ["HF_MODEL_CACHE"] = str(_workspace / ".cache" / "hf_prefs")
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR   = Path(__file__).parent
 BASE_DIR     = SCRIPT_DIR.parent.parent          # hand-trained-model-prefs/
