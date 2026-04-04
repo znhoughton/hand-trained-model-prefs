@@ -101,7 +101,7 @@ def _discover_olmo_checkpoints(model_id, stage_prefix=None):
     result = {}
 
     # Absolute token-count anchors: 1B, then 5B, 10B, 15B, ..., 100B
-    targets = [1.0] + list(range(5, 105, 5))   # [1, 5, 10, 15, ..., 100]
+    targets = [1.0] + list(range(5, 105, 5)) + [200, 500, 2000, 5000]   # [1, 5, 10, ..., 100, 200, 500, 2000, 5000]
     for target_b in targets:
         if max_val >= target_b:
             best = min(ck_list, key=lambda x: abs(x[0] - target_b))
