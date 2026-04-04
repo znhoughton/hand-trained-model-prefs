@@ -498,7 +498,6 @@ def main():
     expected_binoms = set(binoms_df["Alpha"])
 
     done_prefs         = pd.read_csv(OUT_PREFS)           if OUT_PREFS.exists()           else pd.DataFrame()
-    done_prefs_by_prompt = pd.read_csv(OUT_PREFS_BY_PROMPT) if OUT_PREFS_BY_PROMPT.exists() else pd.DataFrame()
     done_ppl   = pd.read_csv(OUT_PPL)   if OUT_PPL.exists()   else pd.DataFrame()
     done_ppl_models = set(done_ppl["model"]) if not done_ppl.empty else set()
 
@@ -602,12 +601,8 @@ def main():
                 raw_staging["model_family"] = cfg["family"]
                 raw_staging["model_params"] = cfg["params"]
                 raw_staging["model_label"]  = cfg["label"]
-                combined_by_prompt = (
-                    pd.concat([done_prefs_by_prompt, raw_staging], ignore_index=True)
-                    if not done_prefs_by_prompt.empty else raw_staging
-                )
-                atomic_csv_write(combined_by_prompt, OUT_PREFS_BY_PROMPT)
-                done_prefs_by_prompt = combined_by_prompt
+                write_header = not OUT_PREFS_BY_PROMPT.exists()
+                raw_staging.to_csv(OUT_PREFS_BY_PROMPT, mode="a", header=write_header, index=False)
                 print(f"  ✅ Per-prompt preferences saved → {OUT_PREFS_BY_PROMPT}")
                 prefs_done_now = True
 
