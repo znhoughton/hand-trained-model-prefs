@@ -253,12 +253,14 @@ for _base_id, _params, _fam, _stage in _OLMO_CK_SOURCES:
     for _phase, _rev in _revs.items():
         _ck_id = f"{_base_id}@{_rev}"
         if _ck_id not in MODEL_CONFIGS:
+            _base_cfg   = MODEL_CONFIGS.get(_base_id, {})
             MODEL_CONFIGS[_ck_id] = {
-                "params":   _params,
-                "family":   f"{_fam} ({_phase})",
-                "label":    f"{_fam} ({_phase})-{_params}",
-                "skip":     False,
-                "revision": _rev,
+                "params":    _params,
+                "family":    f"{_fam} ({_phase})",
+                "label":     f"{_fam} ({_phase})-{_params}",
+                "skip":      False,
+                "revision":  _rev,
+                "multi_gpu": _base_cfg.get("multi_gpu", False),
             }
 
 # ── Sentence-frame prompts ────────────────────────────────────────────────────
