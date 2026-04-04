@@ -235,9 +235,10 @@ _OLMO_CK_SOURCES = [
     ("allenai/OLMo-1B-hf",      "1000M",  "OLMo-1", None),
     ("allenai/OLMo-7B",         "7000M",  "OLMo-1", None),
     # OLMo-2: all variants use "stage1-step{N}-tokens{M}B" for pretraining checkpoints
-    ("allenai/OLMo-2-1124-7B",  "7000M",  "OLMo-2", "stage1"),
+    ("allenai/OLMo-2-1124-7B",   "7000M",  "OLMo-2", "stage1"),
     ("allenai/OLMo-2-1124-13B", "13000M", "OLMo-2", "stage1"),
     ("allenai/OLMo-2-0425-1B",  "1000M",  "OLMo-2", "stage1"),
+    ("allenai/OLMo-2-0325-32B", "32000M", "OLMo-2", "stage1"),
     # OLMo-3: "stage1-step{N}" branches (no token count in name)
     ("allenai/Olmo-3-1025-7B",  "7000M",  "OLMo-3", "stage1"),
     ("allenai/Olmo-3-1125-32B", "32000M", "OLMo-3", "stage1"),
