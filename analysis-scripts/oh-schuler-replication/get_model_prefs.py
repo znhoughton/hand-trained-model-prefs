@@ -22,6 +22,7 @@ Requirements:
 """
 
 import os
+import gc
 import math
 import re
 import datetime
@@ -553,7 +554,7 @@ def main():
                         device_map="auto",
                         low_cpu_mem_usage=True,
                         cache_dir=tmp_cache,
-                        max_memory={0: "75GiB", 1: "75GiB"},
+                        max_memory={0: "70GiB", 1: "70GiB"},
                         trust_remote_code=True,
                         **rev_kwargs,
                     ).eval()
@@ -607,7 +608,7 @@ def main():
                         model = AutoModelForCausalLM.from_pretrained(
                             hf_id, dtype=torch.float16, device_map="auto",
                             low_cpu_mem_usage=True, cache_dir=tmp_cache,
-                            max_memory={0: "75GiB", 1: "75GiB"},
+                            max_memory={0: "70GiB", 1: "70GiB"},
                             trust_remote_code=True,
                             **rev_kwargs,
                         ).eval()
@@ -643,6 +644,7 @@ def main():
         finally:
             if model is not None:
                 del model
+            gc.collect()
             if device == "cuda":
                 torch.cuda.empty_cache()
 
